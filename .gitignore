@@ -1,0 +1,42 @@
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+
+# personal / never-commit (real domains, signing password, infra-specific notes)
+CLAUDE.local.md
+app/keystore.properties
+
+# backend
+node_modules/
+server/config.json
+server/cc-bridge.log
+*.log
+
+# personal screenshots
+feedback/
+server/pins.json
+
+server/test-*.mjs
+server/diag-*.mjs
+server/hidden.json
+server/folders.json
+server/mcpoff.json
+server/modelwin.json
+server/onemblock.json
+server/costs.json
+server/wakeups.json
+server/diary.json
+server/stickies.json
+server/sessmodel.json
+server/apk_version.txt
+server/apk_notes.txt
+
+# signing key — never in the public repo; CI restores from secret SIGNING_KEYSTORE_B64
+*.keystore

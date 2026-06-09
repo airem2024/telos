@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- design's >τ mark, centered and inset into the adaptive safe zone so the
+     launcher mask doesn't clip the τ. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:width="84dp"
+        android:height="84dp"
+        android:gravity="center"
+        android:drawable="@drawable/ic_fg_mark" />
+</layer-list>

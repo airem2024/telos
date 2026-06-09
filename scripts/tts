@@ -1,0 +1,10 @@
+#!/bin/bash
+# tts "文本" [voice]  ->  生成语音, 打印输出文件绝对路径
+# voices: rei-gsv(默认) alloy clone vivian bella bunny stella momo
+text="$1"; voice="${2:-rei-gsv}"
+[ -z "$text" ] && { echo "usage: tts \"text\" [voice]" >&2; exit 1; }
+mkdir -p /root/cc-bridge-workspace/media
+out="/root/cc-bridge-workspace/media/tts_$(date +%s%N).mp3"
+payload=$(python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"voice":sys.argv[1],"input":sys.argv[2],"response_format":"mp3"}))' "$voice" "$text")
+code=$(curl -s -o "$out" -w '%{http_code}' --max-time 120 http://127.0.0.1:8880/v1/audio/speech -H 'Content-Type: application/json' -d "$payload")
+if [ "$code" = "200" ] && [ -s "$out" ]; then echo "$out"; else echo "TTS failed (http $code)" >&2; head -c 300 "$out" >&2; rm -f "$out"; exit 1; fi

@@ -1,0 +1,8 @@
+{
+  "port": 8790,
+  "token": "",
+  "claudePath": "/root/.nvm/versions/node/v24.15.0/bin/claude",
+  "defaultCwd": "/root/cc-bridge-workspace",
+  "permissionMode": "default",
+  "debug": false
+}
