@@ -1,60 +1,79 @@
-# Code · 手机版 Claude Code
+# Telos · 手机上的 Claude Code  `>τ`
 
-一个原生 Android app，UI 仿官方 Claude Code 手机版（聊天气泡 + 工具卡片 + 权限弹窗），
-后端直连你自己 VPS 上跑的 Claude Code。
+把 VPS 上你自己的 [Claude Code](https://claude.com/claude-code) 装进手机。一个原生 Android App，
+UI 仿官方 Claude Code 移动端（聊天气泡 + 工具卡片 + 权限弹窗），通过一个轻量 Node 桥接（cc-bridge）
+直连你自己机器上跑的 `claude`——**用你的订阅额度，不烧 API key**。
 
-## 架构
-```
-Android (WebView 聊天UI)  ──wss(token鉴权)──▶  cc-bridge (Node + Agent SDK)  ──▶  你的 claude
-```
-- **App**：`app/` — WebView 套壳，聊天 UI 在 `assets/web/`，用 JS 的 WebSocket 直连后端。
-- **后端**：`server/` — Node + `@anthropic-ai/claude-agent-sdk` + `ws`，驱动本机的 cc，
-  暴露会话列表 / 历史 / 流式消息 / 工具调用 / `canUseTool` 权限回调。
+<!-- TODO: 放 2~3 张截图（会话列表 / 聊天流式 / 权限弹窗）到这里 -->
+
+## 是什么 / 不是什么
+
+- **是**：你自己 cc 的手机遥控器。真正干活的是你机器上登录好的 `claude`。
+- **不是**：云服务。App 本身不含任何账号、不含任何模型，只是「连到某个 bridge 的地址 + token」。
+  用谁的额度、在哪跑，完全取决于 bridge 在哪。
 
 ## 功能
-- 会话列表（读取 cc 已有会话）、新建会话、resume 续聊
-- 流式逐字回复、工具调用紧凑卡片、思考块
-- 权限弹窗（允许/拒绝）；命令详情只在弹窗里，不进对话气泡
-- 后端地址 / token 在 app 内可配置
 
-## 架构要点：App 是瘦客户端
-App 本身**不含任何 cc、不含任何账号**，它只是连到某个 bridge 的「地址 + token」。
-真正干活的是 bridge 所在那台机器、用那台机器登录的 `claude`。所以「用谁的额度、在哪跑」
-完全取决于 bridge 在哪。token 是唯一钥匙——别人拿到你的 token 才能用你的 cc。
+- 读取并续聊 cc 已有会话、新建会话、编辑/重生成（fork）
+- 流式逐字回复、工具调用紧凑卡片、思考块、权限弹窗（允许/拒绝）
+- 模型切换 + 1M 上下文识别、账号用量 + 本会话花费统计
+- 文件上传 / 下载、图片与音频预览、按路径把附件交给 cc
+- 导入 claude.ai 导出的对话
+- 断线**不**中止正在跑的回合，重连自动续流
+- 定时唤醒 + 每对话日记/便签 + 推送（自建 ntfy）
 
-## 后端部署（任意 Linux + systemd）
-一键：
-```
-git clone <repo> && cd <repo>
-bash server/deploy.sh                # 装依赖、生成 token、装并启动 systemd 服务
-# bash server/deploy.sh --no-svc     # 只装依赖+生成 token，自己手动跑
-```
-手动：
-```
-cd server && npm install
-node server.js                       # 首次运行生成 config.json 与鉴权 token（控制台打印 auth token）
-```
-前置条件：那台机器已装好并登录 `claude`（`claude` 能正常跑），装了 Node 18+。
+## 怎么用（三步）
 
-`server/config.json` 可调：`port`(默认8790) · `token` · `claudePath` · `defaultCwd` · `permissionMode`。
+> 前提：一台 Linux 机器（systemd），已装好并登录 `claude`（`claude` 能正常跑），Node 18+。
 
-bridge 只监听 `127.0.0.1`，必须套隧道暴露成 `wss://` 手机才能连：
+### 1 · 起后端 bridge
+
+```bash
+git clone https://github.com/airem2024/telos && cd telos
+bash server/deploy.sh          # 装依赖、生成鉴权 token、装并启动 systemd 服务
 ```
+
+bridge 只监听 `127.0.0.1`，得套隧道暴露成 `wss://` 手机才连得上：
+
+```bash
 cloudflared tunnel --url http://127.0.0.1:8790   # 拿到一个 https://xxx.trycloudflare.com
 ```
-然后 App → **设置 → 连接**：地址填 `wss://xxx…`，Token 填上面那个，保存并重连。
 
-## 换一台机器的 cc
-会话历史存在各自机器的 `~/.claude` 里，**不会跟着 App 走**。换机 = 在新机器上跑一遍
-`deploy.sh`，拿到新 token + 新隧道地址，App 设置里改「地址 + token」即可（旧会话留在旧机器）。
+### 2 · 装 App
 
-## 别人怎么用（自托管）
-装 APK 没用，除非他也有自己的 bridge。每个人：自己一台机器 → 登录自己的 `claude` →
-`bash server/deploy.sh` → cloudflared 暴露 → App 设置里填自己的地址+token。各连各的，互不串额度。
+- 从本仓库 **Actions → 最近一次 Build APK → Artifacts** 下载编译好的 APK；或本地 `./gradlew assembleDebug`。
+- 默认包是**自包含**的（界面打进 APK），装上直接能用，不依赖任何外部服务。
 
-## App 构建
-推送到 GitHub 由 Actions 自动编译，产物在 run 的 **Artifacts → APK**。
-本地：`./gradlew assembleDebug`，APK 在 `app/build/outputs/apk/debug/`。
+### 3 · 在 App 里连接
+
+设置 → 连接：**地址**填 `wss://xxx…`、**Token** 填 `deploy.sh` 打印的那个 → 保存重连。
+
+## 安全模型（瘦客户端）
+
+token 是唯一钥匙——谁拿到你的 `地址 + token`，谁就能用你的 cc。所以：bridge 别裸奔公网（务必走隧道 + token），
+token 别外传。每个人连各自的 bridge，互不串额度。
+
+## 自己构建 APK
+
+推到你自己 fork 的仓库，GitHub Actions 会自动编译，产物在该 run 的 **Artifacts**。
+**零配置**即可出一个 bundled + debug-key 签名的可用包。两个可选增强：
+
+- **稳定签名**（让升级不出现「签名冲突」）：`keytool` 生成 keystore → base64，设进仓库 Secrets：
+  `SIGNING_KEYSTORE_B64`、`SIGNING_STORE_PASSWORD`、`SIGNING_KEY_PASSWORD`（可选 `SIGNING_KEY_ALIAS`）。
+  不设则用默认 debug key。
+- **前端热更**（高级）：让 bridge 同时托管界面，设仓库 Variable `TELOS_REMOTE_URL=https://你的bridge/`，
+  APK 就从 bridge 加载 UI——以后改前端只需重开 App、不必重新打包。默认（不设）= 用 APK 内置界面。
+
+## 配置
+
+`server/config.json`（首次运行自动生成，**不提交**）：
+`port`(默认 8790) · `token` · `claudePath` · `defaultCwd` · `permissionMode`。
+
+## FAQ
+
+- **会话历史在哪？** 在 bridge 那台机器的 `~/.claude` 里，**不跟 App 走**。换机器 = 在新机器跑一遍
+  `deploy.sh`，App 设置里改「地址 + token」，旧会话留在旧机器。
 
 ## 开源组件
-JetBrains Mono（OFL）、@anthropic-ai/claude-agent-sdk、ws。
+
+JetBrains Mono（OFL） · `@anthropic-ai/claude-agent-sdk` · `ws` · marked
