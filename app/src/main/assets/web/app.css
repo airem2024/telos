@@ -612,8 +612,10 @@ button.model:active { opacity: .6; }
 .du-badge { font-size: 11px; font-weight: 700; letter-spacing: .04em; color: #fff;
   background: var(--accent); border-radius: 6px; padding: 2px 7px; }
 .du-ver { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--text); }
+/* notes scroll inside a capped box — a long changelog must not swallow the drawer
+   (it pushed 日记/文件/用量/设置 below reach, user-reported) */
 .du-notes { font-size: 12.5px; line-height: 1.7; color: var(--muted); white-space: pre-wrap;
-  word-break: break-word; margin-bottom: 11px; }
+  word-break: break-word; margin-bottom: 11px; max-height: 5.2em; overflow-y: auto; }
 .du-dl { width: 100%; border: none; border-radius: 11px; padding: 11px; font-size: 14px; font-weight: 600;
   background: var(--accent); color: #fff; }
 .du-dl:active { background: var(--accent-press); }

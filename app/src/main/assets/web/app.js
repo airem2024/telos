@@ -1626,8 +1626,10 @@ function renderSetSub() {
   });
   body.appendChild(card);
 }
-// is the published version newer than what's installed?
-function updateHasNew() { return !!(state.appUpdate && state.appUpdate.version && state.appUpdate.version !== APP_VERSION); }
+// is the published version newer than what's installed? Numeric compare — plain !== prompted an
+// "update" for ANY mismatch, including a downgrade to an old/foreign version line.
+function verNum(v) { const p = String(v || '').split('.').map((n) => parseInt(n, 10) || 0); return (p[0] || 0) * 1e6 + (p[1] || 0) * 1e3 + (p[2] || 0); }
+function updateHasNew() { return !!(state.appUpdate && state.appUpdate.version && verNum(state.appUpdate.version) > verNum(APP_VERSION)); }
 // backend push: bridge sends the published version + changelog on connect; gated by the toggle
 function onAppUpdate(m) {
   state.appUpdate = { version: m.version, url: m.url, notes: m.notes || '' };
