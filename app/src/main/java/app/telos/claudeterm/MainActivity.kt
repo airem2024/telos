@@ -85,6 +85,27 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun appVersion(): String = BuildConfig.VERSION_NAME
 
+        // download via the system DownloadManager. Bundled mode hands every <a> navigation to the
+        // external browser (shouldOverrideUrlLoading), so the WebView's DownloadListener never
+        // fires — JS calls this directly instead.
+        @JavascriptInterface
+        fun download(url: String, name: String) {
+            runOnUiThread {
+                try {
+                    val fn = if (name.isNotBlank()) name else URLUtil.guessFileName(url, null, null)
+                    val req = DownloadManager.Request(Uri.parse(url))
+                        .setTitle(fn)
+                        .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                        .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fn)
+                    if (fn.endsWith(".apk")) req.setMimeType("application/vnd.android.package-archive")
+                    (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
+                    Toast.makeText(this@MainActivity, "下载中：$fn", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "下载失败：${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
         // open a URL in the system browser (chat links must not navigate the in-app WebView away)
         @JavascriptInterface
         fun openUrl(url: String) {

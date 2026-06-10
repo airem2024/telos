@@ -1002,8 +1002,14 @@ function fmAttach(path) {
   state.pendingFiles.push({ name, isImage: img, status: 'ready', path, url: img ? mediaUrlC(path) : '' });
   renderAttachStrip(); updateSend(); buzz(12); toast('已附加 ' + name);
 }
+// 系统下载管理器优先——bundled 模式下 <a> 导航会被壳丢给外部浏览器；纯浏览器环境才走 <a>
+function nativeDownload(url, name) {
+  try { if (window.Android && Android.download) { Android.download(url, name || ''); return true; } } catch (e) {}
+  return false;
+}
 function fmDownload(path) {
   const url = state.origin + '/download?t=' + encodeURIComponent(LS.token) + '&p=' + encodeURIComponent(path);
+  if (nativeDownload(url, path.split('/').pop())) return;
   const a = document.createElement('a'); a.href = url; a.download = path.split('/').pop(); document.body.appendChild(a); a.click(); a.remove();
 }
 // tap = action(), long-press = manage (rename/delete/download)
@@ -1662,6 +1668,7 @@ function renderUpdatePanel() {
 function downloadUpdate() {
   const v = state.appUpdate && state.appUpdate.version; if (!v) return;
   const url = state.origin + '/telos-' + v + '.apk'; // versioned path beats any download cache
+  if (nativeDownload(url, 'telos-' + v + '.apk')) { toast('下载 ' + v + ' 中，完成后点通知安装'); return; }
   const a = document.createElement('a'); a.href = url; a.rel = 'noopener';
   document.body.appendChild(a); a.click(); a.remove();
   toast('开始下载 ' + v + '，完成后点通知安装');
