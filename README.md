@@ -41,8 +41,9 @@ cloudflared tunnel --url http://127.0.0.1:8790   # 拿到一个 https://xxx.tryc
 
 ### 2 · 装 App
 
-- 从本仓库 **Actions → 最近一次 Build APK → Artifacts** 下载编译好的 APK；或本地 `./gradlew assembleDebug`。
-- 默认包是**自包含**的（界面打进 APK），装上直接能用，不依赖任何外部服务。
+去 **[Releases](https://github.com/airem2024/telos/releases/latest)** 下载最新的 `telos-*.apk`，
+手机上直接安装（需允许「未知来源」）。包是**自包含**的——界面已内置，装上即可用，不依赖任何外部服务。
+（也可以自己编译，见下方「自己构建 APK」。）
 
 ### 3 · 在 App 里连接
 
