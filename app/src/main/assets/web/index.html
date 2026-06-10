@@ -110,10 +110,10 @@
   <div id="settings" class="screen">
     <div class="topbar">
       <button class="iconbtn" id="setBack">‹</button>
+      <div class="h2" style="font-family:var(--serif);font-size:22px;font-weight:700;">设置</div>
       <div class="spacer"></div>
     </div>
-    <div class="pad">
-      <div class="h1">设置</div>
+    <div class="pad" style="padding-top:6px;">
       <div class="setmenu">
         <button class="setrow" id="setConnRow">
           <span class="sr-ic"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l3 8 4-16 3 8h4"/></svg></span>
@@ -151,13 +151,13 @@
       <div class="h2" id="setSubTitle" style="font-family:var(--serif);font-size:22px;font-weight:700;">设置</div>
       <div class="spacer"></div>
     </div>
-    <div class="pad" id="setSubBody"></div>
+    <div class="pad" id="setSubBody" style="padding-top:6px;"></div>
   </div>
 
   <!-- permission sheet (simple) -->
   <div class="scrim" id="permScrim">
     <div class="sheet">
-      <div class="sheethdr nodrag"><button class="sheetx" data-deny>✕</button><div class="ptitle" id="permTitle">需要授权</div></div>
+      <div class="sheethdr nodrag"><div class="ptitle" id="permTitle">需要授权</div></div>
       <div class="sheetbody">
         <div class="pdesc" id="permDesc"></div>
         <div class="pdetail" id="permDetail"></div>
@@ -173,7 +173,7 @@
   <!-- model / effort sheet -->
   <div class="scrim" id="modelScrim">
     <div class="sheet drag">
-      <div class="sheethdr"><div class="grip"></div><button class="sheetx" data-x>✕</button><div class="ptitle">模型</div></div>
+      <div class="sheethdr"><div class="grip"></div><div class="ptitle">模型</div></div>
       <div class="sheetbody">
         <div class="optlist" id="modelOpts"></div>
         <div class="ptitle sub2">思考度</div>
@@ -314,7 +314,7 @@
   <!-- settings › 连接 -->
   <div class="scrim" id="connScrim">
     <div class="sheet">
-      <div class="sheethdr nodrag"><button class="sheetx" data-x>✕</button><div class="ptitle">连接</div></div>
+      <div class="sheethdr nodrag"><div class="ptitle">连接</div></div>
       <div class="sheetbody">
         <div class="sub" id="conn_status" style="margin-bottom:14px;"></div>
         <div class="field">

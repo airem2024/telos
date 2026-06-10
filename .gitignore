@@ -35,6 +35,7 @@ server/wakeups.json
 server/diary.json
 server/stickies.json
 server/sessmodel.json
+server/activedays.json
 server/apk_version.txt
 server/apk_notes.txt
 

@@ -226,12 +226,20 @@ function diaryAdd(sid, date, author, text, images, extra) {
   saveDiary();
   return day;
 }
-// drop a deleted session's wake/diary/sticky state so an orphan schedule can't keep firing
+// drop a deleted session's wake/diary/sticky/model/cost state so an orphan schedule can't keep
+// firing and the state files don't grow forever
 function forgetSession(sid) {
   if (!sid) return;
   if (wakeups[sid]) { delete wakeups[sid]; saveWakeups(); }
   if (diary[sid]) { delete diary[sid]; saveDiary(); }
   if (stickies[sid]) { delete stickies[sid]; saveStickies(); }
+  if (sessModel[sid]) { delete sessModel[sid]; saveSessModel(); }
+  if (costs[sid]) { // fold into the archive bucket first so 累计花费 never goes down
+    const a = (costs._archived = costs._archived || { cost: 0, out: 0, turns: 0, sessions: 0 });
+    const c = costs[sid];
+    a.cost += c.cost || 0; a.out += c.out || 0; a.turns += c.turns || 0; a.sessions += 1;
+    delete costs[sid]; saveCosts();
+  }
 }
 // public (client-facing) snapshot of a session's wake config
 function pubWake(sid) {
@@ -446,14 +454,41 @@ async function fetchUsage() {
     return await r.json();
   } catch (e) { return null; }
 }
-// distinct calendar days (Asia/Tokyo) with any session activity
+// distinct calendar days (Asia/Tokyo) with any activity — cumulative, never shrinks. Counting file
+// mtimes alone went BACKWARDS over time (continuing an old session moves its file to today; cleanup
+// deletes files), so days are persisted to activedays.json and only ever added: backfilled once from
+// every message timestamp in every session jsonl, then kept fresh by turn_end + the mtime union.
+const ACTIVEDAYS_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'activedays.json');
+let activeDaysSet = new Set(), activeDaysBackfilled = false;
+try { const d = JSON.parse(readFileSync(ACTIVEDAYS_PATH, 'utf8')); for (const x of d.days || []) activeDaysSet.add(x); activeDaysBackfilled = !!d.backfilled; } catch (e) {}
+function saveActiveDays() { try { writeFileSync(ACTIVEDAYS_PATH, JSON.stringify({ days: [...activeDaysSet].sort(), backfilled: activeDaysBackfilled })); } catch (e) {} }
+const dayOf = (t) => new Date(t == null ? Date.now() : t).toLocaleDateString('en-CA', { timeZone: 'Asia/Tokyo' });
+function touchActiveDay(t) { const d = dayOf(t); if (!activeDaysSet.has(d)) { activeDaysSet.add(d); saveActiveDays(); } }
+async function backfillActiveDays() {
+  const root = nodePath.join(homedir(), '.claude', 'projects');
+  let dirs = []; try { dirs = await fsp.readdir(root); } catch (e) { return; }
+  for (const dir of dirs) {
+    let files = []; try { files = await fsp.readdir(nodePath.join(root, dir)); } catch (e) { continue; }
+    for (const f of files) {
+      if (!f.endsWith('.jsonl')) continue;
+      try {
+        const txt = await fsp.readFile(nodePath.join(root, dir, f), 'utf8');
+        for (const m of txt.matchAll(/"timestamp"\s*:\s*"([^"]+)"/g)) { const t = Date.parse(m[1]); if (t) activeDaysSet.add(dayOf(t)); }
+      } catch (e) {}
+    }
+  }
+  activeDaysBackfilled = true; saveActiveDays();
+  console.log('[cc-bridge] activeDays backfilled:', activeDaysSet.size, 'days');
+}
+if (!activeDaysBackfilled) backfillActiveDays().catch(() => {});
 async function activeDays() {
-  try {
+  try { // union in current file mtimes — also catches activity that didn't go through the bridge (terminal cc)
     const ss = await listSessions({ limit: 5000 });
-    const days = new Set();
-    for (const s of ss) if (s.lastModified) days.add(new Date(s.lastModified).toLocaleDateString('en-CA', { timeZone: 'Asia/Tokyo' }));
-    return days.size;
-  } catch (e) { return 0; }
+    let grew = false;
+    for (const s of ss) if (s.lastModified) { const d = dayOf(new Date(s.lastModified)); if (!activeDaysSet.has(d)) { activeDaysSet.add(d); grew = true; } }
+    if (grew) saveActiveDays();
+  } catch (e) {}
+  return activeDaysSet.size;
 }
 function currentModel() {
   try { return JSON.parse(readFileSync(nodePath.join(homedir(), '.claude.json'), 'utf8')).model || ''; }
@@ -726,7 +761,9 @@ const httpServer = createServer(async (req, res) => {
     const full = nodePath.normalize(nodePath.join(WEB_DIR, p));
     if (!full.startsWith(WEB_DIR)) { res.writeHead(403); res.end('forbidden'); return; }
     const data = await fsp.readFile(full);
-    res.writeHead(200, { 'Content-Type': MIME[nodePath.extname(full)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    // no-store, not no-cache: Cloudflare rewrites no-cache on static assets into max-age=14400,
+    // so phones kept a 4h-stale UI after frontend hot-updates (user saw old bugs as "not fixed")
+    res.writeHead(200, { 'Content-Type': MIME[nodePath.extname(full)] || 'application/octet-stream', 'Cache-Control': 'no-store, must-revalidate' });
     res.end(data);
   } catch (e) {
     res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('not found');
@@ -978,10 +1015,17 @@ async function handle(ws, conn, msg) {
       break;
     }
     case 'usage_report': {
-      // 5h/weekly limits (account) + active days + this session's running cost — all in one shot
+      // 5h/weekly limits (account) + active days + cumulative/today totals + this session's running cost
       const [usage, days] = await Promise.all([fetchUsage(), activeDays()]);
       const sess = msg.sessionId ? (costs[msg.sessionId] || null) : null;
-      send(ws, { type: 'usage', usage, activeDays: days, session: sess, sessionId: msg.sessionId || '' });
+      // account-wide totals = live per-session entries + the archive bucket of deleted sessions
+      // (keys starting with '_' are aggregates, not sessions)
+      const totals = { cost: 0, out: 0, turns: 0, sessions: 0 };
+      const acc = (c, n) => { totals.cost += c.cost || 0; totals.out += c.out || 0; totals.turns += c.turns || 0; totals.sessions += n; };
+      for (const k in costs) { if (!k.startsWith('_')) acc(costs[k] || {}, 1); }
+      if (costs._archived) acc(costs._archived, costs._archived.sessions || 0);
+      const today = (costs._days || {})[dayOf()] || 0;
+      send(ws, { type: 'usage', usage, activeDays: days, session: sess, totals, today, sessionId: msg.sessionId || '' });
       break;
     }
     case 'move_folder': {
@@ -1490,7 +1534,10 @@ async function runTurn(turn, msg) {
       c.turns += 1;
       c.at = Date.now();
       costs[curSession] = c;
+      const dd = (costs._days = costs._days || {}); // per-day spend for the 今日花费 line
+      dd[dayOf()] = (dd[dayOf()] || 0) + (m.total_cost_usd || 0);
       saveCosts();
+      touchActiveDay();
     }
   };
 

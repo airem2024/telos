@@ -67,22 +67,33 @@ const EFFORTS = [
 const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryWrite'];
 function show(name) {
   SCREENS.forEach((s) => $(s).classList.toggle('active', s === name));
-  try { window.Android && Android.setAtRoot(name === 'list' || name === 'setup'); } catch (e) {}
   state.screen = name;
+  syncAtRoot();
   sendPresence(); // tell bridge which conversation I'm on (for wake-push 不打扰)
 }
-// tell native whether hardware-back should exit (only the list/setup roots) — based on the current
-// screen. Call this after closing a transient overlay (e.g. the lightbox) that had forced not-at-root.
-function syncAtRoot() { try { window.Android && Android.setAtRoot(state.screen === 'list' || state.screen === 'setup'); } catch (e) {} }
+// anything floating above the current screen that hardware-back should close first
+function overlayUp() {
+  return anyOverlay() || drawerOpen() || searchOpen() || !!state.selectMode || !!state.plusOpen ||
+    $('usageFull').classList.contains('show') || $('composeOver').classList.contains('show') ||
+    !!document.querySelector('.lightbox') || (state.discActive && !state.discCollapsed);
+}
+// tell native whether hardware-back should exit the app. Only a TRUE root counts: list/setup screen
+// with nothing floating above it — a stale "at root" while e.g. the usage page / drawer / a long-press
+// menu is open makes the back key quit to the launcher instead of closing the overlay (user-reported).
+// Synced on every screen change + key overlay opens, with a 300ms interval as the catch-all so any
+// close path (animated, swiped, future additions) converges without per-call-site bookkeeping.
+function syncAtRoot() { try { window.Android && Android.setAtRoot((state.screen === 'list' || state.screen === 'setup') && !overlayUp()); } catch (e) {} }
+setInterval(syncAtRoot, 300);
 const SCRIMS = ['permScrim', 'modelScrim', 'promptScrim', 'toolsScrim', 'modeScrim', 'sessScrim', 'folderScrim', 'claudeScrim', 'folderActScrim', 'pathActScrim', 'mcpScrim', 'mcpCfgScrim', 'connScrim', 'wakeScrim', 'stickyScrim', 'compactScrim'];
 const DRAG_SCRIMS = ['modelScrim', 'toolsScrim', 'modeScrim', 'claudeScrim', 'mcpCfgScrim', 'compactScrim'];
 function anyOverlay() { return SCRIMS.some((s) => $(s).classList.contains('show')) || $('menuPop').classList.contains('show'); }
 function openScrim(id) {
   const s = $(id); s._openedAt = Date.now(); s.classList.add('show'); if (s._open) s._open();
+  syncAtRoot();
   // briefly block taps so a quick release after a long-press doesn't fall through onto an item
   const sheet = s.querySelector('.sheet'); if (sheet) { sheet.style.pointerEvents = 'none'; clearTimeout(s._peT); s._peT = setTimeout(() => { sheet.style.pointerEvents = ''; }, 350); }
 }
-function closeScrim(id) { const s = $(id); if (s._close) s._close(); else s.classList.remove('show'); }
+function closeScrim(id) { const s = $(id); if (s._close) s._close(); else s.classList.remove('show'); syncAtRoot(); }
 function closeOverlays() { SCRIMS.forEach(closeScrim); closeMenu(); }
 
 /* draggable two-stage bottom sheet (normal <-> full), draggable from anywhere */
@@ -242,6 +253,8 @@ function defaultWsUrl() {
 function connect() {
   const url = LS.url || defaultWsUrl();
   state.origin = url.replace(/^ws/, 'http'); // wss://host -> https://host (for /media)
+  // a pending auto-reconnect would fire on top of the socket we're about to open and churn it once
+  clearTimeout(state.reconnectTimer);
   // detach the old socket's handlers BEFORE closing it — otherwise its onclose fires async and
   // schedules another connect() 2500ms later, which then closes THIS socket… → permanent 2.5s churn
   if (state.ws) { try { const old = state.ws; old.onopen = old.onmessage = old.onerror = old.onclose = null; old.close(); } catch (e) {} }
@@ -332,6 +345,7 @@ function handle(m) {
       if (state.pendingSticky) { wsend({ type: 'sticky_get', sessionId: state.pendingSticky }); state.pendingSticky = null; }
       // resume an in-flight turn after a reconnect
       if (state.activeTurn && !state.activeTurn.done) { startStatus(); wsend({ type: 'attach', turnId: state.activeTurn.id, after: state.activeTurn.lastI || 0 }); }
+      if ($('usageFull').classList.contains('show')) reqUsage(); // 用量页开着断线重连 → 自动刷新
       break;
     case 'pong': break; // liveness reply — lastRx already bumped in onmessage
     case 'attach_done':
@@ -494,7 +508,7 @@ function bindCard(card, s) {
   card.addEventListener('click', () => { if (state.selectMode) { toggleSelect(s.id, card); return; } if (longPressed) { longPressed = false; return; } openSession(s); });
 }
 function toggleSelect(id, card) { if (state.selected.has(id)) state.selected.delete(id); else state.selected.add(id); if (card) card.classList.toggle('selected', state.selected.has(id)); updateSelectBar(); }
-function enterSelect(s) { state.selectMode = true; state.selected = new Set(s ? [s.id] : []); $('selectBar').classList.add('show'); $('newBtn').style.display = 'none'; renderSessions(); updateSelectBar(); }
+function enterSelect(s) { state.selectMode = true; state.selected = new Set(s ? [s.id] : []); $('selectBar').classList.add('show'); $('newBtn').style.display = 'none'; renderSessions(); updateSelectBar(); syncAtRoot(); }
 function exitSelect() { state.selectMode = false; state.selected.clear(); $('selectBar').classList.remove('show'); $('newBtn').style.display = ''; renderSessions(); }
 function updateSelectBar() { const n = state.selected.size; $('selCount').textContent = n; $('selDelete').disabled = !n; $('selFolder').disabled = !n; }
 function selectAllVisible() {
@@ -658,9 +672,7 @@ function openLightbox(src) {
   const lb = el('div', 'lightbox'); const im = el('img'); im.src = src; lb.appendChild(im);
   lb.addEventListener('click', closeLightbox);
   document.body.appendChild(lb);
-  // force not-at-root so hardware back is routed to onAndroidBack (which closes the image)
-  // instead of native super.onBackPressed() quitting the app outright.
-  try { window.Android && Android.setAtRoot(false); } catch (e) {}
+  syncAtRoot(); // not-at-root now, so hardware back closes the image instead of quitting the app
 }
 
 /* tool group: one collapsible row per turn, opens a sheet */
@@ -1482,6 +1494,7 @@ function openDrawer() {
   clearTimeout(dr._hideT);
   db.classList.add('show'); dr.classList.add('show');
   requestAnimationFrame(() => { db.classList.add('in'); });
+  syncAtRoot();
 }
 function closeDrawer() {
   const db = $('drawerBack'), dr = $('drawer');
@@ -1682,6 +1695,7 @@ function openSearch() {
   ov.style.pointerEvents = 'auto';
   requestAnimationFrame(() => setSearchProgress(1, true));
   state.searchActive = true;
+  syncAtRoot();
   $('usageStrip').classList.remove('open'); // collapse the session detail each open
   renderUsageStrip(); reqUsage(); // refresh the usage strip every time search opens
   setTimeout(() => $('searchInput').focus(), 240);
@@ -1878,20 +1892,25 @@ function renderUsageStrip() {
   if (!u || !u.usage) { strip.style.display = 'none'; return; }
   strip.style.display = '';
   const pct = (x) => (x && x.utilization != null) ? Math.round(x.utilization) + '%' : '—';
-  const f = u.usage.five_hour, w = u.usage.seven_day, s = u.session;
+  const f = u.usage.five_hour, w = u.usage.seven_day, t = u.totals;
+  // session scope only while actually inside a conversation — on the list screen currentSession is
+  // just "the last chat I had open", showing its cost as 本会话 there reads like a duplicated number
+  const s = state.screen === 'chat' ? u.session : null;
   $('usLine').innerHTML = `<span>5h <b>${pct(f)}</b></span><span>周 <b>${pct(w)}</b></span>` +
-    (s ? `<span>本会话 <b>$${(s.cost || 0).toFixed(2)}</b></span>` : '') +
+    (s ? `<span>本会话 <b>$${(s.cost || 0).toFixed(2)}</b></span>`
+       : (t ? `<span>累计 <b>$${(t.cost || 0).toFixed(2)}</b></span>` : '')) +
     `<span class="us-caret">▾</span>`;
-  $('usDetail').innerHTML = s
+  $('usDetail').innerHTML = (s
     ? `<div><span class="lbl">本会话花费</span>　<b>$${(s.cost || 0).toFixed(2)}</b></div>` +
-      `<div><span class="lbl">输出 token</span>　${fmtTok(s.out || 0)}　·　${s.turns || 0} 轮</div>` +
-      `<div><span class="lbl">活跃天数</span>　${u.activeDays || 0} 天</div>`
-    : `<div class="lbl">新会话 · 暂无花费记录</div><div><span class="lbl">活跃天数</span>　${u.activeDays || 0} 天</div>`;
+      `<div><span class="lbl">输出 token</span>　${fmtTok(s.out || 0)}　·　${s.turns || 0} 轮</div>`
+    : (state.screen === 'chat' ? `<div class="lbl">新会话 · 暂无花费记录</div>` : '') +
+      `<div><span class="lbl">累计花费</span>　<b>$${((t && t.cost) || 0).toFixed(2)}</b>　·　${(t && t.sessions) || 0} 会话</div>`) +
+    `<div><span class="lbl">活跃天数</span>　${u.activeDays || 0} 天</div>`;
 }
 function renderUsageFull() {
   const term = $('usageTerm'); if (!term) return;
   const u = state.usage;
-  if (!u) { term.textContent = ' 读取中…'; return; }
+  if (!u) { term.textContent = state.connected && state.authed ? ' 读取中…' : ' 未连接 · 重连后自动刷新'; return; }
   if (!u.usage) { term.textContent = ' 用量读取失败\n 请检查与世界的连接 / 登录态'; return; }
   const U = u.usage, L = [];
   L.push(' claude · 用量');
@@ -1904,16 +1923,19 @@ function renderUsageFull() {
   row(U.five_hour, '5 小时');
   row(U.seven_day, '本周');
   if (U.seven_day_opus) row(U.seven_day_opus, 'Opus 周');
-  if (U.seven_day_sonnet && U.seven_day_sonnet.utilization) row(U.seven_day_sonnet, 'Sonnet 周');
+  if (U.seven_day_sonnet && U.seven_day_sonnet.utilization != null) row(U.seven_day_sonnet, 'Sonnet 周');
   L.push(' ' + '─'.repeat(22));
   const xu = U.extra_usage;
   if (xu && xu.is_enabled) L.push(' 额度信用  $' + (xu.used_credits || 0) + ' / $' + (xu.monthly_limit || 0));
-  if (u.session) L.push(' 本会话    $' + (u.session.cost || 0).toFixed(2) + ' · ' + (u.session.turns || 0) + ' 轮');
+  // account scope only — the per-session number lives in the in-conversation strip
+  const t = u.totals;
+  if (t) L.push(' 累计花费  $' + (t.cost || 0).toFixed(2) + ' · ' + (t.sessions || 0) + ' 会话 · ' + (t.turns || 0) + ' 轮');
+  if (u.today != null) L.push(' 今日花费  $' + (u.today || 0).toFixed(2));
   L.push(' 活跃天数  ' + (u.activeDays || 0) + ' 天');
   term.textContent = L.join('\n');
 }
-function openUsageFull() { $('usageFull').classList.add('show'); renderUsageFull(); reqUsage(); }
-function closeUsageFull() { $('usageFull').classList.remove('show'); }
+function openUsageFull() { $('usageFull').classList.add('show'); syncAtRoot(); renderUsageFull(); reqUsage(); }
+function closeUsageFull() { $('usageFull').classList.remove('show'); syncAtRoot(); }
 
 /* ============ composer ============ */
 // keep the conversation clear of the input dock: the dock is bottom-anchored and grows upward
