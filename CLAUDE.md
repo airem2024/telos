@@ -54,7 +54,7 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
   （新 URL 绕开手机浏览器对 `/app.apk` 的下载缓存——这是真踩过的坑）。
 - **App 内更新提示**：bridge auth 后推 `{type:'app_update', version, url, notes}`（也在 `/version` 带 notes）。
   客户端比对 `APP_VERSION`(=`Android.appVersion()`)，更新时在抽屉顶部渲染 `#drawerUpdate` 卡片（`--surface-2`
-  深底纹），点「下载更新」→ 拼带版本号的 `/telos-<ver>.apk`、`<a>`点击触发原生 DownloadListener。
+  深底纹），点「下载更新」→ 拼带版本号的 `/telos-<ver>.apk`、`nativeDownload()` 调原生 `Android.download()` 直接进系统下载管理器（bundled 模式下 `<a>` 导航会被壳丢给外部浏览器、DownloadListener 接不到——踩过）；纯浏览器环境退回 `<a>`。
   开关 `updateNotify`（设置→更新「接受后端推送的更新」）gate 卡片与推送提示；「立即检查更新」走 HTTP `checkUpdate(true)`
   绕过开关。**卡片只在「已装 < 已发布」时出现**——发了新版本号才看得到。
 
@@ -266,7 +266,7 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
 ## 文件相关
 
 - **上传** `POST /upload?dir=&name=&t=`（流式落盘，自动避免重名，homedir 内）；
-  **下载** `GET /download?p=&t=`（带 Content-Length；原生 DownloadListener→系统下载管理器显示进度）；
+  **下载** `GET /download?p=&t=`（带 Content-Length；`nativeDownload()`→`Android.download()`→系统下载管理器显示进度，浏览器环境退回 `<a>`）；
   **媒体/缩略图** `/media?p=&t=`。前端上传用 XHR 显示进度+速度。
 - 文件管理是整页 `#files`（不是弹窗）；输入框 + 面板里也能进（attach 模式）。附件以**真实设备路径**
   引用给 cc（`msg.refPaths` → prompt 里 `[附带文件：...]`），图片 cc 用 Read 看。
