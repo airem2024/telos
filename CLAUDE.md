@@ -187,7 +187,9 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
   (之前是写死 `DAWN_HOUR=4` 且和定时唤醒混在一起，用户嫌不像独立功能 → 拆出来、时间可调。)
 - **媒体在历史里可见**(重开不丢)：`historyItems` 的 `pushText`——assistant 文本走 `rewriteMedia`(图内联)+音频出
   media 项；user 文本把 `[附带文件：路径]` 行删掉、图/音频抽成 media 项(因为 `addUser` 用 textContent、不渲染 md)。
-  前端 `renderHistory` 认 `kind:'media'`→`addMedia`。聊天附件本就是**按路径**给 cc(`refPaths`→`[附带文件：路径]`，
+  前端 `renderHistory` **按 role 分流**：用户的图片项回填进最近的用户气泡当缩略图
+  （`userB`/`.bubimgs`，点开灯箱），其余才走 `addMedia`（cc 侧大图/播放器）——曾经全走 addMedia，
+  重开后用户自己的图变成 cc 侧大图（用户报过）。聊天附件本就是**按路径**给 cc(`refPaths`→`[附带文件：路径]`，
   Read 按需看)、**不是 base64 内联**，所以图片不会永久塞爆上下文。
 - **踩坑**：表单**绝不要用 `<input type=datetime-local>` / `<select>`**——安卓 WebView 会弹**系统原生选择器**(丑且
   违和)。唤醒配置全自定义控件：`.seg` 分段(只一次/每天/每隔) + `.wkscroll` 时/分横滑 chip(分钟 0–59) + 日期 chip

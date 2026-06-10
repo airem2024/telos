@@ -410,7 +410,7 @@ async function fireWake(sid, kind) {
   }
   if (said) {
     let title = '';
-    try { const info = await getSessionInfo(sid); title = info?.customTitle || info?.summary || info?.firstPrompt || ''; } catch (e) {}
+    try { const info = await getSessionInfo(sid); title = cleanTitle(info?.customTitle || info?.summary || info?.firstPrompt); } catch (e) {}
     const wm = { sessionId: sid, title, text: res.text.slice(0, 800) };
     broadcast({ type: 'wake_message', ...wm }); // 在线客户端实时收到
     queueWake(wm);                              // 没人在线就留着，下次连上补发
@@ -617,6 +617,9 @@ async function cleanupStale({ days = 1, maxRounds = 1 } = {}) {
   if (removed) { saveHidden(); savePins(); saveFolders(); }
   return removed;
 }
+
+// 标题回退到首条消息时，别把 [附带文件：路径] 行漏出来
+function cleanTitle(t) { return String(t || '').replace(/\n*\[附带(?:文件|图片)：[^\]]*\]/g, '').replace(/\s+/g, ' ').trim(); }
 
 /** Turn a stored SessionMessage[] into chat items the app can render. */
 function historyItems(messages) {
@@ -915,7 +918,7 @@ async function handle(ws, conn, msg) {
       const sessions = (await listSessions(opts)).filter((s) => !hidden.has(s.sessionId));
       const mapped = sessions.map((s) => ({
         id: s.sessionId,
-        title: s.customTitle || s.summary || s.firstPrompt || '(无标题)',
+        title: cleanTitle(s.customTitle || s.summary || s.firstPrompt) || '(无标题)',
         cwd: s.cwd || '',
         gitBranch: s.gitBranch || '',
         updatedAt: s.lastModified || 0,
@@ -942,7 +945,7 @@ async function handle(ws, conn, msg) {
         type: 'history',
         sessionId: msg.sessionId,
         cwd: info?.cwd || '',
-        title: info?.customTitle || info?.summary || '',
+        title: cleanTitle(info?.customTitle || info?.summary),
         items: historyItems(messages)
       });
       break;
@@ -1342,7 +1345,7 @@ async function handle(ws, conn, msg) {
     case 'diary_overview': {
       const ids = new Set([...Object.keys(diary), ...Object.keys(stickies)]);
       const titles = {};
-      try { const ss = await listSessions({ limit: 2000 }); for (const s of ss) titles[s.sessionId] = s.customTitle || s.summary || s.firstPrompt || ''; } catch (e) {}
+      try { const ss = await listSessions({ limit: 2000 }); for (const s of ss) titles[s.sessionId] = cleanTitle(s.customTitle || s.summary || s.firstPrompt); } catch (e) {}
       const cards = [];
       for (const sid of ids) {
         const book = diary[sid] || {}; const days = Object.keys(book);

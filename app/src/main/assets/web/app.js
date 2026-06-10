@@ -586,13 +586,18 @@ function addUser(text, uuid, images) {
   const m = el('div', 'msg user'); const b = el('div', 'bubble');
   if (images && images.length) {
     const ig = el('div', 'bubimgs');
-    images.forEach((p) => { const im = el('img'); im.src = p.url || ('data:' + p.media_type + ';base64,' + p.data); ig.appendChild(im); });
+    images.forEach((p) => {
+      const im = el('img'); im.src = fullUrl(p.url) || ('data:' + p.media_type + ';base64,' + p.data);
+      im.addEventListener('click', (e) => { e.stopPropagation(); openLightbox(im.src); });
+      ig.appendChild(im);
+    });
     b.appendChild(ig);
   }
   if (text) { const tx = el('div'); tx.textContent = text; b.appendChild(tx); }
   m.appendChild(b);
   if (uuid) { b.classList.add('editable'); b.addEventListener('click', () => editMessage(uuid, text)); }
   $('thread').appendChild(m); scrollThread();
+  return b;
 }
 function editMessage(uuid, current) {
   if (!state.currentSession) return;
@@ -819,12 +824,23 @@ function goList() { if (P('interruptOnLeave') && state.busy) wsend({ type: 'inte
 function renderHistory(m) {
   clearThread(); removeSuggestions();
   if (m.cwd) { state.cwd = m.cwd; } if (m.title) state.curTitle = m.title; updateHeader();
-  let group = null;
+  let group = null, userB = null; // userB: 最近的用户气泡——它的附图回填成气泡内缩略图，而不是 cc 侧大图
   (m.items || []).forEach((it) => {
-    if (it.kind === 'text') { group = null; if (it.role === 'user') addUser(it.text, it.uuid); else addAssistantText(it.text); }
-    else if (it.kind === 'media') { group = null; addMedia(it.mediaKind, it.url); }
-    else if (it.kind === 'thinking') { group = null; addThinking(it.text); }
+    if (it.kind === 'text') { group = null; if (it.role === 'user') userB = addUser(it.text, it.uuid); else { userB = null; addAssistantText(it.text); } }
+    else if (it.kind === 'media') {
+      group = null;
+      if (it.role === 'user' && it.mediaKind === 'image') {
+        if (!userB) userB = addUser('', null, []);
+        let ig = userB.querySelector('.bubimgs');
+        if (!ig) { ig = el('div', 'bubimgs'); userB.insertBefore(ig, userB.firstChild); }
+        const im = el('img'); im.src = fullUrl(it.url);
+        im.addEventListener('click', (e) => { e.stopPropagation(); openLightbox(im.src); });
+        ig.appendChild(im);
+      } else { userB = null; addMedia(it.mediaKind, it.url); }
+    }
+    else if (it.kind === 'thinking') { group = null; userB = null; addThinking(it.text); }
     else if (it.kind === 'tool_use') {
+      userB = null;
       if (!group) {
         const g = { tools: [], row: el('div', 'toolrow') };
         g.row.innerHTML = '<span class="tr-text"></span><span class="chev3">›</span>';
