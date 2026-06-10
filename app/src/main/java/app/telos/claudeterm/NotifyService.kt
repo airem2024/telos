@@ -1,5 +1,6 @@
 package app.telos.claudeterm
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,10 +9,13 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -35,6 +39,8 @@ class NotifyService : Service() {
     @Volatile private var stopped = false
     private val handler = Handler(Looper.getMainLooper())
     private var nextId = 2000
+    private var fails = 0
+    private var netCb: ConnectivityManager.NetworkCallback? = null
 
     companion object {
         const val CH_ONGOING = "telos_bg"
@@ -50,10 +56,33 @@ class NotifyService : Service() {
         super.onCreate()
         createChannels()
         startFg()
+        // reconnect the moment the network comes back (after Doze cut it / wifi↔流量切换) —
+        // the 5s retry timer is frozen while the device sleeps, this callback isn't
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            netCb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) { handler.post { if (!stopped) { fails = 0; connect() } } }
+            }
+            cm.registerDefaultNetworkCallback(netCb!!)
+        } catch (e: Exception) {}
         connect()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
+    // some ROMs kill the process when the app's task is swiped away — schedule the service's own
+    // revival so the wake channel survives a swipe (START_STICKY alone is often not honored there)
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        try {
+            val pi = PendingIntent.getForegroundService(
+                this, 1, Intent(this, NotifyService::class.java),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT
+            )
+            val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + 3000, pi)
+        } catch (e: Exception) {}
+        super.onTaskRemoved(rootIntent)
+    }
 
     private fun startFg() {
         try {
@@ -101,6 +130,7 @@ class NotifyService : Service() {
         val req = Request.Builder().url(url).build()
         ws = client!!.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                fails = 0
                 webSocket.send(JSONObject().put("type", "auth").put("token", token).toString())
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -119,7 +149,11 @@ class NotifyService : Service() {
     private fun scheduleReconnect() {
         if (stopped) return
         handler.removeCallbacksAndMessages(null)
-        handler.postDelayed({ connect() }, 5000)
+        // back off when the bridge is genuinely unreachable (5s→10→20→40→60 cap) instead of
+        // burning battery on a dead link; resets on success and on network-available
+        val delay = (5000L shl minOf(fails, 4)).coerceAtMost(60000L)
+        fails += 1
+        handler.postDelayed({ connect() }, delay)
     }
 
     private fun showWake(sid: String, title: String, text: String) {
@@ -147,6 +181,7 @@ class NotifyService : Service() {
     override fun onDestroy() {
         stopped = true
         handler.removeCallbacksAndMessages(null)
+        try { netCb?.let { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it) } } catch (e: Exception) {}
         try { ws?.close(1000, null) } catch (e: Exception) {}
         super.onDestroy()
     }

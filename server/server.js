@@ -360,6 +360,29 @@ function maybePush(sid, title, text) {
   catch (e) { log('ntfy push', e?.message); }
 }
 
+// wake_message used to be fire-and-forget: if the phone's socket happened to be dead at that exact
+// moment (Doze cut the network / the ROM killed the notify service), the notification was lost
+// forever — the "推送有时收不到" report. Keep recent wakes and replay undelivered ones to the next
+// client that auths. `late:true` tells the web client to only toast (the text is already in the
+// session history), while the native notify service shows it as a normal system notification.
+const pendingWakes = []; // {sessionId,title,text,ts,delivered}
+const WAKE_REPLAY_MS = 24 * 3600 * 1000;
+function queueWake(m) {
+  // a socket counts as live only if it answered the last heartbeat — an OPEN half-open zombie
+  // would otherwise swallow the wake and mark it delivered
+  let live = 0; for (const c of clients) if (c.readyState === c.OPEN && c.isAlive !== false) live++;
+  pendingWakes.push({ ...m, ts: Date.now(), delivered: live > 0 });
+  while (pendingWakes.length > 50) pendingWakes.shift();
+}
+function flushWakes(ws) {
+  const now = Date.now();
+  for (const p of pendingWakes) {
+    if (p.delivered || now - p.ts > WAKE_REPLAY_MS) continue;
+    send(ws, { type: 'wake_message', sessionId: p.sessionId, title: p.title, text: p.text, late: true, ts: p.ts });
+    p.delivered = true;
+  }
+}
+
 async function fireWake(sid, kind) {
   if (activeSessions.has(sid)) return;          // a turn is already running for this session
   const w = wakeups[sid];
@@ -388,8 +411,10 @@ async function fireWake(sid, kind) {
   if (said) {
     let title = '';
     try { const info = await getSessionInfo(sid); title = info?.customTitle || info?.summary || info?.firstPrompt || ''; } catch (e) {}
-    broadcast({ type: 'wake_message', sessionId: sid, title, text: res.text.slice(0, 800) }); // 在线客户端实时收到
-    maybePush(sid, title, res.text);                                                          // 离线/后台走 ntfy 推送
+    const wm = { sessionId: sid, title, text: res.text.slice(0, 800) };
+    broadcast({ type: 'wake_message', ...wm }); // 在线客户端实时收到
+    queueWake(wm);                              // 没人在线就留着，下次连上补发
+    maybePush(sid, title, res.text);            // 配了 ntfy 才走（当前未配，原生通道替代）
   }
 }
 
@@ -831,6 +856,7 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'auth_ok', defaultCwd: cfg.defaultCwd, permissionMode: cfg.permissionMode });
           // push the currently-published app version + changelog; client decides if it's newer
           send(ws, { type: 'app_update', version: apkVersion(), url: '/app.apk', notes: apkNotes() });
+          flushWakes(ws); // missed wake notifications (phone was unreachable when they fired)
         }
         else { send(ws, { type: 'auth_fail' }); ws.close(); }
       }

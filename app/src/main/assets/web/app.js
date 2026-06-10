@@ -412,6 +412,8 @@ function handle(m) {
     // ---- 醒来 / 日记 / 便签 ----
     case 'wakeup_state': onWakeState(m); break;
     case 'wake_message':
+      // late = 重连补发的错过消息——正文已经在会话历史里了，往打开的对话里再插会重复显示
+      if (m.late) { toast((m.title ? '「' + m.title + '」' : '') + '有错过的醒来留言'); wsend({ type: 'list_sessions' }); break; }
       if (state.screen === 'chat' && state.currentSession === m.sessionId) { addAssistantText(m.text); buzz(18); scrollThreadAuto(); }
       else { toast((m.title ? '「' + m.title + '」' : '') + 'cc 醒来留言了'); wsend({ type: 'list_sessions' }); }
       break;
