@@ -722,6 +722,17 @@ function apkNotes() {
 }
 const httpServer = createServer(async (req, res) => {
   try {
+    // bundled UI 从 file:// 加载（origin "null"），不发 CORS 头 WebView 会拦掉 XHR/fetch
+    //（上传/检查更新在手机上表现为「网络错误」）。WS/<img> 不受 CORS 限制所以其它都正常。
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Max-Age': '86400'
+      });
+      res.end(); return;
+    }
     let p = decodeURIComponent((req.url || '/').split('?')[0]);
     if (p === '/' || p === '') p = '/index.html';
     if (p === '/version') {

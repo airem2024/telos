@@ -148,6 +148,9 @@ class MainActivity : AppCompatActivity() {
             domStorageEnabled = true
             mediaPlaybackRequiresUserGesture = false
             allowFileAccess = true
+            // bundled UI 跑在 file://（origin "null"）——不开这个，XHR/fetch 打 bridge 全被 CORS 拦
+            @Suppress("DEPRECATION")
+            allowUniversalAccessFromFileURLs = true
             cacheMode = WebSettings.LOAD_NO_CACHE
         }
         // transparent so the window splash (logo on bg) shows through until the page paints

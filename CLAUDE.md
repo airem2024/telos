@@ -214,6 +214,19 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
 
 ## 易踩的坑（血泪）
 
+- **bundled UI = file:// 页面，origin 是 "null"**。XHR/fetch 打 bridge 是跨域——bridge 必须发
+  `Access-Control-Allow-Origin: *` 并应答 OPTIONS 预检（`xhr.send(file)` 的 Content-Type 非 simple、
+  必有预检），否则上传/手动检查更新全是「网络错误」。最迷惑的是 **WS 和 `<img>` 不受 CORS 限制**——
+  聊天/图片全正常、只有 JS 发的 HTTP 挂，看着像服务器没事。原生侧
+  `allowUniversalAccessFromFileURLs = true` 兜底（随下个 APK 生效）。
+- **静态 UI 必须 `Cache-Control: no-store`**。`no-cache` 会被 CDN（如 Cloudflare）改写成
+  `max-age=14400` → 手机端拿 4 小时旧 UI，前端热更像「没生效」。bridge 静态文件发
+  `no-store, must-revalidate`。
+- **硬件返回键 = rootFlag 契约**。原生 `onBackPressed` 在 rootFlag=true 时直接退 App、
+  不问 JS。rootFlag 必须等于「在 list/setup 屏**且无任何浮层**」——由 `overlayUp()`+
+  `syncAtRoot()` 统一计算（show/各 open 入口同步 + 300ms interval 兜底）。曾经只在
+  `show()` 里按屏幕名设置 → 列表屏开用量页/抽屉/搜索/长按菜单/多选时按返回直接回桌面。
+  新加全屏浮层记得并进 `overlayUp()`。
 - **`SCREENS` 数组里的名字必须等于元素 id**。`show()` 会 `$(name).classList...`，对不上就抛错、
   **整个 boot 中断、卡在启动页**。加新屏幕后用脚本核一遍（`SCREENS`/`SCRIMS`/`DRAG_SCRIMS` 都用变量遍历，
   字面量 `$('x')` 校验抓不到）。
