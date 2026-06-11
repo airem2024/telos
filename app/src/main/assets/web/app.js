@@ -1210,7 +1210,7 @@ function fillWakeForm(st) {
     enabled: !!st.enabled, chase: !!st.chase, dawn: !!st.dawn,
     dawnH: (+dp[0] || 0), dawnM: (+dp[1] || 0),
     list: (st.schedules || []).filter((s) => s.by !== 'cc' && (s.nextAt || s.repeat)).map((s) => ({ nextAt: s.nextAt || 0, repeat: s.repeat || null })),
-    hasCc: (st.schedules || []).some((s) => s.by === 'cc'),
+    ccCount: (st.schedules || []).filter((s) => s.by === 'cc').length,
     eMode: 'daily', eDate: todayLocalStr(), eHour: (now.getHours() + 1) % 24, eMin: 0, eEvery: 180,
   };
   closeWakeEditor();
@@ -1245,7 +1245,7 @@ function renderWakeList() {
     const del = el('button', 'wki-del'); del.textContent = '×'; del.addEventListener('click', () => { w.list.splice(i, 1); renderWakeForm(); }); it.appendChild(del);
     box.appendChild(it);
   });
-  if (w.hasCc) { const e = el('div', 'wkempty'); e.textContent = '（cc 还为这个对话临时安排了它自己的一次醒来）'; box.appendChild(e); }
+  if (w.ccCount) { const e = el('div', 'wkempty'); e.textContent = '（cc 还给自己安排了 ' + w.ccCount + ' 个醒来时间）'; box.appendChild(e); }
 }
 function renderDawnArea() {
   const w = state.wk; const box = $('wkDawnArea'); box.innerHTML = '';

@@ -262,29 +262,33 @@ function makeSessionMcp(sessionRef) {
   return createSdkMcpServer({
     name: 'telos', version: '1.0.0', tools: [
       tool('set_wakeup',
-        '安排这个对话的下次「醒来」（你会在该时间被系统自动唤醒）。when：绝对时间(ISO 或 "YYYY-MM-DD HH:MM")、相对("+30m"/"+2h"/"+1d")、或每日时刻("HH:MM"取下一次)。repeat：可选，"daily HH:MM"=每天该时刻、"every Nm"/"every Nh"=每隔一段、"none"=只一次。enable:false=关闭本对话定时唤醒。',
+        '给这个对话新增一个「醒来」时间（到点你会被系统自动唤醒）。可多次调用、每次新增一个，与已有的并存——想接下来分几次做事/说话就排几个。when：绝对时间(ISO 或 "YYYY-MM-DD HH:MM")、相对("+30m"/"+2h"/"+1d")、或每日时刻("HH:MM"取下一次)。repeat：可选，"daily HH:MM"=每天该时刻、"every Nm"/"every Nh"=每隔一段、"none"=只一次。enable:false=清掉你给自己安排的全部唤醒（用户在界面设的不受影响）。',
         { when: z.string().optional(), repeat: z.string().optional(), enable: z.boolean().optional() },
         async ({ when, repeat, enable }) => {
           const sid = sessionRef.id;
           if (!sid) return { content: [{ type: 'text', text: '当前没有可设置的对话。' }] };
           const w = ensureWake(wakeups[sid] || (wakeups[sid] = {}));
           w.tz = currentTz || w.tz || DEFAULT_TZ;
-          // cc 只管自己那一格（by:'cc'），不动用户在界面里设的那些唤醒时间。
+          // cc 只管自己的格子（by:'cc'，可多个），不动用户在界面里设的那些唤醒时间。
           if (enable === false) {
             w.schedules = w.schedules.filter((s) => s.by !== 'cc');
             if (!w.schedules.length) w.enabled = false;
             saveWakeups(); broadcastWake(sid);
-            return { content: [{ type: 'text', text: '好，已取消我自己安排的下次醒来。' }] };
+            return { content: [{ type: 'text', text: '好，已清掉我自己安排的全部醒来。' }] };
           }
           const rep = repeat !== undefined ? parseRepeat(repeat) : null;
           let nextAt = when ? parseWhen(when, w.tz) : (rep ? repeatNext(rep, w.tz) : null);
           if (!nextAt && !rep) return { content: [{ type: 'text', text: '没看懂时间。请给绝对时间、相对(+30m/+2h)、或 HH:MM。' }] };
           if (!nextAt && rep) nextAt = repeatNext(rep, w.tz);
-          w.schedules = w.schedules.filter((s) => s.by !== 'cc');
+          const mine = w.schedules.filter((s) => s.by === 'cc');
+          if (mine.length >= 12) return { content: [{ type: 'text', text: '你已经给自己排了 12 个醒来时间（上限），先 enable:false 清掉再重新安排。' }] };
+          if (mine.some((s) => Math.abs((s.nextAt || 0) - (nextAt || 0)) < 60000 && JSON.stringify(s.repeat || null) === JSON.stringify(rep || null)))
+            return { content: [{ type: 'text', text: '这个时间已经安排过了。' }] };
           w.schedules.push({ id: randomUUID(), nextAt: nextAt || null, repeat: rep || null, by: 'cc' });
           w.enabled = true;
           saveWakeups(); broadcastWake(sid);
-          return { content: [{ type: 'text', text: `好，下次醒来：${nextAt ? fmtTime(nextAt, w.tz) : '(按重复规则)'}${rep ? '，重复 ' + JSON.stringify(rep) : ''}` }] };
+          const all = w.schedules.filter((s) => s.by === 'cc').sort((a, b) => (a.nextAt || 0) - (b.nextAt || 0));
+          return { content: [{ type: 'text', text: `好，已新增。你当前安排的醒来：${all.map((s) => fmtTime(s.nextAt, w.tz) + (s.repeat ? '(重复)' : '')).join('、')}` }] };
         }),
       tool('read_diary',
         '读取这个对话的日记。不传 date=返回有日记的日期清单；date 传 "YYYY-MM-DD"=返回那天的全部条目（含心情/天气/标签，以及图片的绝对路径——想看图就对该路径用 Read 工具）。',
@@ -338,7 +342,7 @@ function wakePrompt(kind, chase) {
     return WAKE_SENTINEL + ' 系统唤醒·追问（非用户发言，不要把这条当成用户说的话）：你之前主动给用户说了话，但用户还没有回复。当前时间见 mcp__clock__now。请判断要不要再轻声追一句（别重复、别催）；若没必要再打扰就只回复「（不再打扰）」。' + (chase ? '用户给这个对话开了「连续追问」：追问次数不设上限，只要你还有值得说的就可以一直轻声追下去；真觉得没必要再打扰了就回「（不再打扰）」，链会停下。' : '') + '可用 mcp__telos__set_wakeup 安排下次，或 mcp__telos__leave_note 给用户留一张小纸条。';
   if (kind === 'dawn')
     return WAKE_SENTINEL + ' 系统唤醒·凌晨日记（非用户发言）：新的一天开始了。请回顾这个对话里昨天发生的事，自行决定要不要给昨天写一篇日记——想写就调用 mcp__telos__write_diary（date 传昨天的 "YYYY-MM-DD"），不想写就跳过。这次通常不需要给用户发消息，除非你确实想说点什么。';
-  return WAKE_SENTINEL + ' 系统唤醒（非用户发言，不要把这条当成用户说的话）：你被定时唤醒了，当前时间见 mcp__clock__now。用户上次和你说话已过了一会儿，现在很可能不在看手机。请判断此刻有没有值得主动对用户说的话（关心、提醒、想到的事、或接着之前的话题）：有就直接说（会作为新消息留给用户并推送通知）；没必要打扰就只回复「（本次无需打扰）」，别硬找话题。用户可能已经在界面里设了固定的唤醒时间（会自动重复，你不必再安排）；只有当你想额外、临时安排一次属于自己的下次醒来时才调用 mcp__telos__set_wakeup（绝对时间 / 相对如 +2h / 每日 HH:MM），它只覆盖你自己那一格、不影响用户设的；想取消你自己安排的就调用它并传 enable:false。安排醒来是后台动作：调用工具即可，绝对不要在给用户的回复文本里复述"我把下次设成了几点"——用户不关心这个，你的回复文本只写真正想对用户说的话；如果没有要说的，就只回「（本次无需打扰）」。';
+  return WAKE_SENTINEL + ' 系统唤醒（非用户发言，不要把这条当成用户说的话）：你被定时唤醒了，当前时间见 mcp__clock__now。用户上次和你说话已过了一会儿，现在很可能不在看手机。请判断此刻有没有值得主动对用户说的话（关心、提醒、想到的事、或接着之前的话题）：有就直接说（会作为新消息留给用户并推送通知）；没必要打扰就只回复「（本次无需打扰）」，别硬找话题。用户可能已经在界面里设了固定的唤醒时间（会自动重复，你不必重复安排）；你也可以用 mcp__telos__set_wakeup 给自己加醒来时间（绝对时间 / 相对如 +30m/+2h / 每日 HH:MM / every Nh），可多次调用、每次新增一个、与已有的并存——想接下来连续做事或分几次说话就尽管排；传 enable:false 会清掉你给自己安排的全部、不影响用户设的。安排醒来是后台动作：调用工具即可，绝对不要在给用户的回复文本里复述"我把下次设成了几点"——用户不关心这个，你的回复文本只写真正想对用户说的话；如果没有要说的，就只回「（本次无需打扰）」。';
 }
 // a quiet reply ("（本次无需打扰）") means cc chose not to disturb → no follow-up, no push
 function isQuietReply(text) {
