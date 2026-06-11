@@ -1207,7 +1207,7 @@ function fillWakeForm(st) {
   const now = new Date();
   const dp = String(st.dawnTime || '04:00').split(':');
   const w = state.wk = {
-    enabled: !!st.enabled, dawn: !!st.dawn,
+    enabled: !!st.enabled, chase: !!st.chase, dawn: !!st.dawn,
     dawnH: (+dp[0] || 0), dawnM: (+dp[1] || 0),
     list: (st.schedules || []).filter((s) => s.by !== 'cc' && (s.nextAt || s.repeat)).map((s) => ({ nextAt: s.nextAt || 0, repeat: s.repeat || null })),
     hasCc: (st.schedules || []).some((s) => s.by === 'cc'),
@@ -1219,6 +1219,7 @@ function fillWakeForm(st) {
 function renderWakeForm() {
   const w = state.wk; if (!w) return;
   $('wkEnable').classList.toggle('on', w.enabled);
+  $('wkChase').classList.toggle('on', w.chase);
   $('wkDawn').classList.toggle('on', w.dawn);
   $('wkConfig').style.display = w.enabled ? '' : 'none';
   $('wkDawnCfg').style.display = w.dawn ? '' : 'none';
@@ -1311,7 +1312,7 @@ function saveWake() {
   const dawnTime = pad2(w.dawnH) + ':' + pad2(w.dawnM);
   if (w.enabled && !w.list.length) { toast('还没添加唤醒时间，或关掉「开启定时唤醒」'); return; }
   const schedules = w.list.map((sch) => ({ nextAt: sch.nextAt || 0, repeat: sch.repeat || null }));
-  wsend({ type: 'wakeup_set', sessionId: s.id, enabled: w.enabled, schedules, dawn: w.dawn, dawnTime });
+  wsend({ type: 'wakeup_set', sessionId: s.id, enabled: w.enabled, schedules, chase: w.chase, dawn: w.dawn, dawnTime });
   closeScrim('wakeScrim');
   if (!w.enabled) { toast(w.dawn ? '已关闭唤醒 · 仅定时写日记 ' + dawnTime : '已关闭定时唤醒'); return; }
   const next = schedules.map((x) => x.nextAt).filter(Boolean).sort((a, b) => a - b)[0];
@@ -2095,6 +2096,7 @@ function boot() {
   $('sessWake').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openWakeConfig(s); });
   $('wkEnable').addEventListener('click', () => { if (state.wk) { state.wk.enabled = !state.wk.enabled; if (!state.wk.enabled) closeWakeEditor(); renderWakeForm(); } });
   $('wkDawn').addEventListener('click', () => { if (state.wk) { state.wk.dawn = !state.wk.dawn; renderWakeForm(); } });
+  $('wkChase').addEventListener('click', () => { if (state.wk) { state.wk.chase = !state.wk.chase; renderWakeForm(); } });
   $('wkMode').addEventListener('click', (e) => { const b = e.target.closest('button[data-m]'); if (!b || !state.wk) return; state.wk.eMode = b.dataset.m; document.querySelectorAll('#wkMode button').forEach((x) => x.classList.toggle('on', x === b)); renderWakeModeArea(); });
   $('wkAdd').addEventListener('click', openWakeEditor);
   $('wkEditCancel').addEventListener('click', () => { closeWakeEditor(); });

@@ -88,12 +88,12 @@ function disallowedFromOff() { return [...mcpOff].map(mcpPrefix); }
 // 「醒来」机制 + 每对话日记 + 便签夹(小纸条)  —— 见 wakeup-plan.md
 // ========================================================================
 const DEFAULT_TZ = process.env.TZ || 'Asia/Shanghai';
-const MAX_FOLLOWUP = 2;                  // 小纸条: 醒来没人回时最多再追醒这么多次
+const MAX_FOLLOWUP = 2;                  // 小纸条: 醒来没人回时最多再追醒这么多次（开了「连续追问」chase 则不设上限）
 const FOLLOWUP_DELAY_MS = 5 * 60 * 1000; // 追问间隔 5 分钟
 
 // ---- per-session scheduled wake + follow-up state (persisted) ----
 const WAKEUPS_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'wakeups.json');
-let wakeups = {}; // { [sid]: { enabled, schedules:[{id,nextAt,repeat,by}], dawn, dawnTime, dawnAt, followupAt, followupCount, lastWakeAt, lastUserMsgAt, tz } }
+let wakeups = {}; // { [sid]: { enabled, chase, schedules:[{id,nextAt,repeat,by}], dawn, dawnTime, dawnAt, followupAt, followupCount, lastWakeAt, lastUserMsgAt, tz } }
 try { wakeups = JSON.parse(readFileSync(WAKEUPS_PATH, 'utf8')) || {}; } catch (e) {}
 // 迁移：老结构是单个 nextAt/repeat → 统一成 schedules 数组（可多个唤醒时间）；dawn 给个可配置 dawnTime。
 function ensureWake(w) {
@@ -245,7 +245,7 @@ function forgetSession(sid) {
 function pubWake(sid) {
   const w = wakeups[sid] || {};
   const schedules = (w.schedules || []).map((s) => ({ id: s.id, nextAt: s.nextAt || 0, repeat: s.repeat || null, by: s.by || 'user' }));
-  return { enabled: !!w.enabled, schedules, nextAt: wakeNextAt(w), dawn: !!w.dawn, dawnTime: w.dawnTime || '04:00', dawnAt: w.dawnAt || 0, tz: w.tz || '' };
+  return { enabled: !!w.enabled, chase: !!w.chase, schedules, nextAt: wakeNextAt(w), dawn: !!w.dawn, dawnTime: w.dawnTime || '04:00', dawnAt: w.dawnAt || 0, tz: w.tz || '' };
 }
 
 // ---- live broadcast to all authed clients (state changes; turn events stay per-turn via out()) ----
@@ -333,9 +333,9 @@ const activeSessions = new Set();    // sessions with a turn currently running (
 const wakeTurnBySession = new Map(); // sid -> wake turn (so a real user message can pre-empt a running wake)
 const WAKE_SENTINEL = '⁣[telos-wake]'; // invisible char + tag; hidden from chat history like the retry nudge
 
-function wakePrompt(kind) {
+function wakePrompt(kind, chase) {
   if (kind === 'followup')
-    return WAKE_SENTINEL + ' 系统唤醒·追问（非用户发言，不要把这条当成用户说的话）：你之前主动给用户说了话，但用户还没有回复。当前时间见 mcp__clock__now。请判断要不要再轻声追一句（别重复、别催）；若没必要再打扰就只回复「（不再打扰）」。可用 mcp__telos__set_wakeup 安排下次，或 mcp__telos__leave_note 给用户留一张小纸条。';
+    return WAKE_SENTINEL + ' 系统唤醒·追问（非用户发言，不要把这条当成用户说的话）：你之前主动给用户说了话，但用户还没有回复。当前时间见 mcp__clock__now。请判断要不要再轻声追一句（别重复、别催）；若没必要再打扰就只回复「（不再打扰）」。' + (chase ? '用户给这个对话开了「连续追问」：追问次数不设上限，只要你还有值得说的就可以一直轻声追下去；真觉得没必要再打扰了就回「（不再打扰）」，链会停下。' : '') + '可用 mcp__telos__set_wakeup 安排下次，或 mcp__telos__leave_note 给用户留一张小纸条。';
   if (kind === 'dawn')
     return WAKE_SENTINEL + ' 系统唤醒·凌晨日记（非用户发言）：新的一天开始了。请回顾这个对话里昨天发生的事，自行决定要不要给昨天写一篇日记——想写就调用 mcp__telos__write_diary（date 传昨天的 "YYYY-MM-DD"），不想写就跳过。这次通常不需要给用户发消息，除非你确实想说点什么。';
   return WAKE_SENTINEL + ' 系统唤醒（非用户发言，不要把这条当成用户说的话）：你被定时唤醒了，当前时间见 mcp__clock__now。用户上次和你说话已过了一会儿，现在很可能不在看手机。请判断此刻有没有值得主动对用户说的话（关心、提醒、想到的事、或接着之前的话题）：有就直接说（会作为新消息留给用户并推送通知）；没必要打扰就只回复「（本次无需打扰）」，别硬找话题。用户可能已经在界面里设了固定的唤醒时间（会自动重复，你不必再安排）；只有当你想额外、临时安排一次属于自己的下次醒来时才调用 mcp__telos__set_wakeup（绝对时间 / 相对如 +2h / 每日 HH:MM），它只覆盖你自己那一格、不影响用户设的；想取消你自己安排的就调用它并传 enable:false。安排醒来是后台动作：调用工具即可，绝对不要在给用户的回复文本里复述"我把下次设成了几点"——用户不关心这个，你的回复文本只写真正想对用户说的话；如果没有要说的，就只回「（本次无需打扰）」。';
@@ -392,7 +392,7 @@ async function fireWake(sid, kind) {
   wakeTurnBySession.set(sid, turn);
   let res = null;
   const sm = sessModel[sid] || {};
-  try { res = await runTurn(turn, { sessionId: sid, text: wakePrompt(kind), mode: 'bypass', model: sm.model || undefined, effort: sm.effort || undefined, _wake: true }); }
+  try { res = await runTurn(turn, { sessionId: sid, text: wakePrompt(kind, !!(w && w.chase)), mode: 'bypass', model: sm.model || undefined, effort: sm.effort || undefined, _wake: true }); }
   catch (e) { log('fireWake', e?.message); }
   finally { currentTz = prevTz; wakeTurnBySession.delete(sid); }
 
@@ -402,7 +402,7 @@ async function fireWake(sid, kind) {
     if (kind !== 'dawn') {
       if (said) {
         w.followupCount = kind === 'followup' ? (w.followupCount || 0) + 1 : 0;
-        if ((w.followupCount || 0) < MAX_FOLLOWUP) w.followupAt = Date.now() + FOLLOWUP_DELAY_MS;
+        if (w.chase || (w.followupCount || 0) < MAX_FOLLOWUP) w.followupAt = Date.now() + FOLLOWUP_DELAY_MS;
         else { leaveSticky(sid, res.text.slice(0, 200)); broadcastSticky(sid); w.followupAt = null; w.followupCount = 0; }
       } else { w.followupAt = null; } // cc chose silence → stop the follow-up chain
     }
@@ -1298,6 +1298,7 @@ async function handle(ws, conn, msg) {
         w.schedules = [...user, ...cc];
       }
       w.enabled = msg.enabled !== false; // “开启定时唤醒”总开关
+      if ('chase' in msg) w.chase = !!msg.chase; // 「连续追问」：追问不设上限
       if ('dawn' in msg) w.dawn = !!msg.dawn;
       if ('dawnTime' in msg && /^\d{1,2}:\d{2}$/.test(String(msg.dawnTime || ''))) w.dawnTime = msg.dawnTime;
       w.dawnAt = w.dawn ? nextDawnAt(w) : 0;

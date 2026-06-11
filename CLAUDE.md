@@ -173,6 +173,9 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
   **sessionRef 是 per-turn 的、不是全局**——clock 的全局 `currentTz` 那套不能照搬到会话作用域(并发 turn 会串台)。
 - **小纸条**：醒来发话后 5 分钟没回 → `fireWake('followup')` 追问，`MAX_FOLLOWUP=2` 后 `leaveSticky`。
   `lastUserMsgAt`(用户发消息时记) > `lastWakeAt` 即视为已回。进对话时未读 sticky 弹 `stickyScrim`。
+  **「连续追问」**：per-session `wakeups[sid].chase`（表单开关 `wkChase`，`wakeup_set` 的 `chase` 字段）——
+  开了就跳过 MAX_FOLLOWUP 封顶、不留 sticky，一直每 5 分钟追，直到用户回话或 cc 自己回「（不再打扰）」
+  （quiet-stop 保留当刹车）；followup 提示词会告知 cc 该状态。
 - **并发保护**：`activeSessions` Set(runTurn 进出维护)挡住唤醒和用户 turn 同时 resume 同一会话；用户发消息会
   abort 正在跑的 wake turn(`wakeTurnBySession`)。删会话调 `forgetSession()` 清 wakeups/diary/stickies；
   **开了唤醒的会话免于 autoCleanup**。
