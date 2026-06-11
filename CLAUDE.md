@@ -144,7 +144,10 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
   （这轮一个字都没吐）且非用户 abort、非 1M 付费墙、且是 parse 失败/空结果，就 `resume` **同一个会话**
   （绝不再 fork、删掉 `resumeSessionAt/forkSession`）+ 发 `PARSE_RETRY_PROMPT` 让模型重答；`turn_end`
   **推迟到拿到真回复或重试耗尽**才发，所以**震动只在真有内容时才响**。`<synthetic>` 文本被吞、不当
-  assistant_text 外发。`PARSE_RETRY_PROMPT` 带 `RETRY_SENTINEL`（隐藏字符+tag），连同遗留的
+  assistant_text 外发。③ **delta 捞回**——parse 失败可能把「已流出的回复」连带吞掉（assistant_delta
+  流了文字但收尾 assistant 消息没来 → gotText/replyText 全空，唤醒推送/追问当 cc 没说话，
+  2026-06 日记+唤醒撞点时真发生过）：每 attempt 攒 `deltaText`，`isParseFail` 且 delta 比
+  replyText 长就捞回当本轮回复、不再只信重试版本；`outerGotText/outerReplyText` 改成无 result 也带出。`PARSE_RETRY_PROMPT` 带 `RETRY_SENTINEL`（隐藏字符+tag），连同遗留的
   「could not be parsed」报错气泡都在 `historyItems()`（`HIDE_TEXT` + `isApiErrorMessage`/`model==='<synthetic>'`）
   里滤掉，历史看不到杂质。
 - **鉴权**：bridge 对 auth 之前的杂散消息**直接忽略**（只有真 auth 带错 token 才 auth_fail+close）。
@@ -159,15 +162,16 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
 
 - **定时唤醒（可多个时间）**：会话长按菜单「定时唤醒」。`wakeups[sid].schedules = [{id,nextAt,repeat,by}]`——
   **一个对话可挂多个唤醒时间**（每条 once / daily HH:MM / every Nm 各自带 nextAt+repeat）。`by:'user'` 是用户在
-  界面里设的、`by:'cc'` 是 cc 自己安排的（**可多格并存**，上限 12、相同时间去重）。`enabled` 是「开启定时唤醒」总开关，gate 所有
-  check-in 排程（含 cc 的）。bridge 调度器 `setInterval(checkWakeups,30000)` 每 30s 扫：同一轮里到点的排程**全部
-  推进**（repeat 的算下次、once 的丢弃）但**只醒来一次**。`pubWake` 还回一个 `nextAt = wakeNextAt(w)`（所有排程里
+  界面里设的、`by:'cc'` 是 cc 自己安排的（**可多格并存**，上限 12，不去重——撞了就排队）。`enabled` 是「开启定时唤醒」总开关，gate 所有
+  check-in 排程（含 cc 的）。bridge 调度器 `setInterval(checkWakeups,30000)` 每 30s 扫，**队列语义**：
+  到点的排程不合并、不丢弃——每个 tick 只触发**最早的一条**（触发时才推进它：repeat 算下次、once 丢弃），
+  其余留在队列里等这轮唤醒跑完（activeSessions 释放）后续 tick 依次触发；时间重复/相邻的也各触发一次。`pubWake` 还回一个 `nextAt = wakeNextAt(w)`（所有排程里
   最近一次）给会话列表显示「下次醒来」。**老结构（单 `nextAt`/`repeat`）由 `ensureWake()` 在加载/每次处理时迁移成
   schedules 数组**。到点**服务端**(无客户端) resume 该会话、注入隐藏的「系统唤醒」提示(`WAKE_SENTINEL`，被
   `historyItems` 的 `HIDE_TEXT` 滤掉)、cc 醒来产出回复并写进 jsonl，**重开对话可见**(推送挂了也不丢)。`runTurn`
   **返回** `{gotText,text,sessionId}` 供 `fireWake` 判断 cc 是否真说了话(决定追问/推送)。
 - **cc 自治**：per-turn 的 `makeSessionMcp(sessionRef)` 注册 `mcp__telos__*`：`set_wakeup`(绝对/相对/HH:MM/repeat——
-  **每次调用新增一个 `by:'cc'` 格、可多个并存（上限 12、相同时间去重），不动用户设的排程**；enable:false 清掉
+  **每次调用新增一个 `by:'cc'` 格、可多个并存（上限 12，不去重），不动用户设的排程**；enable:false 清掉
   全部 cc 格、用户排程还在；曾经只有一格、每次覆盖——用户嫌限制次数鸡肋，2026-06 放开)、
   `read_diary`(返回正文+心情天气标签+**图片绝对路径**，cc 用 Read 看图)、`write_diary`、`leave_note`。checkin 唤醒
   提示词已提醒 cc：用户设的固定时间会自动重复、不必重复安排；自己想连续做事就多排几个。

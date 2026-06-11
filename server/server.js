@@ -262,7 +262,7 @@ function makeSessionMcp(sessionRef) {
   return createSdkMcpServer({
     name: 'telos', version: '1.0.0', tools: [
       tool('set_wakeup',
-        '给这个对话新增一个「醒来」时间（到点你会被系统自动唤醒）。可多次调用、每次新增一个，与已有的并存——想接下来分几次做事/说话就排几个。when：绝对时间(ISO 或 "YYYY-MM-DD HH:MM")、相对("+30m"/"+2h"/"+1d")、或每日时刻("HH:MM"取下一次)。repeat：可选，"daily HH:MM"=每天该时刻、"every Nm"/"every Nh"=每隔一段、"none"=只一次。enable:false=清掉你给自己安排的全部唤醒（用户在界面设的不受影响）。',
+        '给这个对话新增一个「醒来」时间（到点你会被系统自动唤醒）。可多次调用、每次新增一个，与已有的并存——想接下来分几次做事/说话就排几个；时间重复或相邻也没关系，到点的会排队依次触发、每个都生效。when：绝对时间(ISO 或 "YYYY-MM-DD HH:MM")、相对("+30m"/"+2h"/"+1d")、或每日时刻("HH:MM"取下一次)。repeat：可选，"daily HH:MM"=每天该时刻、"every Nm"/"every Nh"=每隔一段、"none"=只一次。enable:false=清掉你给自己安排的全部唤醒（用户在界面设的不受影响）。',
         { when: z.string().optional(), repeat: z.string().optional(), enable: z.boolean().optional() },
         async ({ when, repeat, enable }) => {
           const sid = sessionRef.id;
@@ -282,8 +282,6 @@ function makeSessionMcp(sessionRef) {
           if (!nextAt && rep) nextAt = repeatNext(rep, w.tz);
           const mine = w.schedules.filter((s) => s.by === 'cc');
           if (mine.length >= 12) return { content: [{ type: 'text', text: '你已经给自己排了 12 个醒来时间（上限），先 enable:false 清掉再重新安排。' }] };
-          if (mine.some((s) => Math.abs((s.nextAt || 0) - (nextAt || 0)) < 60000 && JSON.stringify(s.repeat || null) === JSON.stringify(rep || null)))
-            return { content: [{ type: 'text', text: '这个时间已经安排过了。' }] };
           w.schedules.push({ id: randomUUID(), nextAt: nextAt || null, repeat: rep || null, by: 'cc' });
           w.enabled = true;
           saveWakeups(); broadcastWake(sid);
@@ -435,14 +433,14 @@ async function checkWakeups() {
       if ((w.lastUserMsgAt || 0) > (w.lastWakeAt || 0)) { w.followupCount = 0; saveWakeups(); }
       else { saveWakeups(); fireWake(sid, 'followup').catch(() => {}); continue; }
     }
-    // 2) scheduled check-in wake — 可有多个唤醒时间；同一轮里到点的全部推进，但只醒来一次
+    // 2) scheduled check-in wake — 队列语义：到点的不合并、不丢弃。每个 tick 只触发最早的一条，
+    //    其余留在队列里（nextAt 保持过期），等这轮唤醒跑完（activeSessions 释放）后续 tick 依次触发；
+    //    时间重复/相邻的也各触发一次，谁都不会因为被前面占用而失效。
     if (w.enabled && Array.isArray(w.schedules) && w.schedules.length) {
-      let due = false;
-      for (const sch of w.schedules) {
-        if (sch.nextAt && sch.nextAt <= now) { due = true; sch.nextAt = sch.repeat ? repeatNext(sch.repeat, w.tz, now) : null; }
-      }
-      w.schedules = w.schedules.filter((sch) => sch.nextAt || sch.repeat); // 丢掉用过的“只一次”
+      const due = w.schedules.filter((s) => s.nextAt && s.nextAt <= now).sort((a, b) => a.nextAt - b.nextAt)[0];
       if (due) {
+        due.nextAt = due.repeat ? repeatNext(due.repeat, w.tz, now) : null;
+        w.schedules = w.schedules.filter((sch) => sch.nextAt || sch.repeat); // 丢掉用过的“只一次”
         saveWakeups(); broadcastWake(sid);
         fireWake(sid, 'checkin').catch(() => {});
         continue;
@@ -1608,6 +1606,7 @@ async function runTurn(turn, msg) {
 
       let gotText = false;   // did this attempt yield any real reply text?
       let replyText = '';    // accumulated reply text of this attempt (for wake → push / follow-up)
+      let deltaText = '';    // raw streamed text deltas — salvage source when the closing assistant message gets swallowed by a parse failure
       let parseFail = false; // did we see the "tool call could not be parsed" signal?
       let resultMsg = null;
       const q = query({ prompt: qPrompt, options: qOptions });
@@ -1632,6 +1631,7 @@ async function runTurn(turn, msg) {
           case 'stream_event': {
             const ev = m.event;
             if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
+              deltaText += ev.delta.text;
               out(turn, { type: 'assistant_delta', sessionId: curSession, text: ev.delta.text });
             }
             break;
@@ -1699,12 +1699,21 @@ async function runTurn(turn, msg) {
       const errTxt = String(resultMsg?.result || '');
       const billing = !!(resultMsg && resultMsg.is_error && /usage credits required for 1m/i.test(errTxt));
       const isParseFail = parseFail || /could not be parsed|tool call was malformed/i.test(errTxt);
+      // parse 失败可能把「已经流出去的回复」连带吞掉：assistant_delta 流了文字，但收尾的
+      // assistant 消息没来 → gotText/replyText 全空，被当成 cc 没说话（唤醒推送/追问全落空）。
+      // 把流出的文本捞回来当本轮回复，别丢掉它只信重试后的版本。
+      if (isParseFail && !aborted && deltaText.trim().length > replyText.trim().length) {
+        log(`parse fail — salvaging ${deltaText.trim().length} chars of streamed text (blocks had ${replyText.trim().length})`);
+        replyText = deltaText;
+        gotText = !!deltaText.trim();
+      }
       const eaten = !gotText && !aborted && !billing && (isParseFail || errTxt === '');
       if (eaten && attempt < MAX_ATTEMPTS) {
         log(`reply eaten (parseFail=${parseFail}) — silent retry ${attempt + 1}/${MAX_ATTEMPTS}`);
         continue;
       }
-      if (resultMsg) { finalizeResult(resultMsg); ended = true; outerGotText = gotText; outerReplyText = replyText; }
+      if (resultMsg) { finalizeResult(resultMsg); ended = true; }
+      outerGotText = gotText; outerReplyText = replyText;
       break;
     }
     // SDK iterator finished without a result message → still close the turn so the UI doesn't spin forever
