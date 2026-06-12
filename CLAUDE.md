@@ -214,9 +214,13 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
 - **不打扰 / 在线**:客户端发 `presence{sessionId,foreground,model,effort}`(在 `show()` + visibilitychange 触发),
   bridge 存 `ws._view/._fg`,推送时正前台看该对话就跳过;`push_pref{enabled}` 是「接收唤醒推送」总开关(`pushEnabled`)。
   唤醒产出回复时 `broadcast({type:'wake_message'})` 给在线客户端(在看→`addAssistantText`;否则 toast+列表刷新)。
-- **唤醒必须用回会话原模型(否则压缩吞记忆)**:`sessmodel.json`(gitignored)按 sessionId 记 `{model,effort}`,
-  在 `presence`/`send`/`wakeup_set` 时 `rememberModel()` 捕获(模型含 `[1m]`,这是客户端运行态、jsonl 里看不到)。
-  `fireWake` 用它 resume——**否则唤醒用默认 200K 模型 resume 一个 >200K 的对话 → cc 自动压缩 → 用户丢细节**(踩过)。
+- **模型/effort 每对话一份(2026-06 起)**:`sessmodel.json`(gitignored)按 sessionId 记 `{model,effort}`,
+  在 `presence`/`send` 时 `rememberModel()` 捕获(模型含 `[1m]`,这是客户端运行态、jsonl 里看不到);
+  `get_history` 把它当 `pref` 带回,客户端进对话切到 pref(没记过=''默认),选择器只改当前对话、立刻
+  `sendPresence()` 回写;没会话(新对话)时才写全局默认 `LS.model`。**pref 加载前 presence 不带 model**
+  (`state.modelMine` 标志)——旧版 App 每次看对话都拿全局值 stamp,正是它把每会话记忆冲掉的。
+  `fireWake` 用 pref resume——**否则唤醒用默认 200K 模型 resume 一个 >200K 的对话 → cc 自动压缩 →
+  用户丢细节**(踩过);想让唤醒对话单独用 haiku,进那个对话选一次即可,不影响别的对话。
 - **自动压缩**:cli 里自动压缩调用 `customInstructions:null`——**它不读任何「压缩提示词」**;之所以有时像按自定义提示词压,
   是因为那段提示词当时在上下文里、被总结模型顺手看见。已给 bridge systemd 加 `Environment=DISABLE_AUTO_COMPACT=1`
   (**只关自动、保留手动**;`DISABLE_COMPACT` 会连手动一起禁,别用)。手动「压缩历史」走 `/compact <pref.compactPrompt>`

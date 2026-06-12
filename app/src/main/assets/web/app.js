@@ -200,7 +200,7 @@ function initLinkHandler() {
 const state = {
   screen: 'setup', ws: null, connected: false, authed: false, defaultCwd: '',
   sessions: [], currentSession: null, cwd: '', sessionModel: 'Claude',
-  model: '', effort: '', mode: 'code', live: null, busy: false,
+  model: '', effort: '', modelMine: false, mode: 'code', live: null, busy: false,
   pendingPerm: null, reconnectTimer: null, dirPath: '', promptCb: null,
   turnTools: [], toolRow: null, folders: [], sessTarget: null, folderTarget: null, activeFolder: null,
   pendingFiles: [], origin: '', dirMode: 'cwd', activeTurn: null,
@@ -301,7 +301,9 @@ function startLiveness() {
 }
 function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 // presence → bridge: which conversation I'm viewing + foreground (so wake push skips the one I'm looking at)
-function sendPresence() { wsend({ type: 'presence', sessionId: state.screen === 'chat' ? state.currentSession : null, foreground: document.visibilityState === 'visible', model: state.model, effort: state.effort }); }
+// model/effort 只在确属本对话的选择时带上（modelMine）——刚进对话、还没读回它记住的模型前不带，
+// 免得用别的对话/全局默认把服务端的 per-session 记忆盖掉（唤醒就是按那份记忆选模型的）
+function sendPresence() { wsend({ type: 'presence', sessionId: state.screen === 'chat' ? state.currentSession : null, foreground: document.visibilityState === 'visible', model: state.modelMine ? state.model : undefined, effort: state.modelMine ? state.effort : undefined }); }
 function sendPushPref() { wsend({ type: 'push_pref', enabled: P('wakePush') }); }
 // hand creds to the native background service + start/stop it per the 后台唤醒通知 toggle
 function applyNativeNotify() {
@@ -372,6 +374,7 @@ function handle(m) {
       if (state.expectFork || !state.currentSession) state.currentSession = m.sessionId;
       state.sessionModel = m.model || 'Claude';
       if (m.cwd) state.cwd = m.cwd;
+      sendPresence(); // 新会话/fork 刚拿到 sid：顺手把本对话的模型记到服务端（唤醒按它选模型）
       updateHeader(); break;
     case 'assistant_delta': appendDelta(m.text); break;
     case 'assistant_text': finalizeText(m.text); break;
@@ -804,10 +807,10 @@ function openSession(s) {
   // spinner + partial reply); don't clobber it with stale history that lacks the in-flight turn
   if (state.currentSession === s.id && state.activeTurn && !state.activeTurn.done) { show('chat'); return; }
   state.currentSession = s.id; state.cwd = s.cwd || ''; state.curTitle = s.title; state.sessionModel = 'Claude';
-  // restore the saved model/effort (NOT reset to '') so a 1M pick (the [1m] suffix is a runtime
-  // variant, not stored in the session) survives reopen — otherwise resume falls back to the 200K
-  // base model and cc auto-compacts the conversation away. '' (继承会话) still works if that's saved.
-  state.model = LS.model; state.effort = LS.effort; state.mode = LS.mode; applyMode();
+  // 模型/effort 是每对话一份的（服务端 sessmodel.json）：先拿全局默认占位，等 history 带回这个对话
+  // 记住的 pref 再切过去；占位期间 modelMine=false → presence 不带 model，不会盖掉服务端那份。
+  // [1m] 这类运行时变体也存在 pref 里，重开对话不会掉回 200K 底座被自动 compact。
+  state.model = LS.model; state.effort = LS.effort; state.modelMine = false; state.mode = LS.mode; applyMode();
   clearThread(); updateHeader(); show('chat'); removeSuggestions();
   // if not authed yet (slow/just-reconnecting), the send is dropped — remember to retry on auth_ok
   state.pendingHistory = wsend({ type: 'get_history', sessionId: s.id }) ? null : s.id;
@@ -816,7 +819,7 @@ function openSession(s) {
 }
 function newSession() {
   state.currentSession = null; state.cwd = LS.cwd || state.defaultCwd; state.curTitle = ''; state.sessionModel = 'Claude';
-  state.model = LS.model; state.effort = LS.effort; state.mode = LS.mode; applyMode();
+  state.model = LS.model; state.effort = LS.effort; state.modelMine = true; state.mode = LS.mode; applyMode(); // 新对话从全局默认起步，这份就算它自己的选择
   clearThread(); updateHeader(); show('chat'); showSuggestions();
   setTimeout(() => $('composer').focus(), 80);
 }
@@ -824,6 +827,11 @@ function goList() { if (P('interruptOnLeave') && state.busy) wsend({ type: 'inte
 function renderHistory(m) {
   clearThread(); removeSuggestions();
   if (m.cwd) { state.cwd = m.cwd; } if (m.title) state.curTitle = m.title; updateHeader();
+  // 切到这个对话记住的模型/effort（没记过就是 ''=默认）；用户手快已经先选了的话（modelMine）不抢
+  if (m.sessionId === state.currentSession && !state.modelMine) {
+    const p = m.pref || {};
+    state.model = p.model || ''; state.effort = p.effort || ''; state.modelMine = true;
+  }
   let group = null, userB = null; // userB: 最近的用户气泡——它的附图回填成气泡内缩略图，而不是 cc 侧大图
   (m.items || []).forEach((it) => {
     if (it.kind === 'text') { group = null; if (it.role === 'user') userB = addUser(it.text, it.uuid); else { userB = null; addAssistantText(it.text); } }
@@ -908,7 +916,7 @@ function openModelSheet() {
     const o = el('button', 'opt' + (state.model === x.id ? ' on' : ''));
     const tag = x.ctx >= 1000000 ? ' <span class="tag1m">1M</span>' : '';
     o.innerHTML = `<div><div>${x.name}${tag}</div>${x.sub ? `<div class="osub">${x.sub}</div>` : ''}</div><span class="check">✓</span>`;
-    o.addEventListener('click', () => { state.model = x.id; LS.model = x.id; openModelSheet(); });
+    o.addEventListener('click', () => { state.model = x.id; state.modelMine = true; if (state.currentSession) sendPresence(); else LS.model = x.id; openModelSheet(); });
     mo.appendChild(o);
   });
   // hide effort if the chosen model declares it unsupported
@@ -916,7 +924,7 @@ function openModelSheet() {
   const showEffort = !chosen || chosen.effort;
   const eo = $('effortOpts'); eo.innerHTML = '';
   $('effortOpts').parentElement.querySelector('.sub2').style.display = showEffort ? '' : 'none';
-  if (showEffort) EFFORTS.forEach((x) => { const o = el('button', 'opt' + (state.effort === x.id ? ' on' : '')); o.innerHTML = `<div><div>${x.name}</div>${x.sub ? `<div class="osub">${x.sub}</div>` : ''}</div><span class="check">✓</span>`; o.addEventListener('click', () => { state.effort = x.id; LS.effort = x.id; openModelSheet(); }); eo.appendChild(o); });
+  if (showEffort) EFFORTS.forEach((x) => { const o = el('button', 'opt' + (state.effort === x.id ? ' on' : '')); o.innerHTML = `<div><div>${x.name}</div>${x.sub ? `<div class="osub">${x.sub}</div>` : ''}</div><span class="check">✓</span>`; o.addEventListener('click', () => { state.effort = x.id; state.modelMine = true; if (state.currentSession) sendPresence(); else LS.effort = x.id; openModelSheet(); }); eo.appendChild(o); });
   openScrim('modelScrim');
 }
 

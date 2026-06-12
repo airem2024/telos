@@ -948,6 +948,7 @@ async function handle(ws, conn, msg) {
         sessionId: msg.sessionId,
         cwd: info?.cwd || '',
         title: cleanTitle(info?.customTitle || info?.summary),
+        pref: sessModel[msg.sessionId] || null, // 这个会话记住的模型/effort——客户端进对话切回它（模型每对话一份）
         items: historyItems(messages)
       });
       break;
