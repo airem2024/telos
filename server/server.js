@@ -943,12 +943,20 @@ async function handle(ws, conn, msg) {
     case 'get_history': {
       const messages = await getSessionMessages(msg.sessionId);
       const info = await getSessionInfo(msg.sessionId).catch(() => undefined);
+      // 这个会话实际跑过的模型（最后一条 assistant 的 model）——没显式选过模型的对话，开页也能在标题下看到
+      //（'<synthetic>'=SDK 错误占位，'claude'=导入对话占位，都不算）
+      let lastModel = '';
+      for (let i = messages.length - 1; i >= 0 && !lastModel; i--) {
+        const mm = messages[i] && messages[i].message;
+        if (mm && mm.role === 'assistant' && mm.model && mm.model !== '<synthetic>' && mm.model !== 'claude') lastModel = mm.model;
+      }
       send(ws, {
         type: 'history',
         sessionId: msg.sessionId,
         cwd: info?.cwd || '',
         title: cleanTitle(info?.customTitle || info?.summary),
         pref: sessModel[msg.sessionId] || null, // 这个会话记住的模型/effort——客户端进对话切回它（模型每对话一份）
+        lastModel,
         items: historyItems(messages)
       });
       break;

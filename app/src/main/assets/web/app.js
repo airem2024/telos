@@ -199,7 +199,7 @@ function initLinkHandler() {
 /* ============ state ============ */
 const state = {
   screen: 'setup', ws: null, connected: false, authed: false, defaultCwd: '',
-  sessions: [], currentSession: null, cwd: '', sessionModel: 'Claude',
+  sessions: [], currentSession: null, cwd: '', sessionModel: 'Claude', lastModel: '',
   model: '', effort: '', modelMine: false, mode: 'code', live: null, busy: false,
   pendingPerm: null, reconnectTimer: null, dirPath: '', promptCb: null,
   turnTools: [], toolRow: null, folders: [], sessTarget: null, folderTarget: null, activeFolder: null,
@@ -372,7 +372,7 @@ function handle(m) {
     case 'turn_start': state.busy = true; state.turnTools = []; state.toolRow = null; startStatus(); updateSend(); break;
     case 'session_init':
       if (state.expectFork || !state.currentSession) state.currentSession = m.sessionId;
-      state.sessionModel = m.model || 'Claude';
+      state.lastModel = m.model || state.lastModel; syncModelSub(); // SDK 报的才是这回合真正跑的模型
       if (m.cwd) state.cwd = m.cwd;
       sendPresence(); // 新会话/fork 刚拿到 sid：顺手把本对话的模型记到服务端（唤醒按它选模型）
       updateHeader(); break;
@@ -392,7 +392,7 @@ function handle(m) {
       if (m.ok) { toast('已导入 ' + m.count + ' 个对话（「导入」文件夹）'); wsend({ type: 'list_sessions' }); }
       else toast('导入失败：' + (m.error || '未知错误'));
       break;
-    case 'models': state.availModels = m.models || []; state.modelDefault = m.current || ''; if ($('modelScrim').classList.contains('show')) openModelSheet(); break;
+    case 'models': state.availModels = m.models || []; state.modelDefault = m.current || ''; if ($('modelScrim').classList.contains('show')) openModelSheet(); if (state.currentSession) syncModelSub(); break;
     case 'mcp': renderMcpList(m.servers || []); break;
     case 'mcp_toggled': toast('已' + (m.on ? '启用' : '关闭') + '：' + m.name); break;
     case 'mcp_config': $('mcpCfgText').value = m.content || '{}'; openScrim('mcpCfgScrim'); break;
@@ -806,7 +806,7 @@ function openSession(s) {
   // re-entering the session whose turn is still running → keep the live view (message +
   // spinner + partial reply); don't clobber it with stale history that lacks the in-flight turn
   if (state.currentSession === s.id && state.activeTurn && !state.activeTurn.done) { show('chat'); return; }
-  state.currentSession = s.id; state.cwd = s.cwd || ''; state.curTitle = s.title; state.sessionModel = 'Claude';
+  state.currentSession = s.id; state.cwd = s.cwd || ''; state.curTitle = s.title; state.sessionModel = 'Claude'; state.lastModel = '';
   // 模型/effort 是每对话一份的（服务端 sessmodel.json）：先拿全局默认占位，等 history 带回这个对话
   // 记住的 pref 再切过去；占位期间 modelMine=false → presence 不带 model，不会盖掉服务端那份。
   // [1m] 这类运行时变体也存在 pref 里，重开对话不会掉回 200K 底座被自动 compact。
@@ -818,7 +818,7 @@ function openSession(s) {
   state.pendingSticky = wsend({ type: 'sticky_get', sessionId: s.id }) ? null : s.id; // show 小纸条 popup if any unread
 }
 function newSession() {
-  state.currentSession = null; state.cwd = LS.cwd || state.defaultCwd; state.curTitle = ''; state.sessionModel = 'Claude';
+  state.currentSession = null; state.cwd = LS.cwd || state.defaultCwd; state.curTitle = ''; state.sessionModel = 'Claude'; state.lastModel = '';
   state.model = LS.model; state.effort = LS.effort; state.modelMine = true; state.mode = LS.mode; applyMode(); // 新对话从全局默认起步，这份就算它自己的选择
   clearThread(); updateHeader(); show('chat'); showSuggestions();
   setTimeout(() => $('composer').focus(), 80);
@@ -832,6 +832,7 @@ function renderHistory(m) {
     const p = m.pref || {};
     state.model = p.model || ''; state.effort = p.effort || ''; state.modelMine = true;
   }
+  if (m.sessionId === state.currentSession) { state.lastModel = m.lastModel || ''; syncModelSub(); }
   let group = null, userB = null; // userB: 最近的用户气泡——它的附图回填成气泡内缩略图，而不是 cc 侧大图
   (m.items || []).forEach((it) => {
     if (it.kind === 'text') { group = null; if (it.role === 'user') userB = addUser(it.text, it.uuid); else { userB = null; addAssistantText(it.text); } }
@@ -908,7 +909,18 @@ function modelList() {
   if (scanned) return [def, ...scanned.map((m) => ({ id: m.id, name: m.name, ctx: m.ctx || 0, sub: m.effort ? '' : '不支持思考度', effort: m.effort }))];
   return MODELS;
 }
-function modelDisplay(id) { const m = (state.availModels || []).find((x) => x.id === id); return m ? m.name : id; }
+function modelDisplay(id) {
+  const L = state.availModels || [];
+  const m = L.find((x) => x.id === id) || L.find((x) => x.id.startsWith(id + '-')); // 无日期别名（如 claude-haiku-4-5）→ 带日期的正式 id
+  return m ? m.name : id;
+}
+// 标题下的模型小字：本对话选的 → 历史上实际跑的 → 服务器默认，开页就能看、不用先发一句话
+function syncModelSub() {
+  const id = state.model || state.lastModel || state.modelDefault || '';
+  const base = id.replace('[1m]', '');
+  state.sessionModel = base ? modelDisplay(base) + (base === id ? '' : ' 1M') : 'Claude';
+  updateHeader();
+}
 function openModelSheet() {
   closeMenu();
   const mo = $('modelOpts'); mo.innerHTML = '';
@@ -916,7 +928,7 @@ function openModelSheet() {
     const o = el('button', 'opt' + (state.model === x.id ? ' on' : ''));
     const tag = x.ctx >= 1000000 ? ' <span class="tag1m">1M</span>' : '';
     o.innerHTML = `<div><div>${x.name}${tag}</div>${x.sub ? `<div class="osub">${x.sub}</div>` : ''}</div><span class="check">✓</span>`;
-    o.addEventListener('click', () => { state.model = x.id; state.modelMine = true; if (state.currentSession) sendPresence(); else LS.model = x.id; openModelSheet(); });
+    o.addEventListener('click', () => { state.model = x.id; state.modelMine = true; if (state.currentSession) { sendPresence(); syncModelSub(); } else LS.model = x.id; openModelSheet(); });
     mo.appendChild(o);
   });
   // hide effort if the chosen model declares it unsupported
