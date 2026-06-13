@@ -2,6 +2,7 @@ name: Build APK
 
 on:
   push:
+    branches: [master]   # 发版时 gh release 推的 tag 不再触发第二次构建
   workflow_dispatch:
 
 jobs:
