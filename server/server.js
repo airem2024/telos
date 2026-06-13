@@ -2,7 +2,7 @@ import { WebSocketServer } from 'ws';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, createReadStream, createWriteStream } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, createReadStream, createWriteStream, watch as fsWatch } from 'node:fs';
 import { homedir } from 'node:os';
 import * as fsp from 'node:fs/promises';
 import * as nodePath from 'node:path';
@@ -725,6 +725,20 @@ function apkNotes() {
   try { return readFileSync(nodePath.join(homedir(), 'claude-term', 'server', 'apk_notes.txt'), 'utf8').trim(); }
   catch (e) { return ''; }
 }
+// 发版只改 apk_version.txt、不重启 bridge，而客户端是长连接——只在 auth 时推一次的话，
+// 用户每次都得手动「检查更新」。监听版本文件变化，变了就把 app_update 重新广播给在线客户端。
+let lastPushedApkVer = apkVersion();
+try {
+  fsWatch(nodePath.join(homedir(), 'claude-term', 'server'), (ev, fn) => {
+    if (fn !== 'apk_version.txt' && fn !== 'apk_notes.txt') return;
+    setTimeout(() => { // version+notes 两个文件先后落盘，等齐了再读；多个 watch 事件靠版本比对去重
+      const v = apkVersion();
+      if (v === lastPushedApkVer) return;
+      lastPushedApkVer = v;
+      for (const c of clients) { try { send(c, { type: 'app_update', version: v, url: '/app.apk', notes: apkNotes() }); } catch (e) {} }
+    }, 800);
+  });
+} catch (e) {}
 const httpServer = createServer(async (req, res) => {
   try {
     // bundled UI 从 file:// 加载（origin "null"），不发 CORS 头 WebView 会拦掉 XHR/fetch
