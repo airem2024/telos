@@ -872,7 +872,7 @@ wss.on('connection', (ws) => {
     if (ws.isAlive === false) { try { ws.terminate(); } catch (e) {} clearInterval(heartbeat); return; }
     ws.isAlive = false;
     try { ws.ping(); } catch (e) {}
-  }, 30000);
+  }, 20000);  // 20s(<30s)：让隧道这条腿更暖，减少 Cloudflare/NAT 回收空闲连接导致的瞬断
 
   ws.on('message', async (raw) => {
     let msg;

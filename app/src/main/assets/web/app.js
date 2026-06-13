@@ -266,12 +266,14 @@ function connect() {
   ws.onclose = () => {
     state.connected = false; state.authed = false;
     clearTimeout(state.reconnectTimer); state.reconnectTimer = setTimeout(connect, 2500);
-    // show the disconnect screen, but only if a quick reconnect doesn't beat it
-    if (state.screen === 'setup') return;
-    if (!P('discFx')) { connbar('已断开，重连中…', true); return; }   // banner-only mode
-    // longer grace so the file-picker round-trip / brief blips don't flash the screen;
+    // show the disconnect UI, but only if a quick reconnect doesn't beat it. 隧道/NAT 掐空闲连接的
+    // 瞬断通常 2.5s 自动接回，宽限必须长于重连(3000>2500)，否则每次空闲小瞬断都闪一下提示。
     // even longer while uploads are in flight (the socket churns then)
-    if (!state.discActive) { clearTimeout(state.discShowTimer); state.discShowTimer = setTimeout(showDisc, state.uploading > 0 ? 9000 : 1600); }
+    if (state.screen === 'setup') return;
+    const grace = state.uploading > 0 ? 9000 : 3000;
+    clearTimeout(state.discShowTimer);
+    if (!P('discFx')) { state.discShowTimer = setTimeout(() => { if (!state.connected) connbar('已断开，重连中…', true); }, grace); return; }   // banner-only mode
+    if (!state.discActive) state.discShowTimer = setTimeout(showDisc, grace);
   };
   ws.onerror = () => {};
 }
@@ -286,7 +288,7 @@ function ensureConnected() {
   clearTimeout(state.reconnectTimer); connect();
 }
 // app-level liveness: a half-open WS (peer gone through Cloudflare) still shows OPEN, so sends
-// vanish and nothing comes back ("发了收不到"). Ping every 20s; if NOTHING has arrived for 60s,
+// vanish and nothing comes back ("发了收不到"). Ping every 15s; if NOTHING has arrived for 60s,
 // the path is dead — drop it and reconnect. lastRx is bumped on every received frame incl. pong.
 function startLiveness() {
   if (state.liveTimer) return;
@@ -297,7 +299,7 @@ function startLiveness() {
       state.connected = false; state.authed = false; connect(); return;
     }
     try { state.ws.send(JSON.stringify({ type: 'ping', t: Date.now() })); } catch (e) {}
-  }, 20000);
+  }, 15000);
 }
 function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 // presence → bridge: which conversation I'm viewing + foreground (so wake push skips the one I'm looking at)
