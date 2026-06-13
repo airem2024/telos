@@ -221,7 +221,7 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
   (`state.modelMine` 标志)——旧版 App 每次看对话都拿全局值 stamp,正是它把每会话记忆冲掉的。
   `fireWake` 用 pref resume——**否则唤醒用默认 200K 模型 resume 一个 >200K 的对话 → cc 自动压缩 →
   用户丢细节**(踩过);想让唤醒对话单独用 haiku,进那个对话选一次即可,不影响别的对话。
-  开页即显示模型(v1.1.25):`get_history` 另带 `lastModel`(jsonl 最后一条 assistant 的 model,
+  开页即显示模型(v1.1.26):`get_history` 另带 `lastModel`(jsonl 最后一条 assistant 的 model,
   '<synthetic>'/导入占位 'claude' 不算),标题下小字按 pref→lastModel→服务器默认显示,不用先发消息。
 - **自动压缩**:cli 里自动压缩调用 `customInstructions:null`——**它不读任何「压缩提示词」**;之所以有时像按自定义提示词压,
   是因为那段提示词当时在上下文里、被总结模型顺手看见。已给 bridge systemd 加 `Environment=DISABLE_AUTO_COMPACT=1`
