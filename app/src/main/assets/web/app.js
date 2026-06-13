@@ -1267,7 +1267,17 @@ function renderWakeList() {
     const del = el('button', 'wki-del'); del.textContent = '×'; del.addEventListener('click', () => { w.list.splice(i, 1); renderWakeForm(); }); it.appendChild(del);
     box.appendChild(it);
   });
-  if (w.ccCount) { const e = el('div', 'wkempty'); e.textContent = '（cc 还给自己安排了 ' + w.ccCount + ' 个醒来时间）'; box.appendChild(e); }
+  if (w.ccCount) {
+    const row = el('div', 'wkccrow');
+    const t = el('div', 'wkempty'); t.textContent = 'cc 给自己安排了 ' + w.ccCount + ' 个醒来时间'; row.appendChild(t);
+    const b = el('button', 'wkcc-clear'); b.textContent = '清除';
+    b.addEventListener('click', () => {
+      const s = state.wakeTarget; if (!s) return;
+      wsend({ type: 'wakeup_clear_cc', sessionId: s.id });
+      w.ccCount = 0; renderWakeForm(); toast('已清掉 cc 自排的醒来');
+    });
+    row.appendChild(b); box.appendChild(row);
+  }
 }
 function renderDawnArea() {
   const w = state.wk; const box = $('wkDawnArea'); box.innerHTML = '';

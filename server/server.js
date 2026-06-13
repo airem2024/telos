@@ -1332,6 +1332,18 @@ async function handle(ws, conn, msg) {
       broadcastWake(sid);
       break;
     }
+    case 'wakeup_clear_cc': {
+      // 界面里清掉 cc 给自己排的全部唤醒（by:'cc'），不动用户自己设的——给用户一个能取消 cc
+      // 自排唤醒的入口（等价于 cc 调 set_wakeup(enable:false)）。原本只有 cc 自己清得掉。
+      const sid = msg.sessionId; const w = wakeups[sid];
+      if (w && (w.schedules || []).some((s) => s.by === 'cc')) {
+        w.schedules = w.schedules.filter((s) => s.by !== 'cc');
+        if (!w.schedules.length) w.enabled = false;
+        w.followupAt = null; // 顺手停掉 cc 主动追问的待触发
+        saveWakeups(); broadcastWake(sid);
+      }
+      break;
+    }
 
     // ---- per-session diary ----
     case 'diary_get': {
