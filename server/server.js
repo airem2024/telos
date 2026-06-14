@@ -289,19 +289,32 @@ function makeSessionMcp(sessionRef) {
           return { content: [{ type: 'text', text: `好，已新增。你当前安排的醒来：${all.map((s) => fmtTime(s.nextAt, w.tz) + (s.repeat ? '(重复)' : '')).join('、')}` }] };
         }),
       tool('read_diary',
-        '读取这个对话的日记。不传 date=返回有日记的日期清单；date 传 "YYYY-MM-DD"=返回那天的全部条目（含心情/天气/标签，以及图片的绝对路径——想看图就对该路径用 Read 工具）。',
-        { date: z.string().optional() },
-        async ({ date }) => {
+        '读取/检索这个对话的日记。三种用法：① 不传参数=返回有日记的日期清单；② date 传 "YYYY-MM-DD"=返回那天的全部条目（含心情/天气/标签，以及图片的绝对路径——想看图就对该路径用 Read 工具）；③ query 传关键词=跨所有日期搜索正文/标签/心情/天气里含该词的条目（用来回忆"我之前在日记里写过……"），按日期倒序返回、最多 30 条。query 和 date 同传时以 query 为准。',
+        { date: z.string().optional(), query: z.string().optional() },
+        async ({ date, query }) => {
           const sid = sessionRef.id; const book = (sid && diary[sid]) || {};
+          const fmtEntry = (e) => {
+            let s = `【${e.author}】${e.text}`;
+            const tg = [e.mood, e.weather, e.tags].filter(Boolean).join(' ');
+            if (tg) s += `\n（${tg}）`;
+            if (e.images && e.images.length) s += `\n图片(用 Read 查看)：${e.images.join(' , ')}`;
+            return s;
+          };
+          const q = (query || '').trim().toLowerCase();
+          if (q) {
+            const hits = [];
+            for (const d of Object.keys(book).sort().reverse()) {
+              for (const e of (book[d] || [])) {
+                const hay = ((e.text || '') + ' ' + (e.tags || '') + ' ' + (e.mood || '') + ' ' + (e.weather || '')).toLowerCase();
+                if (hay.includes(q)) hits.push(`${d}\n${fmtEntry(e)}`);
+                if (hits.length >= 30) break;
+              }
+              if (hits.length >= 30) break;
+            }
+            return { content: [{ type: 'text', text: hits.length ? `检索「${query}」命中 ${hits.length} 条：\n\n` + hits.join('\n\n') : `日记里没有含「${query}」的条目。` }] };
+          }
           if (date) {
             const page = book[date] || [];
-            const fmtEntry = (e) => {
-              let s = `【${e.author}】${e.text}`;
-              const tg = [e.mood, e.weather, e.tags].filter(Boolean).join(' ');
-              if (tg) s += `\n（${tg}）`;
-              if (e.images && e.images.length) s += `\n图片(用 Read 查看)：${e.images.join(' , ')}`;
-              return s;
-            };
             return { content: [{ type: 'text', text: page.length ? `${date}\n` + page.map(fmtEntry).join('\n\n') : `${date}：那天没有日记。` }] };
           }
           const days = Object.keys(book).sort();
@@ -1333,13 +1346,13 @@ async function handle(ws, conn, msg) {
       break;
     }
     case 'wakeup_clear_cc': {
-      // 界面里清掉 cc 给自己排的全部唤醒（by:'cc'），不动用户自己设的——给用户一个能取消 cc
-      // 自排唤醒的入口（等价于 cc 调 set_wakeup(enable:false)）。原本只有 cc 自己清得掉。
+      // 界面里清掉 cc 给自己排的唤醒（by:'cc'），不动用户自己设的——给用户一个取消 cc 自排唤醒的入口。
+      // 传 id=只删那一条（精确删某个时间点）；不传 id=清掉全部 cc 排程（等价 cc 调 set_wakeup(enable:false)）。
       const sid = msg.sessionId; const w = wakeups[sid];
       if (w && (w.schedules || []).some((s) => s.by === 'cc')) {
-        w.schedules = w.schedules.filter((s) => s.by !== 'cc');
+        w.schedules = w.schedules.filter((s) => s.by !== 'cc' ? true : (msg.id ? s.id !== msg.id : false));
+        if (!w.schedules.some((s) => s.by === 'cc')) w.followupAt = null; // cc 排程全清掉了才停追问
         if (!w.schedules.length) w.enabled = false;
-        w.followupAt = null; // 顺手停掉 cc 主动追问的待触发
         saveWakeups(); broadcastWake(sid);
       }
       break;

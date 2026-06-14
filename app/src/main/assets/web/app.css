@@ -843,9 +843,7 @@ body.sysfont {
 .wkitem .wki-cc { font-size: 11px; color: var(--accent); flex: none; }
 .wkitem .wki-del { flex: none; width: 30px; height: 30px; border: none; background: none; color: var(--muted); font-size: 20px; line-height: 1; }
 .wkempty { font-size: 13px; color: var(--muted); padding: 4px 2px 10px; }
-.wkccrow { display: flex; align-items: center; gap: 8px; }
-.wkccrow .wkempty { flex: 1; padding: 4px 2px; }
-.wkcc-clear { flex: none; border: none; background: var(--surface-2); color: var(--accent); font-size: 13px; padding: 6px 12px; border-radius: 8px; }
+.wkcc-clear { width: 100%; border: none; background: var(--surface-2); color: var(--accent); font-size: 13px; padding: 10px 12px; border-radius: 10px; margin-top: 2px; }
 .wkadd { width: 100%; padding: 12px; border: 1px dashed var(--border); background: none; border-radius: 12px; color: var(--accent); font-size: 14px; font-weight: 600; margin-top: 2px; }
 .wkadd:active { background: var(--surface-2); }
 #wkEditor { border: 1px solid var(--border); border-radius: 14px; padding: 12px; margin-top: 10px; }

@@ -1232,7 +1232,7 @@ function fillWakeForm(st) {
     enabled: !!st.enabled, chase: !!st.chase, dawn: !!st.dawn,
     dawnH: (+dp[0] || 0), dawnM: (+dp[1] || 0),
     list: (st.schedules || []).filter((s) => s.by !== 'cc' && (s.nextAt || s.repeat)).map((s) => ({ nextAt: s.nextAt || 0, repeat: s.repeat || null })),
-    ccCount: (st.schedules || []).filter((s) => s.by === 'cc').length,
+    cc: (st.schedules || []).filter((s) => s.by === 'cc').map((s) => ({ id: s.id, nextAt: s.nextAt || 0, repeat: s.repeat || null })),
     eMode: 'daily', eDate: todayLocalStr(), eHour: (now.getHours() + 1) % 24, eMin: 0, eEvery: 180,
   };
   closeWakeEditor();
@@ -1257,7 +1257,7 @@ function scheduleLabel(sch) {
 }
 function renderWakeList() {
   const w = state.wk; const box = $('wkList'); box.innerHTML = '';
-  if (!w.list.length) { const e = el('div', 'wkempty'); e.textContent = '还没有唤醒时间，点下面添加。'; box.appendChild(e); }
+  if (!w.list.length && !(w.cc || []).length) { const e = el('div', 'wkempty'); e.textContent = '还没有唤醒时间，点下面添加。'; box.appendChild(e); }
   w.list.forEach((sch, i) => {
     const it = el('div', 'wkitem');
     const main = el('div', 'wki-main');
@@ -1267,16 +1267,30 @@ function renderWakeList() {
     const del = el('button', 'wki-del'); del.textContent = '×'; del.addEventListener('click', () => { w.list.splice(i, 1); renderWakeForm(); }); it.appendChild(del);
     box.appendChild(it);
   });
-  if (w.ccCount) {
-    const row = el('div', 'wkccrow');
-    const t = el('div', 'wkempty'); t.textContent = 'cc 给自己安排了 ' + w.ccCount + ' 个醒来时间'; row.appendChild(t);
-    const b = el('button', 'wkcc-clear'); b.textContent = '清除';
-    b.addEventListener('click', () => {
+  (w.cc || []).forEach((sch) => {
+    const it = el('div', 'wkitem');
+    const main = el('div', 'wki-main');
+    const wh = el('div', 'wki-when'); wh.textContent = scheduleLabel(sch); main.appendChild(wh);
+    if (sch.repeat && sch.repeat.kind === 'every' && sch.nextAt) { const sub = el('div', 'wki-sub'); sub.textContent = '下次 ' + wakeLabel(sch.nextAt); main.appendChild(sub); }
+    it.appendChild(main);
+    const tag = el('div', 'wki-cc'); tag.textContent = 'cc'; it.appendChild(tag);
+    const del = el('button', 'wki-del'); del.textContent = '×';
+    del.addEventListener('click', () => {
+      const s = state.wakeTarget; if (!s) return;
+      wsend({ type: 'wakeup_clear_cc', sessionId: s.id, id: sch.id });
+      w.cc = (w.cc || []).filter((x) => x.id !== sch.id); renderWakeForm();
+    });
+    it.appendChild(del);
+    box.appendChild(it);
+  });
+  if ((w.cc || []).length > 1) {
+    const clr = el('button', 'wkcc-clear'); clr.textContent = '清除全部 cc 自排的醒来';
+    clr.addEventListener('click', () => {
       const s = state.wakeTarget; if (!s) return;
       wsend({ type: 'wakeup_clear_cc', sessionId: s.id });
-      w.ccCount = 0; renderWakeForm(); toast('已清掉 cc 自排的醒来');
+      w.cc = []; renderWakeForm(); toast('已清掉 cc 自排的醒来');
     });
-    row.appendChild(b); box.appendChild(row);
+    box.appendChild(clr);
   }
 }
 function renderDawnArea() {
