@@ -18,7 +18,8 @@ const PREF_DEFAULTS = {
   fontSize: 1, fontFamily: 'client', showModel: true, showTokens: true,
   interruptOnLeave: false, autoScroll: true, pasteAsFile: false, pasteThreshold: 1200,
   haptics: true, genHaptic: false, updateNotify: true, showStatusBar: true, discFx: true, discBlink: false,
-  autoCleanup: true, wakePush: true, compactPrompt: ''
+  autoCleanup: true, wakePush: true, compactPrompt: '',
+  theme: 'warm', accent: 'brick', foldersCollapsed: false
 };
 function loadPrefs() {
   const p = { ...PREF_DEFAULTS };
@@ -466,7 +467,24 @@ function renderTabs() {
     tabs.appendChild(b);
   };
   mk('All', null, state.sessions.length, false);
-  (state.folders || []).forEach((f) => mk(esc(f), f, state.sessions.filter((s) => s.folder === f).length, true));
+  const folders = state.folders || [];
+  if (!folders.length) return;
+  if (P('foldersCollapsed')) {
+    // 收起态：整条文件夹栏收成一个可展开的 chip「▸ 📁 文件夹 N」
+    const b = el('button', 'tab foldtoggle');
+    b.innerHTML = '▸ ' + ICON.folder + ' 文件夹 <span class="count">' + folders.length + '</span>';
+    b.addEventListener('click', () => { setPref('foldersCollapsed', false); renderTabs(); });
+    tabs.appendChild(b);
+    return;
+  }
+  folders.forEach((f) => mk(esc(f), f, state.sessions.filter((s) => s.folder === f).length, true));
+  // 末尾折叠箭头：像命令一样把整条文件夹栏收起
+  const fold = el('button', 'tab foldtoggle'); fold.textContent = '▾';
+  fold.addEventListener('click', () => {
+    if (state.activeFolder) state.activeFolder = null; // 收起时若停在某文件夹，回到「全部」免得过滤生效但 chip 看不见
+    setPref('foldersCollapsed', true); renderSessions();
+  });
+  tabs.appendChild(fold);
 }
 function renderSessions() {
   hideSplash();
@@ -1606,6 +1624,11 @@ function applyFont() {
   document.documentElement.style.setProperty('--fs-scale', P('fontSize'));
   document.body.classList.toggle('sysfont', P('fontFamily') === 'system');
 }
+// 主题 + 强调色：都靠 <html> 上的 data-theme / data-accent 让 CSS 的属性选择器覆盖 token
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', P('theme'));
+  document.documentElement.setAttribute('data-accent', P('accent'));
+}
 function applyStatusBar() { try { window.Android && Android.setStatusBar && Android.setStatusBar(!!P('showStatusBar')); } catch (e) {} }
 function applyDiscFx() {
   if (!P('discFx')) { hideDisc(); if (!state.connected && state.screen !== 'setup') connbar('已断开，重连中…', true); }
@@ -1615,6 +1638,8 @@ function applyDiscBlink() { $('discScreen').classList.toggle('noblink', !P('disc
 function cleanupNow() { if (P('autoCleanup')) wsend({ type: 'cleanup_stale' }); }  // run immediately when toggled on
 const SET_CATS = {
   appearance: { name: '外观', items: [
+    { type: 'segment', key: 'theme', name: '主题', opts: [['warm', '暖调'], ['gray', '灰白'], ['dark', '夜间']], onChange: applyTheme },
+    { type: 'swatch', key: 'accent', name: '强调色', opts: [['brick', '#c2613f'], ['indigo', '#3a6ea5'], ['green', '#4a7c59'], ['teal', '#2f7d8f']], onChange: applyTheme },
     { type: 'slider', key: 'fontSize', name: '字体大小', min: 0.8, max: 1.4, step: 0.05, fmt: (v) => Math.round(v * 100) + '%', onChange: applyFont },
     { type: 'segment', key: 'fontFamily', name: '字体', opts: [['client', '客户端字体'], ['system', '系统字体']], onChange: applyFont },
     { type: 'toggle', key: 'showModel', name: '显示模型名称', onChange: updateHeader },
@@ -1644,7 +1669,7 @@ const SET_CATS = {
 };
 function refreshSettingsRows() {
   $('setConnDesc').textContent = state.connected ? (state.authed ? '已连接' : '连接中…') : '未连接';
-  $('setAppearDesc').textContent = '字体 ' + Math.round(P('fontSize') * 100) + '% · ' + (P('fontFamily') === 'system' ? '系统字体' : '客户端字体');
+  $('setAppearDesc').textContent = ({ warm: '暖调', gray: '灰白', dark: '夜间' }[P('theme')] || '暖调') + ' · 字体 ' + Math.round(P('fontSize') * 100) + '%';
   $('setChatDesc').textContent = (P('interruptOnLeave') ? '退出中断 · ' : '') + (P('autoScroll') ? '自动滚动' : '不自动滚动');
   $('setHapticDesc').textContent = P('haptics') ? '开' : '关';
   $('setUpdateDesc').textContent = P('updateNotify') ? '接受推送' : '不接受';
@@ -1686,6 +1711,15 @@ function renderSetSub() {
       const seg = el('div', 'segment');
       it.opts.forEach(([v, n]) => { const b = el('button', 'seg' + (P(it.key) === v ? ' on' : '')); b.textContent = n; b.addEventListener('click', () => { setPref(it.key, v); if (it.onChange) it.onChange(); renderSetSub(); refreshSettingsRows(); }); seg.appendChild(b); });
       row.appendChild(seg);
+    } else if (it.type === 'swatch') {
+      row.classList.add('swatchrow');
+      const lab = el('span', 'seg-label'); lab.textContent = it.name; row.appendChild(lab);
+      const dots = el('div', 'swatchdots');
+      it.opts.forEach(([v, color]) => {
+        const b = el('button', 'swatchdot' + (P(it.key) === v ? ' on' : '')); b.style.background = color;
+        b.addEventListener('click', () => { setPref(it.key, v); if (it.onChange) it.onChange(); buzz(12); renderSetSub(); refreshSettingsRows(); }); dots.appendChild(b);
+      });
+      row.appendChild(dots);
     } else if (it.type === 'button') {
       row.classList.add('btnrow'); const b = el('button', 'btn btn-ghost'); b.textContent = it.name; b.addEventListener('click', it.action); row.appendChild(b);
     } else if (it.type === 'info') {
@@ -2264,7 +2298,7 @@ function boot() {
     });
   });
 
-  state.prefs = loadPrefs(); applyFont(); applyStatusBar(); applyDiscBlink();
+  state.prefs = loadPrefs(); applyFont(); applyTheme(); applyStatusBar(); applyDiscBlink();
   window._bootAt = Date.now();
   if (LS.token) { show('list'); connect(); setTimeout(hideSplash, 6000); } // 6s fallback if list never loads
   else { show('setup'); hideSplash(); }
