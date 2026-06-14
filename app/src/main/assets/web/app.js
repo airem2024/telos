@@ -467,27 +467,23 @@ function renderTabs() {
     tabs.appendChild(b);
   };
   mk('All', null, state.sessions.length, false);
-  const folders = state.folders || [];
-  if (!folders.length) return;
-  if (P('foldersCollapsed')) {
-    // 收起态：整条文件夹栏收成一个可展开的 chip「▸ 📁 文件夹 N」
-    const b = el('button', 'tab foldtoggle');
-    b.innerHTML = '▸ ' + ICON.folder + ' 文件夹 <span class="count">' + folders.length + '</span>';
-    b.addEventListener('click', () => { setPref('foldersCollapsed', false); renderTabs(); });
-    tabs.appendChild(b);
-    return;
-  }
-  folders.forEach((f) => mk(esc(f), f, state.sessions.filter((s) => s.folder === f).length, true));
-  // 末尾折叠箭头：像命令一样把整条文件夹栏收起
-  const fold = el('button', 'tab foldtoggle'); fold.textContent = '▾';
-  fold.addEventListener('click', () => {
-    if (state.activeFolder) state.activeFolder = null; // 收起时若停在某文件夹，回到「全部」免得过滤生效但 chip 看不见
-    setPref('foldersCollapsed', true); renderSessions();
-  });
-  tabs.appendChild(fold);
+  (state.folders || []).forEach((f) => mk(esc(f), f, state.sessions.filter((s) => s.folder === f).length, true));
+}
+// 文件夹收起：由 Telos 标题旁的小三角控制整条 #tabs 显隐（像命令一样可收起）。
+// 只有存在文件夹时才出现三角；收起时回到「全部」，免得过滤生效却看不见 chip。
+function syncFoldCaret() {
+  const hasFolders = (state.folders || []).length > 0;
+  const collapsed = hasFolders && P('foldersCollapsed');
+  if (collapsed && state.activeFolder) state.activeFolder = null;
+  const caret = $('foldCaret');
+  if (!caret) return;
+  caret.style.display = hasFolders ? '' : 'none';
+  caret.textContent = collapsed ? '▸' : '▾';
+  $('tabs').style.display = collapsed ? 'none' : '';
 }
 function renderSessions() {
   hideSplash();
+  syncFoldCaret();
   renderTabs();
   const list = $('sessionList'); list.innerHTML = '';
   let items = state.sessions;
@@ -512,7 +508,7 @@ function renderSessions() {
     const repo = el('div', 'scard-repo'); repo.innerHTML = ICON.cloud;
     const rl = el('span'); rl.textContent = shortCwd(s.cwd) + (s.gitBranch ? ' · ' + s.gitBranch : ''); repo.appendChild(rl);
     meta.appendChild(t); meta.appendChild(repo);
-    if (s.wakeAt) { const wk = el('div', 'scard-wake'); wk.textContent = '⏰ ' + wakeLabel(s.wakeAt) + ' 醒来'; meta.appendChild(wk); }
+    if (s.wakeAt) { const wk = el('div', 'scard-wake'); wk.textContent = wakeLabel(s.wakeAt) + ' 醒来'; meta.appendChild(wk); }
     if (s.unreadNotes) { const b = el('span', 'scard-badge'); b.textContent = s.unreadNotes; t.appendChild(b); }
     const time = el('div', 'scard-time'); time.textContent = relTime(s.updatedAt);
     head.appendChild(meta);
@@ -762,7 +758,7 @@ function openToolsSheet(tools) {
 function renderToolsLevel1() {
   state.toolsLevel = 1;
   const tools = state.toolsList || [];
-  $('toolsLeft').textContent = '✕';
+  $('toolsLeft').style.visibility = 'hidden'; $('toolsLeft').textContent = '';
   $('toolsTitle').textContent = `Used ${tools.length} tools, ran ${tools.filter((t) => t.name === 'Bash').length} commands`;
   $('toolsSub').textContent = '';
   const body = $('toolsBody'); body.innerHTML = '';
@@ -782,7 +778,7 @@ function renderToolsLevel1() {
 }
 function showToolDetail(t) {
   state.toolsLevel = 2;
-  $('toolsLeft').textContent = '‹';
+  $('toolsLeft').style.visibility = 'visible'; $('toolsLeft').textContent = '‹';
   $('toolsTitle').textContent = t.name;
   $('toolsSub').textContent = t.isError ? '失败' : '完成';
   const body = $('toolsBody'); body.innerHTML = '';
@@ -820,7 +816,6 @@ function applyMode() {
   if (state.mode === 'plan') chip.classList.add('plan');
   else if (state.mode === 'acceptEdits') chip.classList.add('auto');
   else if (state.mode === 'bypass') chip.classList.add('bypass');
-  const ng = chip.querySelector('.ng'); if (ng) ng.style.display = state.mode === 'code' ? '' : 'none';
 }
 function openSession(s) {
   // re-entering the session whose turn is still running → keep the live view (message +
@@ -971,7 +966,7 @@ function openModeSheet() {
   const box = $('modeOpts'); box.innerHTML = '';
   MODES.forEach((md) => {
     const row = el('button', 'moderow');
-    row.innerHTML = md.icon + '<span class="mbody"><span class="mname">' + md.name + '</span><span class="mdesc">' + md.desc + '</span></span><span class="radio' + (state.mode === md.id ? ' on' : '') + '"></span>';
+    row.innerHTML = '<span class="mbody"><span class="mname">' + md.name + '</span><span class="mdesc">' + md.desc + '</span></span><span class="radio' + (state.mode === md.id ? ' on' : '') + '"></span>';
     row.addEventListener('click', () => setMode(md.id));
     box.appendChild(row);
   });
@@ -1639,7 +1634,7 @@ function cleanupNow() { if (P('autoCleanup')) wsend({ type: 'cleanup_stale' }); 
 const SET_CATS = {
   appearance: { name: '外观', items: [
     { type: 'segment', key: 'theme', name: '主题', opts: [['warm', '暖调'], ['gray', '灰白'], ['dark', '夜间']], onChange: applyTheme },
-    { type: 'swatch', key: 'accent', name: '强调色', opts: [['brick', '#c2613f'], ['indigo', '#3a6ea5'], ['green', '#4a7c59'], ['teal', '#2f7d8f']], onChange: applyTheme },
+    { type: 'swatch', key: 'accent', name: '强调色', opts: [['brick', '#c2613f'], ['rose', '#c0506b'], ['amber', '#b07636'], ['green', '#4a7c59'], ['teal', '#2f7d8f'], ['indigo', '#3a6ea5'], ['violet', '#7a5cc6'], ['slate', '#5d6b78']], onChange: applyTheme },
     { type: 'slider', key: 'fontSize', name: '字体大小', min: 0.8, max: 1.4, step: 0.05, fmt: (v) => Math.round(v * 100) + '%', onChange: applyFont },
     { type: 'segment', key: 'fontFamily', name: '字体', opts: [['client', '客户端字体'], ['system', '系统字体']], onChange: applyFont },
     { type: 'toggle', key: 'showModel', name: '显示模型名称', onChange: updateHeader },
@@ -1721,7 +1716,10 @@ function renderSetSub() {
       });
       row.appendChild(dots);
     } else if (it.type === 'button') {
-      row.classList.add('btnrow'); const b = el('button', 'btn btn-ghost'); b.textContent = it.name; b.addEventListener('click', it.action); row.appendChild(b);
+      row.classList.add('togglerow');
+      const lab = el('span'); lab.textContent = it.name;
+      const chev = el('span', 'sr-chev'); chev.textContent = '›';
+      row.appendChild(lab); row.appendChild(chev); row.addEventListener('click', it.action);
     } else if (it.type === 'info') {
       row.classList.add('togglerow'); const lab = el('span'); lab.textContent = it.name; const v = el('span', 'sr-desc'); v.textContent = it.value(); row.appendChild(lab); row.appendChild(v);
     }
@@ -2123,6 +2121,7 @@ function boot() {
 
   $('newBtn').addEventListener('click', newSession);
   $('refreshBtn').addEventListener('click', () => { wsend({ type: 'list_sessions' }); toast('刷新中'); });
+  $('foldCaret').addEventListener('click', () => { setPref('foldersCollapsed', !P('foldersCollapsed')); renderSessions(); });
   initListSwipe();
   $('menuBtn').addEventListener('click', openDrawer);
   $('drawerBack').addEventListener('click', closeDrawer);

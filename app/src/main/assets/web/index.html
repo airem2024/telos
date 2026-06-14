@@ -12,7 +12,7 @@
   <!-- DESIGN: swap the inner art/wordmark below; keep id="splash" so the JS can fade it out. -->
   <div id="splash">
     <div class="splash-art">
-      <img class="splash-mark" src="telos-mark.png" alt="Telos">
+      <div class="splash-mark" id="splashMark"></div>
       <div class="splash-name">Telos</div>
     </div>
     <div class="splash-foot">正在连接你的 cc…</div>
@@ -42,7 +42,7 @@
       <div class="spacer"></div>
       <button class="iconbtn" id="refreshBtn">⟳</button>
     </div>
-    <div class="list-title">Telos</div>
+    <div class="list-title">Telos<button class="foldcaret" id="foldCaret" style="display:none">▾</button></div>
     <div class="tabs" id="tabs"></div>
     <div class="sessions" id="sessionList"></div>
     <button class="fab" id="newBtn"><span class="plus">＋</span> New link</button>
@@ -82,7 +82,7 @@
         </button>
         <textarea id="composer" rows="1" placeholder="Describe what you want to build…"></textarea>
         <div class="inputrow">
-          <button class="modechip" id="modeChip"><span class="ng">&lt;/&gt;</span> <span id="modeLabel">Code</span></button>
+          <button class="modechip" id="modeChip"><span id="modeLabel">Code</span></button>
           <div class="spacer"></div>
           <button class="roundbtn" id="plusBtn" title="更多">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -248,7 +248,7 @@
   <!-- folder picker -->
   <div class="scrim" id="folderScrim">
     <div class="sheet">
-      <div class="sheethdr nodrag"><button class="sheetx" data-x>✕</button><div class="ptitle">移到文件夹</div></div>
+      <div class="sheethdr nodrag"><div class="ptitle">移到文件夹</div></div>
       <div class="sheetbody"><div class="optlist" id="folderList"></div></div>
     </div>
   </div>
@@ -256,10 +256,9 @@
   <!-- 压缩提示词 editor -->
   <div class="scrim" id="compactScrim">
     <div class="sheet drag">
-      <div class="sheethdr"><div class="grip"></div><button class="sheetx" data-x>✕</button><div class="ptitle">压缩提示词</div><div class="psub">手动压缩历史时附带的指令</div></div>
+      <div class="sheethdr"><div class="grip"></div><div class="ptitle">压缩提示词</div><div class="psub">手动压缩历史时附带的指令</div><button class="sheet-save" id="compactSave">保存</button></div>
       <div class="sheetbody">
         <textarea id="compactText" class="codearea" placeholder="压缩/总结历史时希望 cc 重点保留什么（角色设定、关键事实、风格…）。留空＝用 cc 默认压缩。" autocapitalize="sentences" spellcheck="false"></textarea>
-        <button class="btn btn-primary" id="compactSave" style="margin-top:12px;">保存</button>
       </div>
     </div>
   </div>
@@ -267,10 +266,9 @@
   <!-- CLAUDE.md editor -->
   <div class="scrim" id="claudeScrim">
     <div class="sheet drag">
-      <div class="sheethdr"><div class="grip"></div><button class="sheetx" data-x>✕</button><div class="ptitle">CLAUDE.md</div><div class="psub mono" id="claudePath"></div></div>
+      <div class="sheethdr"><div class="grip"></div><div class="ptitle">CLAUDE.md</div><div class="psub mono" id="claudePath"></div><button class="sheet-save" id="claudeSave">保存</button></div>
       <div class="sheetbody">
         <textarea id="claudeText" class="codearea" placeholder="这个对话目录的 CLAUDE.md（项目记忆/指令）…" autocapitalize="off" spellcheck="false"></textarea>
-        <button class="btn btn-primary" id="claudeSave" style="margin-top:12px;">保存</button>
       </div>
     </div>
   </div>
@@ -292,7 +290,7 @@
   <!-- MCP servers -->
   <div class="scrim" id="mcpScrim">
     <div class="sheet">
-      <div class="sheethdr nodrag"><button class="sheetx" data-x>✕</button><div class="ptitle">MCP 服务器</div></div>
+      <div class="sheethdr nodrag"><div class="ptitle">MCP 服务器</div></div>
       <div class="sheetbody">
         <div id="mcpList"></div>
         <button class="btn btn-ghost" id="mcpEdit" style="margin-top:10px;">编辑本地 MCP 配置</button>
@@ -303,10 +301,9 @@
   <!-- MCP config editor -->
   <div class="scrim" id="mcpCfgScrim">
     <div class="sheet drag">
-      <div class="sheethdr"><div class="grip"></div><button class="sheetx" data-x>✕</button><div class="ptitle">本地 MCP 配置</div><div class="psub">~/.claude.json · mcpServers</div></div>
+      <div class="sheethdr"><div class="grip"></div><div class="ptitle">本地 MCP 配置</div><div class="psub">~/.claude.json · mcpServers</div><button class="sheet-save" id="mcpCfgSave">保存</button></div>
       <div class="sheetbody">
         <textarea id="mcpCfgText" class="codearea" autocapitalize="off" spellcheck="false"></textarea>
-        <button class="btn btn-primary" id="mcpCfgSave" style="margin-top:12px;">保存</button>
       </div>
     </div>
   </div>
