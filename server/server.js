@@ -492,7 +492,18 @@ function defaultCinema() {
     paused: false, pauseReason: '', nextFrameAt: 0, wakes5h: 0, win5hStart: 0, lastFrameAt: 0, lastSpokeAt: 0,
     startedAt: 0, wakes: 0, spoke: 0, cost: 0 }; // 守夜这一程的账：醒来次数 / 开口次数 / 真实花费
 }
-function ensureCinema(w) { w.cinema = { ...defaultCinema(), ...(w.cinema || {}) }; return w.cinema; }
+function ensureCinema(w) {
+  const old = w.cinema || {};
+  const c = { ...defaultCinema(), ...old };
+  // 迁移旧版（蜉蝣那套）：它的 cadence/perceiveModel/maxFramesPer5h 字段和 25s/90s 间隔是给廉价 haiku
+  // 感知用的——直接套到"真·玲每次都醒"会疯狂烧钱。检测到旧字段就把节奏/上限重置成新默认，并清掉死字段。
+  const legacy = ('perceiveModel' in old) || ('cadence' in old) || ('maxFramesPer5h' in old);
+  if (legacy) { c.fgIntervalSec = 180; c.bgIntervalSec = 600; c.maxWakesPer5h = 30; }
+  delete c.cadence; delete c.perceiveModel; delete c.maxFramesPer5h; delete c.frames5h;
+  c.fgIntervalSec = Math.max(30, c.fgIntervalSec || 180);   // 真·玲每次都花钱：地板别低于 30s/60s
+  c.bgIntervalSec = Math.max(60, c.bgIntervalSec || 600);
+  w.cinema = c; return c;
+}
 function pubCinema(sid) {
   const c = (wakeups[sid] && wakeups[sid].cinema) || null;
   if (!c) return { on: false, holder: cinemaSession || '' };
