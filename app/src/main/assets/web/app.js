@@ -65,11 +65,12 @@ const EFFORTS = [
 ];
 
 /* ============ navigation ============ */
-const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryWrite'];
+const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryWrite', 'cinema'];
 function show(name) {
   SCREENS.forEach((s) => $(s).classList.toggle('active', s === name));
   state.screen = name;
   syncAtRoot();
+  if (typeof updateCinemaBar === 'function') updateCinemaBar();
   sendPresence(); // tell bridge which conversation I'm on (for wake-push 不打扰)
 }
 // anything floating above the current screen that hardware-back should close first
@@ -153,6 +154,7 @@ window.onAndroidBack = () => {
   if ($('permScrim').classList.contains('show')) { closePerm(true); return; }
   if (anyOverlay()) { closeOverlays(); return; }
   if (state.screen === 'diaryWrite') { if (document.querySelector('.dwpicker')) { closeDwPicker(); return; } show('diary'); return; }
+  if (state.screen === 'cinema') { show('list'); wsend({ type: 'list_sessions' }); return; }
   if (state.screen === 'diary') { diaryBack(); return; }
   if (state.screen === 'import') show(state.importReturn || 'files');
   else if (state.screen === 'files') closeFiles();
@@ -419,6 +421,11 @@ function handle(m) {
     case 'cleanup_done': if (m.removed) toast('已清理 ' + m.removed + ' 个废弃对话'); wsend({ type: 'list_sessions' }); break;
     // ---- 醒来 / 日记 / 便签 ----
     case 'wakeup_state': onWakeState(m); break;
+    case 'cinema_state': onCinemaState(m); break;
+    case 'cinema_notice': toast(m.text || '电影模式已暂停'); break;
+    case 'wake_typing':
+      if (m.on) state.cinemaTyping = m.sessionId; else if (state.cinemaTyping === m.sessionId) state.cinemaTyping = '';
+      updateCinemaBar(); break;
     case 'wake_message':
       // late = 重连补发的错过消息——正文已经在会话历史里了，往打开的对话里再插会重复显示
       if (m.late) { toast((m.title ? '「' + m.title + '」' : '') + '有错过的醒来留言'); wsend({ type: 'list_sessions' }); break; }
@@ -833,6 +840,7 @@ function openSession(s) {
   clearThread(); updateHeader(); show('chat'); removeSuggestions();
   // if not authed yet (slow/just-reconnecting), the send is dropped — remember to retry on auth_ok
   state.pendingHistory = wsend({ type: 'get_history', sessionId: s.id }) ? null : s.id;
+  wsend({ type: 'cinema_get', sessionId: s.id }); // 知道这个对话有没有开电影模式 → 顶部「时间流动中」横幅
   state.stickyPopupFor = s.id;
   state.pendingSticky = wsend({ type: 'sticky_get', sessionId: s.id }) ? null : s.id; // show 小纸条 popup if any unread
 }
@@ -1240,6 +1248,98 @@ function onWakeState(m) {
   const s = state.sessions.find((x) => x.id === m.sessionId);
   if (s) { s.wakeAt = (st.enabled && st.nextAt) ? st.nextAt : 0; if (state.screen === 'list') renderSessions(); }
   if (state.wakeTarget && state.wakeTarget.id === m.sessionId && $('wakeScrim').classList.contains('show')) fillWakeForm(st);
+}
+
+/* ---- 电影模式 ---- */
+function cinSend(patch) { const s = state.cinTarget; if (!s) return; wsend({ type: 'cinema_set', sessionId: s.id, ...patch }); }
+function cinToggle(label, on, onClick) {
+  const row = el('div', 'setitem togglerow'); const lab = el('span'); lab.textContent = label;
+  const sw = el('button', 'switch' + (on ? ' on' : '')); sw.innerHTML = '<span class="knob"></span>';
+  sw.addEventListener('click', () => { sw.classList.toggle('on'); buzz(12); onClick(); });
+  row.appendChild(lab); row.appendChild(sw); return row;
+}
+function cinSeg(label, val, opts, onPick) {
+  const row = el('div', 'setitem segrow'); const lab = el('span', 'seg-label'); lab.textContent = label; row.appendChild(lab);
+  const seg = el('div', 'segment');
+  opts.forEach(([v, n]) => { const b = el('button', 'seg' + (val === v ? ' on' : '')); b.textContent = n; b.addEventListener('click', () => { seg.querySelectorAll('.seg').forEach((x) => x.classList.remove('on')); b.classList.add('on'); onPick(v); }); seg.appendChild(b); });
+  row.appendChild(seg); return row;
+}
+function cinSlider(label, val, min, max, step, fmt, onDone) {
+  const row = el('div', 'setitem sliderrow');
+  const top = el('div', 'sl-top'); const lab = el('span'); lab.textContent = label; const sv = el('span', 'sl-val'); sv.textContent = fmt(val);
+  top.appendChild(lab); top.appendChild(sv); row.appendChild(top);
+  const r = document.createElement('input'); r.type = 'range'; r.className = 'slider'; r.min = min; r.max = max; r.step = step; r.value = val;
+  r.addEventListener('input', () => { sv.textContent = fmt(parseInt(r.value)); });
+  r.addEventListener('change', () => onDone(parseInt(r.value)));
+  row.appendChild(r); return row;
+}
+function cinPick(label, val, opts, onPick) {
+  const row = el('div', 'setitem pickrow'); const lab = el('span', 'seg-label'); lab.textContent = label; row.appendChild(lab);
+  const list = el('div', 'picklist');
+  opts.forEach(([v, n]) => { const o = el('button', 'pickopt' + (val === v ? ' on' : '')); o.innerHTML = '<span>' + esc(n) + '</span><span class="pickck">✓</span>'; o.addEventListener('click', () => { list.querySelectorAll('.pickopt').forEach((x) => x.classList.remove('on')); o.classList.add('on'); onPick(v); }); list.appendChild(o); });
+  row.appendChild(list); return row;
+}
+function openCinema(s) {
+  state.cinTarget = s;
+  if (!state.cin || state.cin._sid !== s.id) state.cin = null;
+  show('cinema'); renderCinema();
+  wsend({ type: 'cinema_get', sessionId: s.id });
+}
+function cinNoteHTML(c) {
+  const on = !!c.on; const s = state.cinTarget; const otherHolder = c.holder && s && c.holder !== s.id ? c.holder : '';
+  if (c.paused) return '⏸ 已自动暂停：' + esc(c.pauseReason || '') + '<br>调整后重新打开开关即可继续。';
+  if (on) return '时间正在流动。cc 周期性「看一眼」此刻，无聊或想说话时才真的开口；真回复会推送给你。本窗口已 ' + (c.frames5h || 0) + ' 帧。';
+  if (otherHolder) return '另一个对话正开着电影模式（同一时间只能开一个）。在这里打开会自动关掉那个。';
+  return '开启后这个对话获得连续时间感：cc 周期性感知此刻（haiku 廉价、用完即弃、不留痕），只有生出冲动时才升级成真回复并推送。开着期间这个对话的定时唤醒会自动暂停。';
+}
+function syncCinemaLive() {
+  if (state.screen !== 'cinema') return;
+  const c = state.cin || {};
+  const note = $('cinStatus'); if (note) note.innerHTML = cinNoteHTML(c);
+  const sw = $('cinToggleSw'); if (sw) sw.classList.toggle('on', !!c.on);
+}
+function renderCinema() {
+  const body = $('cinemaBody'); if (!body) return; body.innerHTML = '';
+  const c = state.cin || {}; const s = state.cinTarget; const on = !!c.on;
+  const head = el('div', 'cinhead'); const tt = el('div', 'cintitle'); tt.textContent = s ? (s.title || '这个对话') : ''; head.appendChild(tt); body.appendChild(head);
+  const card0 = el('div', 'setmenu'); const trow = el('div', 'setitem togglerow'); const tlab = el('span'); tlab.textContent = '开启电影模式';
+  const sw = el('button', 'switch' + (on ? ' on' : '')); sw.id = 'cinToggleSw'; sw.innerHTML = '<span class="knob"></span>';
+  sw.addEventListener('click', () => { buzz(12); cinSend({ on: !((state.cin || {}).on) }); });
+  trow.appendChild(tlab); trow.appendChild(sw); card0.appendChild(trow); body.appendChild(card0);
+  const note = el('div', 'cinnote'); note.id = 'cinStatus'; note.innerHTML = cinNoteHTML(c); body.appendChild(note);
+  const cfg = el('div', 'setmenu');
+  cfg.appendChild(cinSeg('节奏', c.cadence || 'continuous', [['continuous', '连续'], ['interval', '按间隔']], (v) => cinSend({ cadence: v })));
+  cfg.appendChild(cinToggle('前台 / 后台不同节奏', !!c.diffRate, () => cinSend({ diffRate: !c.diffRate })));
+  cfg.appendChild(cinSlider('前台间隔（按间隔时生效）', c.fgIntervalSec || 25, 5, 120, 5, (v) => v + ' 秒', (v) => cinSend({ fgIntervalSec: v })));
+  cfg.appendChild(cinSlider('后台间隔（开了不同节奏才用）', c.bgIntervalSec || 90, 10, 600, 10, (v) => v + ' 秒', (v) => cinSend({ bgIntervalSec: v })));
+  cfg.appendChild(cinSlider('额度到多少 % 自动暂停', c.autoPauseUtil || 85, 50, 100, 1, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v })));
+  cfg.appendChild(cinSlider('每 5 小时帧数上限', c.maxFramesPer5h || 400, 50, 1000, 50, (v) => v + ' 帧', (v) => cinSend({ maxFramesPer5h: v })));
+  body.appendChild(cfg);
+  const models = (state.availModels || []).map((x) => [x.id, x.name || x.id]);
+  const aliases = [['haiku', 'haiku（最省）'], ['sonnet', 'sonnet'], ['opus', 'opus']];
+  const mcard = el('div', 'setmenu');
+  mcard.appendChild(cinPick('感知模型（意识层，便宜）', c.perceiveModel || 'haiku', [...aliases, ...models], (v) => cinSend({ perceiveModel: v })));
+  mcard.appendChild(cinPick('审议模型（开口 / 做事）', c.deliberateModel || '', [['', '跟随对话默认'], ...aliases, ...models], (v) => cinSend({ deliberateModel: v })));
+  body.appendChild(mcard);
+}
+function onCinemaState(m) {
+  const st = m.state || {};
+  state.cinemaOnSid = st.holder || '';
+  if (state.cinTarget && state.cinTarget.id === m.sessionId) {
+    const hadCfg = !!state.cin; state.cin = { _sid: m.sessionId, ...st };
+    // 首次拿到状态要整渲染（填好控件）；之后的周期广播只更新状态行/开关，别打断正在操作的控件
+    if (state.screen === 'cinema') { if (!hadCfg) renderCinema(); else syncCinemaLive(); }
+  }
+  updateCinemaBar();
+}
+function updateCinemaBar() {
+  const bar = $('cinemaBar'); if (!bar) return;
+  const onHere = state.screen === 'chat' && state.currentSession && state.cinemaOnSid === state.currentSession;
+  if (!onHere) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  const typing = state.cinemaTyping === state.currentSession;
+  $('cinemaBarText').textContent = typing ? '输入中…' : '时间流动中';
+  bar.classList.toggle('typing', typing);
 }
 function openWakeConfig(s) {
   state.wakeTarget = s;
@@ -2208,6 +2308,8 @@ function boot() {
   $('drDiary').addEventListener('click', () => { closeDrawer(); openDiaryOverview(); });
   // 醒来 / 小纸条 / 日记 wiring
   $('sessWake').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openWakeConfig(s); });
+  $('sessCinema').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openCinema(s); });
+  $('cinemaBack').addEventListener('click', () => { show('list'); wsend({ type: 'list_sessions' }); });
   $('wkEnable').addEventListener('click', () => { if (state.wk) { state.wk.enabled = !state.wk.enabled; if (!state.wk.enabled) closeWakeEditor(); renderWakeForm(); } });
   $('wkDawn').addEventListener('click', () => { if (state.wk) { state.wk.dawn = !state.wk.dawn; renderWakeForm(); } });
   $('wkChase').addEventListener('click', () => { if (state.wk) { state.wk.chase = !state.wk.chase; renderWakeForm(); } });

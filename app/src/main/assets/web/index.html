@@ -65,6 +65,7 @@
       </div>
       <button class="iconbtn" id="chatMenu">⋮</button>
     </div>
+    <div class="cinemabar" id="cinemaBar" style="display:none"><span class="cb-dot"></span><span id="cinemaBarText">时间流动中</span></div>
     <div class="thread" id="thread"></div>
     <div class="plusback" id="plusBack"></div>
     <div class="dock" id="dock">
@@ -354,6 +355,7 @@
       <div class="sheetbody">
         <button class="actitem" id="sessPin">置顶</button>
         <button class="actitem" id="sessWake">定时唤醒</button>
+        <button class="actitem" id="sessCinema">电影模式</button>
         <button class="actitem" id="sessFolder">移到文件夹</button>
         <button class="actitem" id="sessSelect">多选 / 批量删除</button>
         <button class="actitem" id="sessRename">重命名</button>
@@ -523,6 +525,16 @@
       <button class="dwitem" id="dwTags"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg><span class="dwlbl">标签</span><span class="dwval" id="dwTagsVal"></span></button>
       <div class="dwitem"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><span class="dwlbl">字数</span><span class="dwval" id="dwCount">0 字</span></div>
     </div>
+  </div>
+
+  <!-- 电影模式（独立页面） -->
+  <div id="cinema" class="screen">
+    <div class="topbar">
+      <button class="iconbtn" id="cinemaBack">‹</button>
+      <div class="h2" style="font-family:var(--serif);font-size:22px;font-weight:700;">电影模式</div>
+      <div class="spacer"></div>
+    </div>
+    <div class="pad" id="cinemaBody" style="padding-top:6px;overflow-y:auto;"></div>
   </div>
 
   <!-- 日记 / 便签夹 页面 (上日记 下便签夹；汇总/单对话两种模式) -->

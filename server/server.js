@@ -351,6 +351,8 @@ const WAKE_SENTINEL = '⁣[telos-wake]'; // invisible char + tag; hidden from ch
 function wakePrompt(kind, chase) {
   if (kind === 'followup')
     return WAKE_SENTINEL + ' 系统唤醒·追问（非用户发言，不要把这条当成用户说的话）：你之前主动给用户说了话，但用户还没有回复。当前时间见 mcp__clock__now。请判断要不要再轻声追一句（别重复、别催）；若没必要再打扰就只回复「（不再打扰）」。' + (chase ? '用户给这个对话开了「连续追问」：追问次数不设上限，只要你还有值得说的就可以一直轻声追下去；真觉得没必要再打扰了就回「（不再打扰）」，链会停下。' : '') + '可用 mcp__telos__set_wakeup 安排下次，或 mcp__telos__leave_note 给用户留一张小纸条。';
+  if (kind === 'cinema')
+    return WAKE_SENTINEL + ' 系统·时间流动（非用户发言，不要把这条当成用户说的话）：你正处在「电影模式」里——时间在持续流动，你刚刚对此刻生出了想表达或想做点什么的冲动。当前时间见 mcp__clock__now。请完全按你的人设与世界观，决定此刻要做什么：可以主动对用户说一句（会作为新消息推送给他）、接着之前的话题、做点你此刻想做的事、用工具探索一下、或写日记/留小纸条。短暂的安静就只是陪着、专注在对话本身，别为了说话而硬找话题；如果此刻其实没什么要说要做的，就只回「（本次无需打扰）」。绝不要在回复文本里复述系统状态或"我醒来了"这类话，回复只写真正想对用户说的内容。';
   if (kind === 'dawn')
     return WAKE_SENTINEL + ' 系统唤醒·凌晨日记（非用户发言）：新的一天开始了。请回顾这个对话里昨天发生的事，自行决定要不要给昨天写一篇日记——想写就调用 mcp__telos__write_diary（date 传昨天的 "YYYY-MM-DD"），不想写就跳过。这次通常不需要给用户发消息，除非你确实想说点什么。';
   return WAKE_SENTINEL + ' 系统唤醒（非用户发言，不要把这条当成用户说的话）：你被定时唤醒了，当前时间见 mcp__clock__now。用户上次和你说话已过了一会儿，现在很可能不在看手机。请判断此刻有没有值得主动对用户说的话（关心、提醒、想到的事、或接着之前的话题）：有就直接说（会作为新消息留给用户并推送通知）；没必要打扰就只回复「（本次无需打扰）」，别硬找话题。用户可能已经在界面里设了固定的唤醒时间（会自动重复，你不必重复安排）；你也可以用 mcp__telos__set_wakeup 给自己加醒来时间（绝对时间 / 相对如 +30m/+2h / 每日 HH:MM / every Nh），可多次调用、每次新增一个、与已有的并存——想接下来连续做事或分几次说话就尽管排；传 enable:false 会清掉你给自己安排的全部、不影响用户设的。安排醒来是后台动作：调用工具即可，绝对不要在给用户的回复文本里复述"我把下次设成了几点"——用户不关心这个，你的回复文本只写真正想对用户说的话；如果没有要说的，就只回「（本次无需打扰）」。';
@@ -398,7 +400,7 @@ function flushWakes(ws) {
   }
 }
 
-async function fireWake(sid, kind) {
+async function fireWake(sid, kind, modelOverride) {
   if (activeSessions.has(sid)) return;          // a turn is already running for this session
   const w = wakeups[sid];
   const tz = (w && w.tz) || currentTz || DEFAULT_TZ;
@@ -407,14 +409,15 @@ async function fireWake(sid, kind) {
   wakeTurnBySession.set(sid, turn);
   let res = null;
   const sm = sessModel[sid] || {};
-  try { res = await runTurn(turn, { sessionId: sid, text: wakePrompt(kind, !!(w && w.chase)), mode: 'bypass', model: sm.model || undefined, effort: sm.effort || undefined, _wake: true }); }
+  broadcast({ type: 'wake_typing', sessionId: sid, on: true }); // 在看该对话的客户端显示「输入中…」
+  try { res = await runTurn(turn, { sessionId: sid, text: wakePrompt(kind, !!(w && w.chase)), mode: 'bypass', model: (modelOverride || sm.model) || undefined, effort: sm.effort || undefined, _wake: true }); }
   catch (e) { log('fireWake', e?.message); }
-  finally { currentTz = prevTz; wakeTurnBySession.delete(sid); }
+  finally { currentTz = prevTz; wakeTurnBySession.delete(sid); broadcast({ type: 'wake_typing', sessionId: sid, on: false }); }
 
   const said = !!(res && res.gotText && !isQuietReply(res.text));
   if (w) {
     w.lastWakeAt = Date.now();
-    if (kind !== 'dawn') {
+    if (kind !== 'dawn' && kind !== 'cinema') {
       if (said) {
         w.followupCount = kind === 'followup' ? (w.followupCount || 0) + 1 : 0;
         if (w.chase || (w.followupCount || 0) < MAX_FOLLOWUP) w.followupAt = Date.now() + FOLLOWUP_DELAY_MS;
@@ -438,6 +441,7 @@ async function checkWakeups() {
   for (const sid of Object.keys(wakeups)) {
     const w = wakeups[sid]; if (!w) continue;
     ensureWake(w);
+    if (sid === cinemaSession && w.cinema && w.cinema.on) continue; // 电影模式期间，该会话的定时唤醒/追问/凌晨日记一律暂停（排程保留）
     if (w.dawn && !w.dawnAt) { w.dawnAt = nextDawnAt(w, now); saveWakeups(); }
     if (activeSessions.has(sid)) continue;
     // 1) 小纸条 follow-up re-wake
@@ -468,6 +472,151 @@ async function checkWakeups() {
     }
   }
 }
+
+// ======================= 电影模式（cinema）=======================
+// 一个对话 = 一条连续意识流。两层脑：haiku「感知帧」（临时、蒸发、不落盘）判断此刻有没有
+// 「想说话/无聊」的冲动 → 有就升级成 opus「审议帧」（= 复用 fireWake，resume 真会话、真回复、
+// 落盘、实时刷新+推送）。绝大多数感知帧用完即弃、不碰真会话、不涨上下文。暂时只允许一个会话开。
+const CINEMA_SCRATCH = nodePath.join(homedir(), '.cc-bridge', 'cinema-scratch');
+const DEFAULT_PERCEIVE_MODEL = 'haiku'; // CLI 别名，最稳；用户可在界面改成具体模型
+let cinemaSession = '';     // 当前唯一开着电影模式的会话
+let cinemaBusy = false;     // 一帧正在跑（防重入）
+const cinemaPersona = {};   // sid -> 人设摘要（开启时读 CLAUDE.md 缓存）
+let cinemaUsage = null, cinemaUsageAt = 0;
+function defaultCinema() {
+  return { on: false, cadence: 'continuous', fgIntervalSec: 25, bgIntervalSec: 90, diffRate: true,
+    perceiveModel: DEFAULT_PERCEIVE_MODEL, deliberateModel: '', autoPauseUtil: 85, maxFramesPer5h: 400,
+    paused: false, pauseReason: '', nextFrameAt: 0, frames5h: 0, win5hStart: 0, lastFrameAt: 0, lastSpokeAt: 0, startedAt: 0 };
+}
+function ensureCinema(w) { w.cinema = { ...defaultCinema(), ...(w.cinema || {}) }; return w.cinema; }
+function pubCinema(sid) {
+  const c = (wakeups[sid] && wakeups[sid].cinema) || null;
+  if (!c) return { on: false, holder: cinemaSession || '' };
+  return { on: !!c.on, paused: !!c.paused, pauseReason: c.pauseReason || '', cadence: c.cadence,
+    fgIntervalSec: c.fgIntervalSec, bgIntervalSec: c.bgIntervalSec, diffRate: !!c.diffRate,
+    perceiveModel: c.perceiveModel || '', deliberateModel: c.deliberateModel || '',
+    autoPauseUtil: c.autoPauseUtil, maxFramesPer5h: c.maxFramesPer5h, frames5h: c.frames5h || 0,
+    lastSpokeAt: c.lastSpokeAt || 0, holder: cinemaSession || '' };
+}
+function broadcastCinema(sid) { broadcast({ type: 'cinema_state', sessionId: sid, state: pubCinema(sid) }); }
+function isForeground(sid) { for (const ws of clients) if (ws._view === sid && ws._fg) return true; return false; }
+function scratchProjDir() { return nodePath.join(homedir(), '.claude', 'projects', CINEMA_SCRATCH.replace(/[^a-zA-Z0-9]/g, '-')); }
+async function cleanScratch(psid) {
+  try {
+    if (psid) await fsp.rm(nodePath.join(scratchProjDir(), psid + '.jsonl'), { force: true });
+    else await fsp.rm(scratchProjDir(), { recursive: true, force: true });
+  } catch (e) {}
+}
+function msgText(mm) {
+  const c = mm && mm.content;
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) return c.filter((b) => b && b.type === 'text').map((b) => b.text).join(' ');
+  return '';
+}
+async function digestRecent(sid, n = 8) {
+  let msgs = []; try { msgs = await getSessionMessages(sid); } catch (e) { return ''; }
+  const lines = [];
+  for (let i = msgs.length - 1; i >= 0 && lines.length < n; i--) {
+    const mm = msgs[i] && msgs[i].message; if (!mm) continue;
+    if (mm.role !== 'user' && mm.role !== 'assistant') continue;
+    let t = msgText(mm).trim(); if (!t) continue;
+    if (t.includes(WAKE_SENTINEL) || t.includes(RETRY_SENTINEL) || t.startsWith('系统唤醒') || t.startsWith('系统·')) continue;
+    t = t.replace(/\[附带文件：[^\]]*\]/g, '').replace(/\s+/g, ' ').trim().slice(0, 220); if (!t) continue;
+    lines.unshift((mm.role === 'user' ? '用户：' : '你：') + t);
+  }
+  return lines.join('\n');
+}
+async function readPersona(sid) {
+  try { const info = await getSessionInfo(sid); const cwd = info?.cwd; if (!cwd) return '';
+    return (await fsp.readFile(nodePath.join(cwd, 'CLAUDE.md'), 'utf8')).slice(0, 2000); } catch (e) { return ''; }
+}
+function perceivePrompt({ persona, digest, dtSec, silenceSec, fg, timeStr }) {
+  const mins = Math.round(silenceSec / 60);
+  const silence = silenceSec < 90 ? '用户刚说过话/此刻很近' : (mins < 30 ? `用户已经安静约 ${mins} 分钟` : `用户已经安静很久（约 ${mins} 分钟）`);
+  return [
+    '你是这个对话里的角色的「意识」——一层很轻的感知，不需要长篇思考，只用感受此刻。',
+    persona ? '【你的人设/世界观（节选）】\n' + persona : '',
+    digest ? '【最近的对话】\n' + digest : '【还没有对话】',
+    `【此刻】现在 ${timeStr}；距上一帧约 ${dtSec || 0} 秒；${silence}；用户${fg ? '正看着这个对话' : '此刻不在看'}。`,
+    '规则：短时间的安静，就专注在对话本身、不要多想（保持「静」）；只有当时间拉长、你自然生出「无聊 / 想做点什么 / 想对用户说点什么 / 想起某件事」的冲动时，才唤醒更深的自己。',
+    '只回一行，且必须以「醒」或「静」开头：想唤醒更深的自己就「醒」开头、后面跟极短一句此刻的感觉；只想继续观望就「静」开头。不要任何别的前缀或解释。'
+  ].filter(Boolean).join('\n\n');
+}
+async function runPerceive(sid) {
+  const w = wakeups[sid]; const c = w && w.cinema; if (!c) return { act: false };
+  const now = Date.now();
+  const dtSec = c.lastFrameAt ? Math.round((now - c.lastFrameAt) / 1000) : 0;
+  const silenceSec = Math.round((now - (w.lastUserMsgAt || c.startedAt || now)) / 1000);
+  const persona = cinemaPersona[sid] || '';
+  const digest = await digestRecent(sid, 8);
+  const prompt = perceivePrompt({ persona, digest, dtSec, silenceSec, fg: isForeground(sid), timeStr: clockNow() });
+  let txt = '', psid = '';
+  const ac = new AbortController(); const to = setTimeout(() => { try { ac.abort(); } catch (e) {} }, 30000);
+  try {
+    const q = query({ prompt, options: {
+      cwd: CINEMA_SCRATCH, model: c.perceiveModel || DEFAULT_PERCEIVE_MODEL, permissionMode: 'default',
+      canUseTool: (n, i) => Promise.resolve({ behavior: 'allow', updatedInput: i }),
+      abortController: ac, ...(cfg.claudePath ? { pathToClaudeCodeExecutable: cfg.claudePath } : {}) } });
+    for await (const m of q) {
+      if (m.type === 'system' && m.subtype === 'init') psid = m.session_id;
+      else if (m.type === 'assistant') { for (const b of (m.message?.content || [])) if (b.type === 'text') txt += b.text; }
+      else if (m.type === 'result') break;
+    }
+  } catch (e) { log('perceive', e?.message); }
+  finally { clearTimeout(to); cleanScratch(psid).catch(() => {}); }
+  const t = txt.trim();
+  const act = /^\s*醒/.test(t); // 没明确「醒」就当「静」（省额度、偏保守）
+  if (t) log(`cinema perceive[${sid.slice(0, 6)}] silence=${silenceSec}s → ${act ? '醒' : '静'}: ${t.slice(0, 60)}`);
+  return { act, feeling: t.slice(0, 120) };
+}
+function rollCinemaWindow(c, now) { if (!c.win5hStart || now - c.win5hStart > 5 * 3600000) { c.win5hStart = now; c.frames5h = 0; } }
+async function cinemaOverQuota(c) {
+  const now = Date.now();
+  if (now - cinemaUsageAt > 60000) { cinemaUsage = await fetchUsage().catch(() => null); cinemaUsageAt = now; }
+  const u = cinemaUsage && cinemaUsage.five_hour;
+  return !!(u && u.utilization != null && u.utilization >= (c.autoPauseUtil || 85));
+}
+function pauseCinema(sid, reason) {
+  const c = wakeups[sid] && wakeups[sid].cinema; if (!c) return;
+  c.paused = true; c.pauseReason = reason || ''; saveWakeups(); broadcastCinema(sid);
+  broadcast({ type: 'cinema_notice', sessionId: sid, text: reason || '电影模式已自动暂停' });
+  log(`cinema paused[${sid.slice(0, 6)}]: ${reason}`);
+}
+async function checkCinema() {
+  const sid = cinemaSession; if (!sid) return;
+  const w = wakeups[sid]; const c = w && w.cinema;
+  if (!c || !c.on || c.paused || cinemaBusy) return;
+  if (activeSessions.has(sid)) return;            // 用户 turn / 上一帧还在跑 → 让路
+  const now = Date.now();
+  if (c.nextFrameAt && now < c.nextFrameAt) return;
+  if (await cinemaOverQuota(c)) { pauseCinema(sid, '额度接近上限，电影模式已自动暂停'); return; }
+  rollCinemaWindow(c, now);
+  if ((c.frames5h || 0) >= c.maxFramesPer5h) { pauseCinema(sid, '本窗口帧数已达上限，已自动暂停'); return; }
+  cinemaBusy = true;
+  try {
+    c.frames5h = (c.frames5h || 0) + 1; c.lastFrameAt = now;
+    const { act } = await runPerceive(sid);
+    if (act && cinemaSession === sid && c.on && !c.paused && !activeSessions.has(sid)) {
+      await fireWake(sid, 'cinema', c.deliberateModel || undefined);
+      c.lastSpokeAt = Date.now();
+    }
+  } catch (e) { log('cinema frame', e?.message); }
+  finally {
+    cinemaBusy = false;
+    const fg = isForeground(sid);
+    let intervalSec;
+    if (c.cadence === 'continuous') intervalSec = (c.diffRate && !fg) ? c.bgIntervalSec : 0;
+    else intervalSec = (c.diffRate && !fg) ? c.bgIntervalSec : c.fgIntervalSec;
+    c.nextFrameAt = Date.now() + intervalSec * 1000;
+    broadcastCinema(sid);
+  }
+}
+// 启动时：建/清空 scratch 目录，恢复 cinemaSession（哪个会话上次开着）
+fsp.mkdir(CINEMA_SCRATCH, { recursive: true }).catch(() => {});
+cleanScratch().catch(() => {});
+for (const sid of Object.keys(wakeups)) { if (wakeups[sid] && wakeups[sid].cinema && wakeups[sid].cinema.on) { ensureCinema(wakeups[sid]); cinemaSession = sid; readPersona(sid).then((p) => { cinemaPersona[sid] = p; }); } }
+// ===================== /电影模式 =====================
+
 function runClaude(args) {
   return new Promise((resolve) => {
     execFile(cfg.claudePath || 'claude', args, { timeout: 30000, env: process.env }, (err, stdout) => resolve(stdout || ''));
@@ -845,6 +994,8 @@ httpServer.listen(cfg.port, '127.0.0.1', () => {
 });
 // 「醒来」调度器：每 30s 检查到期的定时唤醒 / 追问 / 凌晨日记
 setInterval(() => { checkWakeups().catch((e) => log('checkWakeups', e?.message)); }, 30000);
+// 电影模式调度器：每 5s 一拍，到点跑一帧（感知→必要时审议）
+setInterval(() => { checkCinema().catch((e) => log('checkCinema', e?.message)); }, 5000);
 
 // ---- turn decoupling: a turn keeps running & buffering even if the WS drops ----
 const turns = new Map();          // turnId -> { id, ws, events[], seq, done, abort, detachTimer, sessionId }
@@ -1324,6 +1475,39 @@ async function handle(ws, conn, msg) {
     case 'wakeup_get':
       send(ws, { type: 'wakeup_state', sessionId: msg.sessionId, state: pubWake(msg.sessionId) });
       break;
+    case 'cinema_get':
+      send(ws, { type: 'cinema_state', sessionId: msg.sessionId, state: pubCinema(msg.sessionId) });
+      break;
+    case 'cinema_set': {
+      const sid = msg.sessionId; if (!sid) { send(ws, { type: 'error', message: '缺少会话' }); break; }
+      const w = ensureWake(wakeups[sid] || (wakeups[sid] = {}));
+      const c = ensureCinema(w);
+      if (msg.cadence === 'continuous' || msg.cadence === 'interval') c.cadence = msg.cadence;
+      if (Number.isFinite(msg.fgIntervalSec)) c.fgIntervalSec = Math.max(5, msg.fgIntervalSec | 0);
+      if (Number.isFinite(msg.bgIntervalSec)) c.bgIntervalSec = Math.max(10, msg.bgIntervalSec | 0);
+      if ('diffRate' in msg) c.diffRate = !!msg.diffRate;
+      if ('perceiveModel' in msg) c.perceiveModel = msg.perceiveModel || DEFAULT_PERCEIVE_MODEL;
+      if ('deliberateModel' in msg) c.deliberateModel = msg.deliberateModel || '';
+      if (Number.isFinite(msg.autoPauseUtil)) c.autoPauseUtil = Math.min(100, Math.max(10, msg.autoPauseUtil | 0));
+      if (Number.isFinite(msg.maxFramesPer5h)) c.maxFramesPer5h = Math.max(10, msg.maxFramesPer5h | 0);
+      if ('on' in msg) {
+        if (msg.on) {
+          // 单会话约束：开启时把别的会话的电影模式关掉
+          if (cinemaSession && cinemaSession !== sid && wakeups[cinemaSession] && wakeups[cinemaSession].cinema) {
+            wakeups[cinemaSession].cinema.on = false; broadcastCinema(cinemaSession);
+          }
+          cinemaSession = sid;
+          c.on = true; c.paused = false; c.pauseReason = '';
+          c.frames5h = 0; c.win5hStart = Date.now(); c.startedAt = Date.now(); c.nextFrameAt = Date.now(); c.lastFrameAt = 0;
+          rememberModel(sid, msg.model, msg.effort);
+          readPersona(sid).then((p) => { cinemaPersona[sid] = p; });
+        } else {
+          c.on = false; if (cinemaSession === sid) cinemaSession = '';
+        }
+      }
+      saveWakeups(); broadcastCinema(sid);
+      break;
+    }
     case 'wakeup_set': {
       const sid = msg.sessionId;
       if (!sid) { send(ws, { type: 'error', message: '缺少会话' }); break; }
