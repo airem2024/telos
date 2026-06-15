@@ -258,7 +258,7 @@
     <div class="sheet drag">
       <div class="sheethdr"><div class="grip"></div><div class="ptitle">压缩提示词</div><div class="psub">手动压缩历史时附带的指令</div><button class="sheet-save" id="compactSave">保存</button></div>
       <div class="sheetbody">
-        <textarea id="compactText" class="codearea" placeholder="压缩/总结历史时希望 cc 重点保留什么（角色设定、关键事实、风格…）。留空＝用 cc 默认压缩。" autocapitalize="sentences" spellcheck="false"></textarea>
+        <textarea id="compactText" class="edita" placeholder="压缩/总结历史时希望 cc 重点保留什么（角色设定、关键事实、风格…）。留空＝用 cc 默认压缩。" autocapitalize="sentences" spellcheck="false"></textarea>
       </div>
     </div>
   </div>
@@ -266,9 +266,10 @@
   <!-- CLAUDE.md editor -->
   <div class="scrim" id="claudeScrim">
     <div class="sheet drag">
-      <div class="sheethdr"><div class="grip"></div><div class="ptitle">CLAUDE.md</div><div class="psub mono" id="claudePath"></div><button class="sheet-save" id="claudeSave">保存</button></div>
+      <div class="sheethdr"><div class="grip"></div><div class="ptitle">CLAUDE.md</div><div class="psub mono" id="claudePath"></div><button class="sheet-tog" id="claudePrev">预览</button><button class="sheet-save" id="claudeSave">保存</button></div>
       <div class="sheetbody">
-        <textarea id="claudeText" class="codearea" placeholder="这个对话目录的 CLAUDE.md（项目记忆/指令）…" autocapitalize="off" spellcheck="false"></textarea>
+        <textarea id="claudeText" class="edita" placeholder="这个对话目录的 CLAUDE.md（项目记忆/指令）…" autocapitalize="off" spellcheck="false"></textarea>
+        <div class="edita md" id="claudeView" style="display:none"></div>
       </div>
     </div>
   </div>

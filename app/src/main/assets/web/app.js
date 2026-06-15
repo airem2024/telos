@@ -16,7 +16,7 @@ let APP_VERSION = '1.1.1';
 try { if (window.Android && Android.appVersion) APP_VERSION = Android.appVersion() || APP_VERSION; } catch (e) {}
 const PREF_DEFAULTS = {
   fontSize: 1, fontFamily: 'client', showModel: true, showTokens: true,
-  interruptOnLeave: false, autoScroll: true, pasteAsFile: false, pasteThreshold: 1200,
+  interruptOnLeave: false, autoScroll: true, pasteAsFile: true, pasteThreshold: 1200,
   haptics: true, genHaptic: false, updateNotify: true, showStatusBar: true, discFx: true, discBlink: false,
   autoCleanup: true, wakePush: true, compactPrompt: '',
   theme: 'warm', accent: 'brick', foldersCollapsed: false
@@ -641,7 +641,7 @@ function appendDelta(text) { const t = ensureLive(); t.textContent += text; scro
 function finalizeText(full) { const t = ensureLive(); t.classList.remove('cursor', 'text'); t.classList.add('md'); t.innerHTML = md(full); state.live = null; scrollThreadAuto(); }
 function finalizeLive() { if (state.live) { state.live.classList.remove('cursor'); state.live = null; } }
 function addAssistantText(full) { const m = el('div', 'msg assistant'); const t = el('div', 'md'); t.innerHTML = md(full); m.appendChild(t); $('thread').appendChild(m); }
-function addThinking(text) { finalizeLive(); const d = el('div', 'thinking'); d.textContent = text; d.addEventListener('click', () => d.classList.toggle('collapsed')); $('thread').appendChild(d); scrollThreadAuto(); }
+function addThinking(text) { finalizeLive(); const d = el('div', 'thinking'); const inner = el('div', 'md'); inner.innerHTML = md(text); d.appendChild(inner); d.addEventListener('click', () => d.classList.toggle('collapsed')); $('thread').appendChild(d); scrollThreadAuto(); }
 
 /* ---- animated "thinking" status line, Claude Code style ---- */
 const SL_FRAMES = ['·', '✢', '✳', '∗', '✻', '✽', '✻', '∗', '✳', '✢'];
@@ -1184,12 +1184,18 @@ function openClaudeMd() {
   state.editingClaude = true;
   $('claudePath').textContent = state.claudePath;
   $('claudeText').value = '';
+  setClaudePreview(false);
   wsend({ type: 'read_file', path: state.claudePath });
 }
 function saveClaudeMd() {
   if (!state.claudePath) return;
   wsend({ type: 'write_file', path: state.claudePath, content: $('claudeText').value });
   closeScrim('claudeScrim'); state.editingClaude = false;
+}
+function setClaudePreview(on) {
+  const ta = $('claudeText'), pv = $('claudeView'), btn = $('claudePrev');
+  if (on) { pv.innerHTML = md(ta.value); ta.style.display = 'none'; pv.style.display = 'block'; btn.textContent = '编辑'; }
+  else { ta.style.display = 'block'; pv.style.display = 'none'; btn.textContent = '预览'; }
 }
 
 /* ============ ⋮ menu (reveals top-down, collapses bottom-up) ============ */
@@ -2154,6 +2160,7 @@ function boot() {
   $('folderDelete').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) openPrompt('输入「删除」确认删除文件夹（里面的会话保留、只移出）', '', (v) => { if (v === '删除') wsend({ type: 'delete_folder', name: f }); else toast('已取消'); }); });
   $('folderDeleteAll').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) openPrompt('输入「删除」连同「' + f + '」里的所有对话一起删除（不可恢复）', '', (v) => { if (v === '删除') wsend({ type: 'delete_folder', name: f, withSessions: true }); else toast('已取消'); }); });
   $('claudeSave').addEventListener('click', saveClaudeMd);
+  $('claudePrev').addEventListener('click', () => setClaudePreview($('claudeView').style.display === 'none'));
   $('compactSave').addEventListener('click', () => { setPref('compactPrompt', $('compactText').value); closeScrim('compactScrim'); toast('压缩提示词已保存'); });
   $('mModel').addEventListener('click', openModelSheet);
   $('mRename').addEventListener('click', () => { closeMenu(); openPrompt('重命名会话', state.curTitle || '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }); });
