@@ -518,6 +518,13 @@ function renderSessions() {
     const rl = el('span'); rl.textContent = shortCwd(s.cwd) + (s.gitBranch ? ' · ' + s.gitBranch : ''); repo.appendChild(rl);
     meta.appendChild(t); meta.appendChild(repo);
     if (s.wakeAt) { const wk = el('div', 'scard-wake'); wk.textContent = wakeLabel(s.wakeAt) + ' 醒来'; meta.appendChild(wk); }
+    if (s.id === state.cinemaOnSid) { // 守夜中：时间流动指示挪到列表行（冷场久了转冷色）
+      const ci = el('div', 'scard-cinema'); const info = (state.cinemaInfo && state.cinemaInfo.sid === s.id) ? state.cinemaInfo : null;
+      const coldMin = info ? Math.round((Date.now() - (info.lastSpokeAt || info.startedAt || Date.now())) / 60000) : 0;
+      ci.classList.toggle('cold', coldMin >= 120);
+      ci.innerHTML = '<span class="cb-dot"></span><span>时间流动中' + (info && info.wakes ? ' · 醒 ' + info.wakes + ' 次' : '') + '</span>';
+      meta.appendChild(ci);
+    }
     if (s.unreadNotes) { const b = el('span', 'scard-badge'); b.textContent = s.unreadNotes; t.appendChild(b); }
     const time = el('div', 'scard-time'); time.textContent = relTime(s.updatedAt);
     head.appendChild(meta);
@@ -819,6 +826,7 @@ function updateHeader() {
   // dir chip only matters for a brand-new session (where you can still choose the dir)
   $('dirChip').style.display = state.currentSession ? 'none' : 'inline-flex';
   $('dirChipLabel').textContent = shortCwd(state.cwd || state.defaultCwd);
+  updateTitleTyping(); // 设了 textContent 会清掉省略号，重新贴一次
 }
 function applyMode() {
   const md = MODES.find((x) => x.id === state.mode) || MODES[0];
@@ -840,7 +848,7 @@ function openSession(s) {
   clearThread(); updateHeader(); show('chat'); removeSuggestions();
   // if not authed yet (slow/just-reconnecting), the send is dropped — remember to retry on auth_ok
   state.pendingHistory = wsend({ type: 'get_history', sessionId: s.id }) ? null : s.id;
-  wsend({ type: 'cinema_get', sessionId: s.id }); // 知道这个对话有没有开电影模式 → 顶部「时间流动中」横幅
+  wsend({ type: 'cinema_get', sessionId: s.id }); // 知道这个对话在不在守夜（列表行「时间流动中」+ 标题旁「输入中」）
   state.stickyPopupFor = s.id;
   state.pendingSticky = wsend({ type: 'sticky_get', sessionId: s.id }) ? null : s.id; // show 小纸条 popup if any unread
 }
@@ -1258,12 +1266,6 @@ function cinToggle(label, on, onClick) {
   sw.addEventListener('click', () => { sw.classList.toggle('on'); buzz(12); onClick(); });
   row.appendChild(lab); row.appendChild(sw); return row;
 }
-function cinSeg(label, val, opts, onPick) {
-  const row = el('div', 'setitem segrow'); const lab = el('span', 'seg-label'); lab.textContent = label; row.appendChild(lab);
-  const seg = el('div', 'segment');
-  opts.forEach(([v, n]) => { const b = el('button', 'seg' + (val === v ? ' on' : '')); b.textContent = n; b.addEventListener('click', () => { seg.querySelectorAll('.seg').forEach((x) => x.classList.remove('on')); b.classList.add('on'); onPick(v); }); seg.appendChild(b); });
-  row.appendChild(seg); return row;
-}
 function cinSlider(label, val, min, max, step, fmt, onDone) {
   const row = el('div', 'setitem sliderrow');
   const top = el('div', 'sl-top'); const lab = el('span'); lab.textContent = label; const sv = el('span', 'sl-val'); sv.textContent = fmt(val);
@@ -1285,61 +1287,80 @@ function openCinema(s) {
   show('cinema'); renderCinema();
   wsend({ type: 'cinema_get', sessionId: s.id });
 }
+function fmtDur(sec) { sec = sec | 0; if (sec < 60) return sec + ' 秒'; const m = sec / 60; return (sec % 60 === 0 ? m : m.toFixed(1)) + ' 分钟'; }
+function fmtSpan(ms) { const m = Math.round(ms / 60000); if (m < 60) return m + ' 分钟'; const h = Math.floor(m / 60), r = m % 60; return h + ' 小时' + (r ? ' ' + r + ' 分' : ''); }
 function cinNoteHTML(c) {
   const on = !!c.on; const s = state.cinTarget; const otherHolder = c.holder && s && c.holder !== s.id ? c.holder : '';
   if (c.paused) return '⏸ 已自动暂停：' + esc(c.pauseReason || '') + '<br>调整后重新打开开关即可继续。';
-  if (on) return '时间正在流动。cc 周期性「看一眼」此刻，无聊或想说话时才真的开口；真回复会推送给你。本窗口已 ' + (c.frames5h || 0) + ' 帧。';
-  if (otherHolder) return '另一个对话正开着电影模式（同一时间只能开一个）。在这里打开会自动关掉那个。';
-  return '开启后这个对话获得连续时间感：cc 周期性感知此刻（haiku 廉价、用完即弃、不留痕），只有生出冲动时才升级成真回复并推送。开着期间这个对话的定时唤醒会自动暂停。';
+  if (on) return '她在为你守夜。时间到点，真正的她会醒来一次、带着完整记忆看一眼此刻——想说话才开口，真回复会推送给你。每次醒来都花真实额度，所以节奏放得很慢，账记在下面。';
+  if (otherHolder) return '另一个对话正开着守夜（同一时间只能开一个）。在这里打开会自动关掉那个。';
+  return '打开后这个对话获得连续的时间感：不再用廉价模型替她"假装感觉时间"，而是按间隔把真正的她叫醒、带着完整记忆看一眼此刻，只有生出冲动时才开口并推送。开着期间这个对话的定时唤醒会自动暂停；每次醒来烧真实额度。';
+}
+function renderCinReceipt() {
+  const box = $('cinReceipt'); if (!box) return;
+  const c = state.cin || {};
+  if (!c.on || !c.startedAt) { box.innerHTML = ''; return; }
+  let inner = rcRow('ITEM', '这一程', 'rc-head');
+  inner += rcRow('守夜时长', fmtSpan(Date.now() - c.startedAt)) + rcRow('醒来', (c.wakes || 0) + ' 次') + rcRow('开口', (c.spoke || 0) + ' 次');
+  inner += RC_RULE + rcRow('守夜花费', '$' + (c.cost || 0).toFixed(2), 'rc-total');
+  box.innerHTML = '<div class="rc-cap">她为你守的夜</div><div class="receipt mini">' + inner + '<div class="rc-barcode"></div></div>';
 }
 function syncCinemaLive() {
   if (state.screen !== 'cinema') return;
   const c = state.cin || {};
   const note = $('cinStatus'); if (note) note.innerHTML = cinNoteHTML(c);
   const sw = $('cinToggleSw'); if (sw) sw.classList.toggle('on', !!c.on);
+  renderCinReceipt();
 }
 function renderCinema() {
   const body = $('cinemaBody'); if (!body) return; body.innerHTML = '';
   const c = state.cin || {}; const s = state.cinTarget; const on = !!c.on;
   const head = el('div', 'cinhead'); const tt = el('div', 'cintitle'); tt.textContent = s ? (s.title || '这个对话') : ''; head.appendChild(tt); body.appendChild(head);
-  const card0 = el('div', 'setmenu'); const trow = el('div', 'setitem togglerow'); const tlab = el('span'); tlab.textContent = '开启电影模式';
+  const card0 = el('div', 'setmenu'); const trow = el('div', 'setitem togglerow'); const tlab = el('span'); tlab.textContent = '为这个对话守夜';
   const sw = el('button', 'switch' + (on ? ' on' : '')); sw.id = 'cinToggleSw'; sw.innerHTML = '<span class="knob"></span>';
   sw.addEventListener('click', () => { buzz(12); cinSend({ on: !((state.cin || {}).on) }); });
   trow.appendChild(tlab); trow.appendChild(sw); card0.appendChild(trow); body.appendChild(card0);
   const note = el('div', 'cinnote'); note.id = 'cinStatus'; note.innerHTML = cinNoteHTML(c); body.appendChild(note);
+  const rc = el('div'); rc.id = 'cinReceipt'; body.appendChild(rc); // 「她为你守的夜」小票
   const cfg = el('div', 'setmenu');
-  cfg.appendChild(cinSeg('节奏', c.cadence || 'continuous', [['continuous', '连续'], ['interval', '按间隔']], (v) => cinSend({ cadence: v })));
-  cfg.appendChild(cinToggle('前台 / 后台不同节奏', !!c.diffRate, () => cinSend({ diffRate: !c.diffRate })));
-  cfg.appendChild(cinSlider('前台间隔（按间隔时生效）', c.fgIntervalSec || 25, 5, 120, 5, (v) => v + ' 秒', (v) => cinSend({ fgIntervalSec: v })));
-  cfg.appendChild(cinSlider('后台间隔（开了不同节奏才用）', c.bgIntervalSec || 90, 10, 600, 10, (v) => v + ' 秒', (v) => cinSend({ bgIntervalSec: v })));
-  cfg.appendChild(cinSlider('额度到多少 % 自动暂停', c.autoPauseUtil || 85, 50, 100, 1, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v })));
-  cfg.appendChild(cinSlider('每 5 小时帧数上限', c.maxFramesPer5h || 400, 50, 1000, 50, (v) => v + ' 帧', (v) => cinSend({ maxFramesPer5h: v })));
+  cfg.appendChild(cinSlider('多久醒一次（你在看时）', c.fgIntervalSec || 180, 30, 1800, 30, fmtDur, (v) => cinSend({ fgIntervalSec: v })));
+  cfg.appendChild(cinToggle('你离开后放慢节奏', !!c.diffRate, () => cinSend({ diffRate: !c.diffRate })));
+  cfg.appendChild(cinSlider('你离开后多久醒一次', c.bgIntervalSec || 600, 60, 3600, 60, fmtDur, (v) => cinSend({ bgIntervalSec: v })));
+  cfg.appendChild(cinSlider('额度到多少 % 自动停', c.autoPauseUtil || 85, 50, 100, 1, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v })));
+  cfg.appendChild(cinSlider('每 5 小时最多醒几次', c.maxWakesPer5h || 30, 5, 120, 5, (v) => v + ' 次', (v) => cinSend({ maxWakesPer5h: v })));
   body.appendChild(cfg);
   const models = (state.availModels || []).map((x) => [x.id, x.name || x.id]);
   const aliases = [['haiku', 'haiku（最省）'], ['sonnet', 'sonnet'], ['opus', 'opus']];
   const mcard = el('div', 'setmenu');
-  mcard.appendChild(cinPick('感知模型（意识层，便宜）', c.perceiveModel || 'haiku', [...aliases, ...models], (v) => cinSend({ perceiveModel: v })));
-  mcard.appendChild(cinPick('审议模型（开口 / 做事）', c.deliberateModel || '', [['', '跟随对话默认'], ...aliases, ...models], (v) => cinSend({ deliberateModel: v })));
+  mcard.appendChild(cinPick('醒来时用哪个模型', c.deliberateModel || '', [['', '跟随对话默认'], ...aliases, ...models], (v) => cinSend({ deliberateModel: v })));
   body.appendChild(mcard);
+  renderCinReceipt();
 }
 function onCinemaState(m) {
   const st = m.state || {};
   state.cinemaOnSid = st.holder || '';
+  // holder 的周期广播带着这一程的全量账 → 存一份给对话列表行用（时间流动中 · 醒 N 次 / 冷场着色）
+  if (st.holder && m.sessionId === st.holder && st.on) state.cinemaInfo = { sid: m.sessionId, wakes: st.wakes || 0, spoke: st.spoke || 0, lastSpokeAt: st.lastSpokeAt || 0, startedAt: st.startedAt || 0 };
+  else if (!st.holder) state.cinemaInfo = null;
   if (state.cinTarget && state.cinTarget.id === m.sessionId) {
     const hadCfg = !!state.cin; state.cin = { _sid: m.sessionId, ...st };
-    // 首次拿到状态要整渲染（填好控件）；之后的周期广播只更新状态行/开关，别打断正在操作的控件
+    // 首次拿到状态要整渲染（填好控件）；之后的周期广播只更新状态行/小票/开关，别打断正在操作的控件
     if (state.screen === 'cinema') { if (!hadCfg) renderCinema(); else syncCinemaLive(); }
   }
   updateCinemaBar();
+  if (state.screen === 'list') renderSessions();
+}
+// 旧的聊天页横幅退役：「时间流动中」改到对话列表行，「输入中」改成标题旁的省略号动画。
+function updateTitleTyping() {
+  const t = $('chatTitle'); if (!t) return;
+  const typing = state.screen === 'chat' && state.currentSession && state.cinemaTyping === state.currentSession;
+  let dots = t.querySelector('.typing-dots');
+  if (typing && !dots) { dots = el('span', 'typing-dots'); dots.innerHTML = '<i></i><i></i><i></i>'; t.appendChild(dots); }
+  else if (!typing && dots) dots.remove();
 }
 function updateCinemaBar() {
-  const bar = $('cinemaBar'); if (!bar) return;
-  const onHere = state.screen === 'chat' && state.currentSession && state.cinemaOnSid === state.currentSession;
-  if (!onHere) { bar.style.display = 'none'; return; }
-  bar.style.display = 'flex';
-  const typing = state.cinemaTyping === state.currentSession;
-  $('cinemaBarText').textContent = typing ? '输入中…' : '时间流动中';
-  bar.classList.toggle('typing', typing);
+  const bar = $('cinemaBar'); if (bar) bar.style.display = 'none';
+  updateTitleTyping();
 }
 function openWakeConfig(s) {
   state.wakeTarget = s;
@@ -1741,6 +1762,10 @@ function applyDiscFx() {
 }
 function applyDiscBlink() { $('discScreen').classList.toggle('noblink', !P('discBlink')); }
 function cleanupNow() { if (P('autoCleanup')) wsend({ type: 'cleanup_stale' }); }  // run immediately when toggled on
+// 时区按 UTC 偏移手动选；存成合法 IANA 名（Etc/GMT 符号是反的：Etc/GMT-8 = UTC+8），bridge 直接当时区用。
+function tzFromOffset(off) { return off === 0 ? 'UTC' : 'Etc/GMT' + (off > 0 ? '-' : '+') + Math.abs(off); }
+function tzToOffset(tz) { if (tz === 'UTC') return 0; const m = /^Etc\/GMT([+-])(\d+)$/.exec(tz || ''); return m ? (m[1] === '-' ? 1 : -1) * parseInt(m[2], 10) : null; }
+function tzOffLabel(off) { return off === 0 ? 'UTC' : 'UTC' + (off > 0 ? '+' : '-') + Math.abs(off); }
 const SET_CATS = {
   appearance: { name: '外观', items: [
     { type: 'segment', key: 'theme', name: '主题', opts: [['warm', '暖调'], ['gray', '纸白'], ['dark', '夜间']], onChange: applyTheme },
@@ -1760,7 +1785,7 @@ const SET_CATS = {
     { type: 'slider', key: 'pasteThreshold', name: '文本长度阈值', min: 200, max: 8000, step: 100, fmt: (v) => v + ' 字', dep: 'pasteAsFile' },
     { type: 'toggle', key: 'autoCleanup', name: '自动清理一天前的单轮对话', onChange: cleanupNow },
     { type: 'toggle', key: 'wakePush', name: '后台唤醒通知', onChange: onWakePushToggle },
-    { type: 'pick', key: 'timezone', name: 'cc 读到的时区', opts: [['', '自动（跟随手机）'], ['Asia/Tokyo', '东京 UTC+9'], ['Asia/Shanghai', '北京 / 上海 UTC+8'], ['Asia/Hong_Kong', '香港 UTC+8'], ['Asia/Taipei', '台北 UTC+8'], ['Asia/Singapore', '新加坡 UTC+8'], ['America/Los_Angeles', '洛杉矶'], ['America/New_York', '纽约'], ['Europe/London', '伦敦'], ['UTC', 'UTC']], onChange: sendPresence },
+    { type: 'tzoff', key: 'timezone', name: 'cc 读到的时区', onChange: sendPresence },
     { type: 'button', name: '编辑压缩提示词', action: openCompactPrompt }
   ] },
   haptics: { name: '触感', items: [
@@ -1842,6 +1867,16 @@ function renderSetSub() {
         list.appendChild(o);
       });
       row.appendChild(list);
+    } else if (it.type === 'tzoff') {
+      row.classList.add('pickrow');
+      const lab = el('span', 'seg-label'); lab.textContent = it.name; row.appendChild(lab);
+      const cur = P(it.key), curOff = tzToOffset(cur);
+      const sc = el('div', 'wkscroll'); sc.style.marginTop = '12px';
+      const pick = (val, chip) => { setPref(it.key, val); if (it.onChange) it.onChange(); buzz(12); sc.querySelectorAll('.wkt').forEach((x) => x.classList.toggle('on', x === chip)); refreshSettingsRows(); };
+      const autoChip = wkChip('自动', cur === '', () => pick('', autoChip)); sc.appendChild(autoChip);
+      for (let o = -12; o <= 14; o++) { const tz = tzFromOffset(o); const chip = wkChip(tzOffLabel(o), curOff === o, () => pick(tz, chip)); sc.appendChild(chip); }
+      row.appendChild(sc);
+      setTimeout(() => { const on = sc.querySelector('.wkt.on'); if (on) on.scrollIntoView({ inline: 'center', block: 'nearest' }); }, 0);
     } else if (it.type === 'info') {
       row.classList.add('togglerow'); const lab = el('span'); lab.textContent = it.name; const v = el('span', 'sr-desc'); v.textContent = it.value(); row.appendChild(lab); row.appendChild(v);
     }
@@ -2146,7 +2181,7 @@ function renderUsageStrip() {
   if (s) {
     inner += rcRow('ITEM', '数量', 'rc-head');
     inner += rcRow('输入 token', rcNum(s.in)) + rcRow('输出 token', rcNum(s.out)) + rcRow('缓存 token', rcNum(s.cache)) + rcRow('轮次', rcNum(s.turns));
-    inner += RC_RULE + rcRow('本会话花费', '$' + (s.cost || 0).toFixed(2), 'rc-total');
+    inner += RC_RULE + rcRow('本会话今日', '$' + (u.sessionToday || 0).toFixed(2)) + rcRow('本会话花费', '$' + (s.cost || 0).toFixed(2), 'rc-total');
   } else {
     inner += rcRow('累计花费', '$' + (t.cost || 0).toFixed(2), 'rc-total') + rcRow('合计会话', rcNum(t.sessions));
   }
