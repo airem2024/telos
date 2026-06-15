@@ -776,6 +776,15 @@ body.sysfont {
 .swatchdots { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 14px; }
 .swatchdot { width: 30px; height: 30px; border-radius: 50%; border: none; padding: 0; box-shadow: inset 0 0 0 1px rgba(var(--shadow),.18); }
 .swatchdot.on { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--text); }
+.pickrow { display: flex; flex-direction: column; align-items: stretch; gap: 0; }
+.pickrow .seg-label { font-size: 16px; }
+.picklist { display: flex; flex-direction: column; margin-top: 10px; }
+.pickopt { display: flex; align-items: center; justify-content: space-between; border: none; background: transparent; color: var(--text); font-size: 15px; padding: 12px 2px; text-align: left; }
+.pickopt + .pickopt { border-top: 1px solid var(--hair); }
+.pickopt:active { background: var(--surface-2); border-radius: 10px; }
+.pickopt .pickck { color: var(--accent); opacity: 0; font-size: 15px; }
+.pickopt.on .pickck { opacity: 1; }
+.pickopt.on { color: var(--accent); }
 
 /* ============ disconnect screen (与世界断联) ============ */
 @keyframes redflick {0%{opacity:1}3%{opacity:.06}6%{opacity:1}9%{opacity:.7}11%{opacity:1}34%{opacity:1}37%{opacity:.1}40%{opacity:1}61%{opacity:.85}63%{opacity:1}82%{opacity:.04}85%{opacity:1}93%{opacity:.6}95%{opacity:1}100%{opacity:1}}

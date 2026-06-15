@@ -16,7 +16,7 @@ let APP_VERSION = '1.1.1';
 try { if (window.Android && Android.appVersion) APP_VERSION = Android.appVersion() || APP_VERSION; } catch (e) {}
 const PREF_DEFAULTS = {
   fontSize: 1, fontFamily: 'client', showModel: true, showTokens: true,
-  interruptOnLeave: false, autoScroll: true, pasteAsFile: true, pasteThreshold: 1200,
+  interruptOnLeave: false, autoScroll: true, pasteAsFile: true, pasteThreshold: 1200, timezone: '',
   haptics: true, genHaptic: false, updateNotify: true, showStatusBar: true, discFx: true, discBlink: false,
   autoCleanup: true, wakePush: true, compactPrompt: '',
   theme: 'warm', accent: 'brick', foldersCollapsed: false
@@ -279,7 +279,7 @@ function connect() {
   ws.onerror = () => {};
 }
 const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { return ''; } })();
-function wsend(o) { if (state.ws && state.connected && state.authed) { if (TZ && !o.tz) o.tz = TZ; state.ws.send(JSON.stringify(o)); return true; } return false; }
+function wsend(o) { if (state.ws && state.connected && state.authed) { const z = (state.prefs ? P('timezone') : '') || TZ; if (z && !o.tz) o.tz = z; state.ws.send(JSON.stringify(o)); return true; } return false; }
 // kick a reconnect immediately if we're not already connected/connecting (e.g. back to foreground
 // after the OS froze the reconnect timer in the background — don't wait out the throttled delay)
 function ensureConnected() {
@@ -336,6 +336,8 @@ function hideSplash() {
 function handle(m) {
   // track buffered-event sequence for the active turn (for resume-on-reconnect)
   if (m._i != null && state.activeTurn && !state.activeTurn.done) state.activeTurn.lastI = Math.max(state.activeTurn.lastI || 0, m._i);
+  // 一旦 cc 产出可见内容（正文/工具/媒体），就标记「已开口」——之后的打断不再回退消息
+  if (state.activeTurn && (m.type === 'assistant_delta' || m.type === 'assistant_text' || m.type === 'tool_use' || m.type === 'tool_result' || m.type === 'media')) state.activeTurn.spoke = true;
   switch (m.type) {
     case 'auth_ok':
       state.authed = true; state.everAuthed = true; state.defaultCwd = m.defaultCwd || ''; connbar(''); hideDisc();
@@ -721,6 +723,8 @@ function updateTool(m) { const t = state.turnTools.find((x) => x.id === m.id); i
 function addError(msg) { const d = el('div', 'msg assistant'); const t = el('div', 'md'); t.style.color = 'var(--err)'; t.textContent = '⚠ ' + msg; d.appendChild(t); $('thread').appendChild(d); scrollThread(); }
 function fmtTok(n) { n = n || 0; if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M'; return n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n); }
 function endTurn(m) {
+  // 这条 turn 已被「思考阶段打断」回退过：吞掉它迟到的收尾，别再震动/出统计
+  if (state.activeTurn && state.activeTurn.rolledBack) { stopStatus(); state.busy = false; updateSend(); return; }
   stopStatus(); finalizeLive(); state.busy = false; state._turnDone = true; state.forkFrom = null; if (state.activeTurn) state.activeTurn.done = true; updateToolRow(); updateSend();
   if (P('genHaptic')) buzz(18);
   if (m.isError) addError(typeof m.result === 'string' && m.result.trim() ? m.result : '本轮出错了（可重试或换个说法）');
@@ -1656,6 +1660,7 @@ const SET_CATS = {
     { type: 'slider', key: 'pasteThreshold', name: '文本长度阈值', min: 200, max: 8000, step: 100, fmt: (v) => v + ' 字', dep: 'pasteAsFile' },
     { type: 'toggle', key: 'autoCleanup', name: '自动清理一天前的单轮对话', onChange: cleanupNow },
     { type: 'toggle', key: 'wakePush', name: '后台唤醒通知', onChange: onWakePushToggle },
+    { type: 'pick', key: 'timezone', name: 'cc 读到的时区', opts: [['', '自动（跟随手机）'], ['Asia/Tokyo', '东京 UTC+9'], ['Asia/Shanghai', '北京 / 上海 UTC+8'], ['Asia/Hong_Kong', '香港 UTC+8'], ['Asia/Taipei', '台北 UTC+8'], ['Asia/Singapore', '新加坡 UTC+8'], ['America/Los_Angeles', '洛杉矶'], ['America/New_York', '纽约'], ['Europe/London', '伦敦'], ['UTC', 'UTC']], onChange: sendPresence },
     { type: 'button', name: '编辑压缩提示词', action: openCompactPrompt }
   ] },
   haptics: { name: '触感', items: [
@@ -1726,6 +1731,17 @@ function renderSetSub() {
       const lab = el('span'); lab.textContent = it.name;
       const chev = el('span', 'sr-chev'); chev.textContent = '›';
       row.appendChild(lab); row.appendChild(chev); row.addEventListener('click', it.action);
+    } else if (it.type === 'pick') {
+      row.classList.add('pickrow');
+      const lab = el('span', 'seg-label'); lab.textContent = it.name; row.appendChild(lab);
+      const list = el('div', 'picklist');
+      it.opts.forEach(([v, n]) => {
+        const o = el('button', 'pickopt' + (P(it.key) === v ? ' on' : ''));
+        o.innerHTML = '<span>' + n + '</span><span class="pickck">✓</span>';
+        o.addEventListener('click', () => { setPref(it.key, v); if (it.onChange) it.onChange(); buzz(12); renderSetSub(); refreshSettingsRows(); });
+        list.appendChild(o);
+      });
+      row.appendChild(list);
     } else if (it.type === 'info') {
       row.classList.add('togglerow'); const lab = el('span'); lab.textContent = it.name; const v = el('span', 'sr-desc'); v.textContent = it.value(); row.appendChild(lab); row.appendChild(v);
     }
@@ -2068,7 +2084,19 @@ function updateSend() {
   btn.disabled = !(has && state.authed);
 }
 function sendMessage() {
-  if (state.busy) { wsend({ type: 'interrupt' }); stopStatus(); return; }
+  if (state.busy) {
+    wsend({ type: 'interrupt' }); stopStatus();
+    const at = state.activeTurn;
+    // cc 还没开口（只是在想）就打断 → 撤回这条消息、把文字退回输入框，省一次重生成
+    if (at && !at.spoke && at.userMsgEl) {
+      let n = at.userMsgEl.nextSibling; while (n) { const nx = n.nextSibling; n.remove(); n = nx; }
+      at.userMsgEl.remove();
+      const c = $('composer'); if (at.draft) { c.value = at.draft; resizeComposer(); c.focus(); }
+      at.rolledBack = true; at.done = true; buzz(12);
+    }
+    state.busy = false; updateSend();
+    return;
+  }
   if (state.pendingFiles.some((f) => f.status === 'uploading')) { toast('还有文件在上传…'); return; }
   const c = $('composer'); const text = c.value.trim();
   const files = state.pendingFiles.filter((f) => f.status === 'ready' && f.path);
@@ -2079,8 +2107,8 @@ function sendMessage() {
   const fileNotes = files.filter((f) => !(f.isImage && f.url)).map((f) => '📎 ' + f.name)
     .concat(texts.map((t) => '📄 ' + t.name));
   const userShown = text + (fileNotes.length ? (text ? '\n\n' : '') + fileNotes.join('\n') : '');
-  addUser(userShown, null, thumbs);
-  state.activeTurn = { id: genId(), lastI: 0, done: false };
+  const ub = addUser(userShown, null, thumbs);
+  state.activeTurn = { id: genId(), lastI: 0, done: false, spoke: false, userMsgEl: ub ? ub.parentElement : null, draft: text };
   const msg = { type: 'send', text, mode: state.mode, turnId: state.activeTurn.id };
   if (files.length) msg.refPaths = files.map((f) => f.path);
   if (texts.length) msg.texts = texts.map((t) => ({ name: t.name, content: t.content }));
