@@ -2105,7 +2105,6 @@ function initChatSwipe() {
 
 /* ============ usage (用量) ============ */
 function reqUsage() { wsend({ type: 'usage_report', sessionId: state.currentSession || '' }); }
-function ubar(pct, n) { n = n || 10; const f = Math.max(0, Math.min(n, Math.round((pct || 0) / 100 * n))); return '▓'.repeat(f) + '░'.repeat(n - f); }
 function fmtReset(iso) {
   if (!iso) return '';
   const d = new Date(iso); if (isNaN(d)) return '';
@@ -2160,11 +2159,11 @@ function renderUsageFull() {
   if (!u) { box.innerHTML = rcShell('<div class="rc-loading">' + (state.connected && state.authed ? '出票中……' : '未连接 · 重连后自动出票') + '</div>', state.ufCode); return; }
   if (!u.usage) { box.innerHTML = rcShell('<div class="rc-loading">出票失败 · 检查连接/登录</div>', state.ufCode); return; }
   const U = u.usage, t = u.totals || {};
-  const bar = (g) => g && g.utilization != null ? (ubar(g.utilization, 8) + ' ' + Math.round(g.utilization || 0) + '%') : '—';
+  const pctg = (g) => g && g.utilization != null ? Math.round(g.utilization) + '%' : '—';
   let inner = rcRow('PROVIDER', 'ANTHROPIC');
-  inner += rcRow('5 小时额度', bar(U.five_hour)) + rcRow('本周额度', bar(U.seven_day));
-  if (U.seven_day_opus && U.seven_day_opus.utilization != null) inner += rcRow('Opus 周', bar(U.seven_day_opus));
-  if (U.seven_day_sonnet && U.seven_day_sonnet.utilization != null) inner += rcRow('Sonnet 周', bar(U.seven_day_sonnet));
+  inner += rcRow('5 小时额度', pctg(U.five_hour)) + rcRow('本周额度', pctg(U.seven_day));
+  if (U.seven_day_opus && U.seven_day_opus.utilization != null) inner += rcRow('Opus 周', pctg(U.seven_day_opus));
+  if (U.seven_day_sonnet && U.seven_day_sonnet.utilization != null) inner += rcRow('Sonnet 周', pctg(U.seven_day_sonnet));
   const xu = U.extra_usage;
   if (xu && xu.is_enabled) inner += rcRow('额度信用', '$' + (xu.used_credits || 0) + '/' + (xu.monthly_limit || 0));
   inner += RC_RULE + rcRow('ITEM', '数量', 'rc-head');

@@ -670,6 +670,38 @@ async function backfillActiveDays() {
   console.log('[cc-bridge] activeDays backfilled:', activeDaysSet.size, 'days');
 }
 if (!activeDaysBackfilled) backfillActiveDays().catch(() => {});
+
+// in/cache token columns were added later, so older costs.json sessions have none → show 0.
+// Backfill once from each session jsonl (sum of assistant-message usage); cost/out untouched.
+async function backfillTokens() {
+  const root = nodePath.join(homedir(), '.claude', 'projects');
+  let dirs = []; try { dirs = await fsp.readdir(root); } catch (e) { return; }
+  let touched = 0;
+  for (const dir of dirs) {
+    let files = []; try { files = await fsp.readdir(nodePath.join(root, dir)); } catch (e) { continue; }
+    for (const f of files) {
+      if (!f.endsWith('.jsonl')) continue;
+      const sid = f.slice(0, -6);
+      const c = costs[sid]; if (!c) continue; // only sessions we already track cost for
+      let txt = ''; try { txt = await fsp.readFile(nodePath.join(root, dir, f), 'utf8'); } catch (e) { continue; }
+      let ain = 0, ac = 0;
+      for (const line of txt.split('\n')) {
+        if (line.indexOf('"usage"') < 0) continue;
+        let o; try { o = JSON.parse(line); } catch (e) { continue; }
+        if (!o || o.type !== 'assistant') continue;
+        const us = o.message && o.message.usage; if (!us) continue;
+        ain += (us.input_tokens || 0);
+        ac += (us.cache_read_input_tokens || 0) + (us.cache_creation_input_tokens || 0);
+      }
+      if (!c.in && ain) { c.in = ain; touched++; }
+      if (!c.cache && ac) c.cache = ac;
+    }
+  }
+  costs._tokbf = 1; saveCosts();
+  console.log('[cc-bridge] token backfill: sessions', touched);
+}
+if (!costs._tokbf) backfillTokens().catch(() => {});
+
 async function activeDays() {
   try { // union in current file mtimes — also catches activity that didn't go through the bridge (terminal cc)
     const ss = await listSessions({ limit: 5000 });
