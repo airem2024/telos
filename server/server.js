@@ -235,9 +235,9 @@ function forgetSession(sid) {
   if (stickies[sid]) { delete stickies[sid]; saveStickies(); }
   if (sessModel[sid]) { delete sessModel[sid]; saveSessModel(); }
   if (costs[sid]) { // fold into the archive bucket first so 累计花费 never goes down
-    const a = (costs._archived = costs._archived || { cost: 0, out: 0, turns: 0, sessions: 0 });
+    const a = (costs._archived = costs._archived || { cost: 0, out: 0, turns: 0, sessions: 0, in: 0, cache: 0 });
     const c = costs[sid];
-    a.cost += c.cost || 0; a.out += c.out || 0; a.turns += c.turns || 0; a.sessions += 1;
+    a.cost += c.cost || 0; a.out += c.out || 0; a.turns += c.turns || 0; a.sessions += 1; a.in = (a.in || 0) + (c.in || 0); a.cache = (a.cache || 0) + (c.cache || 0);
     delete costs[sid]; saveCosts();
   }
 }
@@ -1249,8 +1249,8 @@ async function handle(ws, conn, msg) {
       const sess = msg.sessionId ? (costs[msg.sessionId] || null) : null;
       // account-wide totals = live per-session entries + the archive bucket of deleted sessions
       // (keys starting with '_' are aggregates, not sessions)
-      const totals = { cost: 0, out: 0, turns: 0, sessions: 0 };
-      const acc = (c, n) => { totals.cost += c.cost || 0; totals.out += c.out || 0; totals.turns += c.turns || 0; totals.sessions += n; };
+      const totals = { cost: 0, out: 0, turns: 0, sessions: 0, in: 0, cache: 0 };
+      const acc = (c, n) => { totals.cost += c.cost || 0; totals.out += c.out || 0; totals.turns += c.turns || 0; totals.sessions += n; totals.in += c.in || 0; totals.cache += c.cache || 0; };
       for (const k in costs) { if (!k.startsWith('_')) acc(costs[k] || {}, 1); }
       if (costs._archived) acc(costs._archived, costs._archived.sessions || 0);
       const today = (costs._days || {})[dayOf()] || 0;
@@ -1777,6 +1777,8 @@ async function runTurn(turn, msg) {
     const last = lastUsage || {};
     const ctxTokens = (last.input_tokens || 0) + (last.cache_read_input_tokens || 0) + (last.cache_creation_input_tokens || 0);
     const outTokens = (m.usage && m.usage.output_tokens) || 0;
+    const inTokens = (m.usage && m.usage.input_tokens) || 0;
+    const cacheTokens = ((m.usage && m.usage.cache_read_input_tokens) || 0) + ((m.usage && m.usage.cache_creation_input_tokens) || 0);
     // context window of the MAIN conversation model: the modelUsage entry with the
     // biggest token footprint (skips the tiny haiku side-model used for background tasks).
     let ctxWindow = 0;
@@ -1803,9 +1805,11 @@ async function runTurn(turn, msg) {
     });
     // accumulate this session's running cost / output / round count for /usage
     if (curSession) {
-      const c = costs[curSession] || { cost: 0, out: 0, turns: 0 };
+      const c = costs[curSession] || { cost: 0, out: 0, turns: 0, in: 0, cache: 0 };
       c.cost += m.total_cost_usd || 0;
       c.out += outTokens;
+      c.in = (c.in || 0) + inTokens;
+      c.cache = (c.cache || 0) + cacheTokens;
       c.turns += 1;
       c.at = Date.now();
       costs[curSession] = c;

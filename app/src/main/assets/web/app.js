@@ -1743,7 +1743,7 @@ function applyDiscBlink() { $('discScreen').classList.toggle('noblink', !P('disc
 function cleanupNow() { if (P('autoCleanup')) wsend({ type: 'cleanup_stale' }); }  // run immediately when toggled on
 const SET_CATS = {
   appearance: { name: '外观', items: [
-    { type: 'segment', key: 'theme', name: '主题', opts: [['warm', '暖调'], ['gray', '灰白'], ['dark', '夜间']], onChange: applyTheme },
+    { type: 'segment', key: 'theme', name: '主题', opts: [['warm', '暖调'], ['gray', '纸白'], ['dark', '夜间']], onChange: applyTheme },
     { type: 'swatch', key: 'accent', name: '强调色', opts: [['brick', '#c2613f'], ['rose', '#c0506b'], ['amber', '#b07636'], ['green', '#4a7c59'], ['teal', '#2f7d8f'], ['indigo', '#3a6ea5'], ['violet', '#7a5cc6'], ['slate', '#5d6b78']], onChange: applyTheme },
     { type: 'slider', key: 'fontSize', name: '字体大小', min: 0.8, max: 1.4, step: 0.05, fmt: (v) => Math.round(v * 100) + '%', onChange: applyFont },
     { type: 'segment', key: 'fontFamily', name: '字体', opts: [['client', '客户端字体'], ['system', '系统字体']], onChange: applyFont },
@@ -1775,7 +1775,7 @@ const SET_CATS = {
 };
 function refreshSettingsRows() {
   $('setConnDesc').textContent = state.connected ? (state.authed ? '已连接' : '连接中…') : '未连接';
-  $('setAppearDesc').textContent = ({ warm: '暖调', gray: '灰白', dark: '夜间' }[P('theme')] || '暖调') + ' · 字体 ' + Math.round(P('fontSize') * 100) + '%';
+  $('setAppearDesc').textContent = ({ warm: '暖调', gray: '纸白', dark: '夜间' }[P('theme')] || '暖调') + ' · 字体 ' + Math.round(P('fontSize') * 100) + '%';
   $('setChatDesc').textContent = (P('interruptOnLeave') ? '退出中断 · ' : '') + (P('autoScroll') ? '自动滚动' : '不自动滚动');
   $('setHapticDesc').textContent = P('haptics') ? '开' : '关';
   $('setUpdateDesc').textContent = P('updateNotify') ? '接受推送' : '不接受';
@@ -2114,55 +2114,66 @@ function fmtReset(iso) {
   const sameDay = d.toDateString() === now.toDateString();
   return (sameDay ? '今天 ' : (d.getMonth() + 1) + '/' + d.getDate() + ' ') + hh + ':' + mm;
 }
+// ---- 小票 (receipt) builders ----
+function rcRow(l, r, cls) { return `<div class="rc-row${cls ? ' ' + cls : ''}"><span class="rc-l">${esc(l)}</span><span class="rc-r">${esc(String(r))}</span></div>`; }
+const RC_RULE = '<div class="rc-rule"></div>';
+function rcNum(n) { return (n || 0).toLocaleString('en-US'); }
+function rcCode() { return 'TLS_' + new Date().toISOString().slice(0, 10).replace(/-/g, '') + '_' + Math.random().toString(16).slice(2, 8).toUpperCase(); }
+function rcStamp() { try { return new Date().toLocaleString('zh-CN', { hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } }
+function rcShell(inner, code) {
+  return '<div class="rc-mark"></div><div class="rc-title">TELOS</div>'
+    + '<div class="rc-sub">谢谢你今天来过<br>RECEIPT # ' + esc(code || '——') + '<br>' + esc(rcStamp()) + '</div>'
+    + RC_RULE + inner + RC_RULE
+    + '<div class="rc-foot">墨会淡，账不会。</div>'
+    + '<div class="rc-barcode"></div><div class="rc-code">' + esc(code || '') + '</div>';
+}
 function renderUsageStrip() {
   const strip = $('usageStrip'); if (!strip) return;
-  const u = state.usage;
-  if (!u || !u.usage) { strip.style.display = 'none'; return; }
   strip.style.display = '';
+  const u = state.usage;
+  if (!u || !u.usage) {
+    $('usLine').innerHTML = '<span>出票中……</span><span class="us-caret">▾</span>';
+    $('usDetail').innerHTML = '<div class="rc-loading">出票中……</div>';
+    return;
+  }
   const pct = (x) => (x && x.utilization != null) ? Math.round(x.utilization) + '%' : '—';
-  const f = u.usage.five_hour, w = u.usage.seven_day, t = u.totals;
-  // session scope only while actually inside a conversation — on the list screen currentSession is
-  // just "the last chat I had open", showing its cost as 本会话 there reads like a duplicated number
+  const f = u.usage.five_hour, w = u.usage.seven_day, t = u.totals || {};
   const s = state.screen === 'chat' ? u.session : null;
   $('usLine').innerHTML = `<span>5h <b>${pct(f)}</b></span><span>周 <b>${pct(w)}</b></span>` +
     (s ? `<span>本会话 <b>$${(s.cost || 0).toFixed(2)}</b></span>`
-       : (t ? `<span>累计 <b>$${(t.cost || 0).toFixed(2)}</b></span>` : '')) +
+       : `<span>累计 <b>$${(t.cost || 0).toFixed(2)}</b></span>`) +
     `<span class="us-caret">▾</span>`;
-  $('usDetail').innerHTML = (s
-    ? `<div><span class="lbl">本会话花费</span>　<b>$${(s.cost || 0).toFixed(2)}</b></div>` +
-      `<div><span class="lbl">输出 token</span>　${fmtTok(s.out || 0)}　·　${s.turns || 0} 轮</div>`
-    : (state.screen === 'chat' ? `<div class="lbl">新会话 · 暂无花费记录</div>` : '') +
-      `<div><span class="lbl">累计花费</span>　<b>$${((t && t.cost) || 0).toFixed(2)}</b>　·　${(t && t.sessions) || 0} 会话</div>`) +
-    `<div><span class="lbl">活跃天数</span>　${u.activeDays || 0} 天</div>`;
+  let inner = '';
+  if (s) {
+    inner += rcRow('ITEM', '数量', 'rc-head');
+    inner += rcRow('输入 token', rcNum(s.in)) + rcRow('输出 token', rcNum(s.out)) + rcRow('缓存 token', rcNum(s.cache)) + rcRow('轮次', rcNum(s.turns));
+    inner += RC_RULE + rcRow('本会话花费', '$' + (s.cost || 0).toFixed(2), 'rc-total');
+  } else {
+    inner += rcRow('累计花费', '$' + (t.cost || 0).toFixed(2), 'rc-total') + rcRow('合计会话', rcNum(t.sessions));
+  }
+  inner += RC_RULE + rcRow('今日花费', '$' + (u.today || 0).toFixed(2)) + rcRow('活跃天数', (u.activeDays || 0) + ' 天');
+  $('usDetail').innerHTML = '<div class="receipt mini">' + inner + '<div class="rc-barcode"></div></div>';
 }
 function renderUsageFull() {
-  const term = $('usageTerm'); if (!term) return;
+  const box = $('usageRcpt'); if (!box) return;
   const u = state.usage;
-  if (!u) { term.textContent = state.connected && state.authed ? ' 读取中…' : ' 未连接 · 重连后自动刷新'; return; }
-  if (!u.usage) { term.textContent = ' 用量读取失败\n 请检查与世界的连接 / 登录态'; return; }
-  const U = u.usage, L = [];
-  L.push(' claude · 用量');
-  L.push(' ' + '─'.repeat(22));
-  const row = (g, lbl) => {
-    if (!g) return;
-    L.push(' ' + ubar(g.utilization) + ' ' + lbl + ' ' + Math.round(g.utilization || 0) + '%');
-    if (g.resets_at) L.push('   重置 ' + fmtReset(g.resets_at));
-  };
-  row(U.five_hour, '5 小时');
-  row(U.seven_day, '本周');
-  if (U.seven_day_opus) row(U.seven_day_opus, 'Opus 周');
-  if (U.seven_day_sonnet && U.seven_day_sonnet.utilization != null) row(U.seven_day_sonnet, 'Sonnet 周');
-  L.push(' ' + '─'.repeat(22));
+  if (!u) { box.innerHTML = rcShell('<div class="rc-loading">' + (state.connected && state.authed ? '出票中……' : '未连接 · 重连后自动出票') + '</div>', state.ufCode); return; }
+  if (!u.usage) { box.innerHTML = rcShell('<div class="rc-loading">出票失败 · 检查连接/登录</div>', state.ufCode); return; }
+  const U = u.usage, t = u.totals || {};
+  const bar = (g) => g && g.utilization != null ? (ubar(g.utilization, 8) + ' ' + Math.round(g.utilization || 0) + '%') : '—';
+  let inner = rcRow('PROVIDER', 'ANTHROPIC');
+  inner += rcRow('5 小时额度', bar(U.five_hour)) + rcRow('本周额度', bar(U.seven_day));
+  if (U.seven_day_opus && U.seven_day_opus.utilization != null) inner += rcRow('Opus 周', bar(U.seven_day_opus));
+  if (U.seven_day_sonnet && U.seven_day_sonnet.utilization != null) inner += rcRow('Sonnet 周', bar(U.seven_day_sonnet));
   const xu = U.extra_usage;
-  if (xu && xu.is_enabled) L.push(' 额度信用  $' + (xu.used_credits || 0) + ' / $' + (xu.monthly_limit || 0));
-  // account scope only — the per-session number lives in the in-conversation strip
-  const t = u.totals;
-  if (t) L.push(' 累计花费  $' + (t.cost || 0).toFixed(2) + ' · ' + (t.sessions || 0) + ' 会话 · ' + (t.turns || 0) + ' 轮');
-  if (u.today != null) L.push(' 今日花费  $' + (u.today || 0).toFixed(2));
-  L.push(' 活跃天数  ' + (u.activeDays || 0) + ' 天');
-  term.textContent = L.join('\n');
+  if (xu && xu.is_enabled) inner += rcRow('额度信用', '$' + (xu.used_credits || 0) + '/' + (xu.monthly_limit || 0));
+  inner += RC_RULE + rcRow('ITEM', '数量', 'rc-head');
+  inner += rcRow('输入 token', rcNum(t.in)) + rcRow('输出 token', rcNum(t.out)) + rcRow('缓存 token', rcNum(t.cache));
+  inner += rcRow('轮次', rcNum(t.turns)) + rcRow('活跃天数', (u.activeDays || 0) + ' 天');
+  inner += RC_RULE + rcRow('今日花费', '$' + (u.today || 0).toFixed(2)) + rcRow('累计花费', '$' + (t.cost || 0).toFixed(2), 'rc-total') + rcRow('合计会话', rcNum(t.sessions));
+  box.innerHTML = rcShell(inner, state.ufCode);
 }
-function openUsageFull() { $('usageFull').classList.add('show'); syncAtRoot(); renderUsageFull(); reqUsage(); }
+function openUsageFull() { state.ufCode = rcCode(); $('usageFull').classList.add('show'); syncAtRoot(); renderUsageFull(); reqUsage(); }
 function closeUsageFull() { $('usageFull').classList.remove('show'); syncAtRoot(); }
 
 /* ============ composer ============ */

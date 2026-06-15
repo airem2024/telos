@@ -41,9 +41,10 @@
 
 /* ---- 主题：覆盖 :root 颜色 token。无 data-theme = 暖调（默认）。 ---- */
 :root[data-theme="gray"] {
-  --bg: #F6F7F9; --surface: #FFFFFF; --surface-2: #EEF0F3; --bubble-user: #EEF0F3;
-  --border: #E2E5EA; --text: #1F2329; --muted: #8A9099;
-  --track: #D6DAE0; --hair: #D6DAE0; --shadow: 30,33,41;
+  /* 纸白：暖白纸面 + 墨色字，配小票质感 */
+  --bg: #F3EFE6; --surface: #FCFBF6; --surface-2: #EBE6D9; --bubble-user: #EBE6D9;
+  --border: #E0DACB; --text: #2C2A25; --muted: #8B8678;
+  --track: #DCD6C6; --hair: #DCD6C6; --shadow: 50,46,36;
 }
 :root[data-theme="dark"] {
   --bg: #15171A; --surface: #1E2024; --surface-2: #26292E; --bubble-user: #26292E;
@@ -793,6 +794,24 @@ body.sysfont {
 .cinhead { padding: 6px 4px 10px; }
 .cinhead .cintitle { font-size: 15px; color: var(--muted); }
 .cinnote { color: var(--muted); font-size: 13.5px; line-height: 1.6; padding: 12px 6px 16px; }
+/* 小票 receipt */
+.receipt { font-family: var(--mono); background: var(--surface); color: var(--text); max-width: 360px; margin: 0 auto; padding: 20px 20px 14px; border-radius: 3px; box-shadow: 0 6px 24px rgba(var(--shadow), .14); }
+.rc-mark { width: 38px; height: 38px; margin: 2px auto 8px; background: var(--text); -webkit-mask: url(telos-tau.png) center/contain no-repeat; mask: url(telos-tau.png) center/contain no-repeat; }
+.rc-title { text-align: center; letter-spacing: 3px; font-size: 16px; font-weight: 700; }
+.rc-sub { text-align: center; color: var(--muted); font-size: 12px; margin-top: 6px; line-height: 1.7; }
+.rc-rule { border-top: 1px dashed var(--hair); margin: 11px 0; }
+.rc-row { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; line-height: 1.95; }
+.rc-row .rc-l { color: var(--muted); white-space: nowrap; }
+.rc-row .rc-r { text-align: right; font-variant-numeric: tabular-nums; }
+.rc-row.rc-head .rc-l, .rc-row.rc-head .rc-r { color: var(--text); font-weight: 700; }
+.rc-row.rc-total .rc-l, .rc-row.rc-total .rc-r { font-weight: 700; font-size: 14px; }
+.rc-foot { text-align: center; color: var(--muted); font-size: 11.5px; margin-top: 12px; letter-spacing: .3px; }
+.rc-barcode { height: 34px; max-width: 72%; margin: 12px auto 4px; background: repeating-linear-gradient(90deg, var(--text) 0 2px, transparent 2px 3px, var(--text) 3px 6px, transparent 6px 8px, var(--text) 8px 9px, transparent 9px 12px); }
+.rc-code { text-align: center; color: var(--muted); font-size: 10.5px; letter-spacing: 1px; }
+.rc-loading { text-align: center; color: var(--muted); font-size: 13px; padding: 26px 0; letter-spacing: 3px; }
+.uf-scroll { flex: 1; overflow-y: auto; padding: 18px 14px calc(var(--safe-bottom) + 24px); }
+.receipt.mini { box-shadow: none; background: transparent; max-width: none; padding: 6px 2px 2px; border-radius: 0; }
+.receipt.mini .rc-barcode { height: 22px; max-width: 56%; margin: 10px auto 2px; }
 
 /* ============ disconnect screen (与世界断联) ============ */
 @keyframes redflick {0%{opacity:1}3%{opacity:.06}6%{opacity:1}9%{opacity:.7}11%{opacity:1}34%{opacity:1}37%{opacity:.1}40%{opacity:1}61%{opacity:.85}63%{opacity:1}82%{opacity:.04}85%{opacity:1}93%{opacity:.6}95%{opacity:1}100%{opacity:1}}
