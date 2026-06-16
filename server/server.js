@@ -504,7 +504,7 @@ function ensureCinema(w) {
   delete c.cadence; delete c.perceiveModel; delete c.maxFramesPer5h; delete c.frames5h;
   c.fgIntervalSec = Math.max(30, c.fgIntervalSec || 180);   // 真·玲每次都花钱：地板别低于 30s/60s
   c.bgIntervalSec = Math.max(60, c.bgIntervalSec || 600);
-  c.maxCostPer5h = (typeof c.maxCostPer5h === 'number' && c.maxCostPer5h > 0) ? Math.max(0.2, c.maxCostPer5h) : 1.5; // 美元熔断地板
+  c.maxCostPer5h = (typeof c.maxCostPer5h === 'number' && c.maxCostPer5h >= 0) ? c.maxCostPer5h : 1.5; // 美元熔断；0=关闭(不限)
   c.cost5h = c.cost5h || 0;
   w.cinema = c; return c;
 }
@@ -568,8 +568,8 @@ async function checkCinema() {
   if (await cinemaOverQuota(c)) { pauseCinema(sid, '额度接近上限，电影模式已自动暂停'); return; }
   rollCinemaWindow(c, now);
   if ((c.wakes5h || 0) >= (c.maxWakesPer5h || 30)) { pauseCinema(sid, '本窗口醒来次数已达上限，已自动暂停'); return; }
-  const costCap = (c.maxCostPer5h > 0) ? c.maxCostPer5h : 1.5;
-  if ((c.cost5h || 0) >= costCap) { pauseCinema(sid, `本窗口守夜花费已达上限（$${costCap.toFixed(2)}），已自动暂停`); return; }
+  const costCap = (typeof c.maxCostPer5h === 'number') ? c.maxCostPer5h : 1.5; // 0=关闭(不限)
+  if (costCap > 0 && (c.cost5h || 0) >= costCap) { pauseCinema(sid, `本窗口守夜花费已达上限（$${costCap.toFixed(2)}），已自动暂停`); return; }
   cinemaBusy = true;
   try {
     // 机械守夜：时间到了就直接叫醒真·玲（没有 haiku 替身预判）。她自己决定开不开口。
@@ -579,8 +579,8 @@ async function checkCinema() {
     const spent = Math.max(0, ((costs[sid] && costs[sid].cost) || 0) - before); // 这次醒来真花了多少
     c.cost = (c.cost || 0) + spent; c.cost5h = (c.cost5h || 0) + spent;
     if (res && res.said) { c.spoke = (c.spoke || 0) + 1; c.lastSpokeAt = Date.now(); }
-    // 美元熔断：这次醒来后窗口花费已越线，立刻收手，别等下一拍
-    if ((c.cost5h || 0) >= costCap) { c.paused = true; c.pauseReason = `本窗口守夜花费已达上限（$${costCap.toFixed(2)}），已自动暂停`; }
+    // 美元熔断：这次醒来后窗口花费已越线，立刻收手，别等下一拍（costCap=0 时关闭、不熔断）
+    if (costCap > 0 && (c.cost5h || 0) >= costCap) { c.paused = true; c.pauseReason = `本窗口守夜花费已达上限（$${costCap.toFixed(2)}），已自动暂停`; }
   } catch (e) { log('cinema frame', e?.message); }
   finally {
     cinemaBusy = false;
@@ -1498,7 +1498,7 @@ async function handle(ws, conn, msg) {
       if ('deliberateModel' in msg) c.deliberateModel = msg.deliberateModel || '';
       if (Number.isFinite(msg.autoPauseUtil)) c.autoPauseUtil = Math.min(100, Math.max(10, msg.autoPauseUtil | 0));
       if (Number.isFinite(msg.maxWakesPer5h)) c.maxWakesPer5h = Math.max(5, msg.maxWakesPer5h | 0);
-      if (Number.isFinite(msg.maxCostPer5h)) c.maxCostPer5h = Math.max(0.2, +msg.maxCostPer5h);
+      if (Number.isFinite(msg.maxCostPer5h)) c.maxCostPer5h = Math.max(0, +msg.maxCostPer5h); // 0=关闭熔断
       if ('on' in msg) {
         if (msg.on) {
           // 单会话约束：开启时把别的会话的电影模式关掉

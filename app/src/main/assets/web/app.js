@@ -1267,12 +1267,13 @@ function cinToggle(label, on, onClick) {
   row.appendChild(lab); row.appendChild(sw); return row;
 }
 function cinSlider(label, val, min, max, step, fmt, onDone) {
+  const pr = (x) => step < 1 ? parseFloat(x) : parseInt(x);   // 小数步进（如花费上限 $0.5）要 parseFloat
   const row = el('div', 'setitem sliderrow');
   const top = el('div', 'sl-top'); const lab = el('span'); lab.textContent = label; const sv = el('span', 'sl-val'); sv.textContent = fmt(val);
   top.appendChild(lab); top.appendChild(sv); row.appendChild(top);
   const r = document.createElement('input'); r.type = 'range'; r.className = 'slider'; r.min = min; r.max = max; r.step = step; r.value = val;
-  r.addEventListener('input', () => { sv.textContent = fmt(parseInt(r.value)); });
-  r.addEventListener('change', () => onDone(parseInt(r.value)));
+  r.addEventListener('input', () => { sv.textContent = fmt(pr(r.value)); });
+  r.addEventListener('change', () => onDone(pr(r.value)));
   row.appendChild(r); return row;
 }
 function cinPick(label, val, opts, onPick) {
@@ -1328,6 +1329,11 @@ function renderCinema() {
   cfg.appendChild(cinSlider('你离开后多久醒一次', c.bgIntervalSec || 600, 60, 3600, 60, fmtDur, (v) => cinSend({ bgIntervalSec: v })));
   cfg.appendChild(cinSlider('额度到多少 % 自动停', c.autoPauseUtil || 85, 50, 100, 1, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v })));
   cfg.appendChild(cinSlider('每 5 小时最多醒几次', c.maxWakesPer5h || 30, 5, 120, 5, (v) => v + ' 次', (v) => cinSend({ maxWakesPer5h: v })));
+  // 守夜花费上限（每 5h 窗口实花越线自停）。向右＝更宽松，拖到最右＝不限/关掉熔断；0 存后端表示关闭。
+  const capRaw = (typeof c.maxCostPer5h === 'number') ? c.maxCostPer5h : 1.5;
+  cfg.appendChild(cinSlider('守夜花费上限（每 5 小时）', capRaw === 0 ? 20.5 : Math.min(20, Math.max(0.5, capRaw)), 0.5, 20.5, 0.5,
+    (v) => v >= 20.5 ? '不限（关熔断）' : '$' + v.toFixed(1),
+    (v) => cinSend({ maxCostPer5h: v >= 20.5 ? 0 : v })));
   body.appendChild(cfg);
   const models = (state.availModels || []).map((x) => [x.id, x.name || x.id]);
   const aliases = [['haiku', 'haiku（最省）'], ['sonnet', 'sonnet'], ['opus', 'opus']];
