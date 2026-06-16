@@ -795,6 +795,10 @@ body.sysfont {
 .cinhead .cintitle { font-size: 15px; color: var(--muted); }
 .cinnote { color: var(--muted); font-size: 13.5px; line-height: 1.6; padding: 12px 6px 16px; }
 .cin-hint { color: var(--muted); font-size: 12px; }
+/* 高级设置折叠头 */
+.cin-advhead { display: flex; align-items: center; justify-content: space-between; cursor: pointer; font-size: 16px; color: var(--text); }
+.cin-advhead .cin-caret { color: var(--muted); transition: transform .2s ease; }
+.cin-advhead.open .cin-caret { transform: rotate(90deg); }
 /* 时间线页（中性、简洁） */
 .cl-day { text-align: center; color: var(--muted); font-size: 12px; margin: 20px 0 8px; letter-spacing: .5px; }
 .cl-row { display: flex; gap: 12px; padding: 5px 6px; font-size: 14px; line-height: 1.6; }

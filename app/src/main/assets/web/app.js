@@ -1287,7 +1287,7 @@ function cinPick(label, val, opts, onPick) {
   row.appendChild(list); return row;
 }
 function openCinema(s) {
-  state.cinTarget = s;
+  state.cinTarget = s; state.cinAdv = false;   // 每次进来高级设置默认收起
   if (!state.cin || state.cin._sid !== s.id) state.cin = null;
   show('cinema'); renderCinema();
   wsend({ type: 'cinema_get', sessionId: s.id });
@@ -1330,9 +1330,9 @@ function renderCinReceipt() {
   const c = state.cin || {};
   if (!c.on || !c.startedAt) { box.innerHTML = ''; return; }
   let inner = rcRow('ITEM', '这一程', 'rc-head');
-  inner += rcRow('守夜时长', fmtSpan(Date.now() - c.startedAt)) + rcRow('醒来', (c.wakes || 0) + ' 次') + rcRow('开口', (c.spoke || 0) + ' 次');
-  inner += RC_RULE + rcRow('守夜花费', '$' + (c.cost || 0).toFixed(2), 'rc-total');
-  box.innerHTML = '<div class="rc-cap">她为你守的夜</div><div class="receipt mini">' + inner + '<div class="rc-barcode"></div></div>';
+  inner += rcRow('时长', fmtSpan(Date.now() - c.startedAt)) + rcRow('醒来', (c.wakes || 0) + ' 次') + rcRow('开口', (c.spoke || 0) + ' 次');
+  inner += RC_RULE + rcRow('花费', '$' + (c.cost || 0).toFixed(2), 'rc-total');
+  box.innerHTML = '<div class="receipt mini">' + inner + '<div class="rc-barcode"></div></div>';
 }
 function syncCinemaLive() {
   if (state.screen !== 'cinema') return;
@@ -1345,29 +1345,33 @@ function renderCinema() {
   const body = $('cinemaBody'); if (!body) return; body.innerHTML = '';
   const c = state.cin || {}; const s = state.cinTarget; const on = !!c.on;
   const head = el('div', 'cinhead'); const tt = el('div', 'cintitle'); tt.textContent = s ? (s.title || '这个对话') : ''; head.appendChild(tt); body.appendChild(head);
-  const card0 = el('div', 'setmenu'); const trow = el('div', 'setitem togglerow'); const tlab = el('span'); tlab.textContent = '为这个对话守夜';
+  const card0 = el('div', 'setmenu'); const trow = el('div', 'setitem togglerow'); const tlab = el('span'); tlab.textContent = '时间同步';
   const sw = el('button', 'switch' + (on ? ' on' : '')); sw.id = 'cinToggleSw'; sw.innerHTML = '<span class="knob"></span>';
   sw.addEventListener('click', () => { buzz(12); cinSend({ on: !((state.cin || {}).on) }); });
   trow.appendChild(tlab); trow.appendChild(sw); card0.appendChild(trow); body.appendChild(card0);
   const note = el('div', 'cinnote'); note.id = 'cinStatus'; note.innerHTML = cinNoteHTML(c); body.appendChild(note);
-  const rc = el('div'); rc.id = 'cinReceipt'; body.appendChild(rc); // 「她为你守的夜」小票
-  const cfg = el('div', 'setmenu');
-  cfg.appendChild(cinSlider('多久醒一次（你在看时）', c.fgIntervalSec || 180, 30, 1800, 30, fmtDur, (v) => cinSend({ fgIntervalSec: v })));
-  cfg.appendChild(cinToggle('你离开后放慢节奏', !!c.diffRate, () => cinSend({ diffRate: !c.diffRate })));
-  cfg.appendChild(cinSlider('你离开后多久醒一次', c.bgIntervalSec || 600, 60, 3600, 60, fmtDur, (v) => cinSend({ bgIntervalSec: v })));
-  cfg.appendChild(cinSlider('额度到多少 % 自动停', c.autoPauseUtil || 85, 50, 100, 1, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v })));
-  cfg.appendChild(cinSlider('每 5 小时最多醒几次', c.maxWakesPer5h || 30, 5, 120, 5, (v) => v + ' 次', (v) => cinSend({ maxWakesPer5h: v })));
-  // 守夜花费上限（每 5h 窗口实花越线自停）。向右＝更宽松，拖到最右＝不限/关掉熔断；0 存后端表示关闭。
-  const capRaw = (typeof c.maxCostPer5h === 'number') ? c.maxCostPer5h : 1.5;
-  cfg.appendChild(cinSlider('守夜花费上限（每 5 小时）', capRaw === 0 ? 20.5 : Math.min(20, Math.max(0.5, capRaw)), 0.5, 20.5, 0.5,
-    (v) => v >= 20.5 ? '不限（关熔断）' : '$' + v.toFixed(1),
-    (v) => cinSend({ maxCostPer5h: v >= 20.5 ? 0 : v })));
-  body.appendChild(cfg);
-  const models = (state.availModels || []).map((x) => [x.id, x.name || x.id]);
-  const aliases = [['haiku', 'haiku（最省）'], ['sonnet', 'sonnet'], ['opus', 'opus']];
-  const mcard = el('div', 'setmenu');
-  mcard.appendChild(cinPick('醒来时用哪个模型', c.deliberateModel || '', [['', '跟随对话默认'], ...aliases, ...models], (v) => cinSend({ deliberateModel: v })));
-  body.appendChild(mcard);
+  const rc = el('div'); rc.id = 'cinReceipt'; body.appendChild(rc); // 这一程的小票
+
+  // —— 高级设置：默认收起，点开才铺开（去拥挤、渐进披露）——
+  const adv = el('div', 'setmenu');
+  const ah = el('div', 'setitem cin-advhead' + (state.cinAdv ? ' open' : ''));
+  ah.innerHTML = '<span>高级设置</span><span class="cin-caret">›</span>';
+  ah.addEventListener('click', () => { state.cinAdv = !state.cinAdv; renderCinema(); });
+  adv.appendChild(ah);
+  if (state.cinAdv) {
+    const cap = (typeof c.maxCostPer5h === 'number') ? c.maxCostPer5h : 1.5; // 0=关熔断；滑到最右存 0
+    adv.appendChild(cinSlider('最短间隔（你在看时）', c.fgIntervalSec || 180, 30, 1800, 30, fmtDur, (v) => cinSend({ fgIntervalSec: v })));
+    adv.appendChild(cinSlider('离开后最短间隔', c.bgIntervalSec || 600, 60, 3600, 60, fmtDur, (v) => cinSend({ bgIntervalSec: v })));
+    adv.appendChild(cinToggle('离开后放慢节奏', !!c.diffRate, () => cinSend({ diffRate: !c.diffRate })));
+    adv.appendChild(cinSlider('花费上限（每 5 小时）', cap === 0 ? 20.5 : Math.min(20, Math.max(0.5, cap)), 0.5, 20.5, 0.5,
+      (v) => v >= 20.5 ? '不限' : '$' + v.toFixed(1), (v) => cinSend({ maxCostPer5h: v >= 20.5 ? 0 : v })));
+    adv.appendChild(cinSlider('每 5 小时最多醒几次', c.maxWakesPer5h || 30, 5, 120, 5, (v) => v + ' 次', (v) => cinSend({ maxWakesPer5h: v })));
+    adv.appendChild(cinSlider('额度到多少 % 自动停', c.autoPauseUtil || 85, 50, 100, 1, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v })));
+    const models = (state.availModels || []).map((x) => [x.id, x.name || x.id]);
+    const aliases = [['haiku', 'haiku'], ['sonnet', 'sonnet'], ['opus', 'opus']];
+    adv.appendChild(cinPick('醒来用哪个模型', c.deliberateModel || '', [['', '跟随对话默认'], ...aliases, ...models], (v) => cinSend({ deliberateModel: v })));
+  }
+  body.appendChild(adv);
   renderCinReceipt();
 }
 function onCinemaState(m) {
