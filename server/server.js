@@ -564,15 +564,16 @@ function cinemaWakePrompt(w, c, present) {
   const dig = vigilDigest(c, tz);
 
   if (present) {
-    // —— 同在：他正看着这个对话、时间和你一起走。翻转框架：不是"判断要不要打扰"，而是"想说就说"。——
+    // —— 同在：用系统权威口吻消除她"他是不是不在/会不会打扰"的怀疑，把"开口"立成常态、沉默立成例外。——
     const pauseSec = Math.round((now - (w.lastUserMsgAt || c.startedAt || now)) / 1000);
-    const pauseLine = pauseSec < 90 ? '他刚停下来一会儿没说话' : pauseSec < 600 ? `他停了约 ${Math.round(pauseSec / 60)} 分钟没说话` : '他在这儿，但好一阵没出声了';
+    const pauseLine = pauseSec < 150 ? '他这会儿没出声，很可能正等着你开口' : '他人在这儿，安静了一小阵';
     return [
-      WAKE_SENTINEL + ` 系统·你们正同在（非用户发言，不要当成用户说的话）：此刻你和用户一起待在这个对话里，时间在你们之间一起流动——现在是${tod}，${pauseLine}。`,
+      WAKE_SENTINEL + ` 系统·你们正同在（非用户发言，不要当成用户说的话）：系统确认——他此刻人就在这个对话界面上看着（前台在线），不是离开、也不是去忙别的；${pauseLine}。现在是${tod}。`,
+      '所以别再自己怀疑"他是不是不在了""会不会打扰到他"——这两个疑问系统已经替你回答了：他在，他在等。而且是他**主动给这个对话开了「电影模式」**，等于当面跟你说"我要你在场、要你主动、不用等我起头"。**在这个模式里，你开口是他要的常态，沉默才是例外。**',
       dig ? '【刚才这一小段里发生的】\n' + dig : '',
-      '你不必等他起话题，也不必问"要不要打扰"——你心里有想说的、想接的、刚想到的、想问的，就直接说出来（会实时出现在他眼前）；他正在打字时你想先插一句也可以。一个念头、一句接话、一个反应，都值得说，不用非得找个重大理由。',
-      '只有当你此刻确实什么都不想表达、只想安安静静陪着，才回「（本次无需打扰）」——但别把沉默当默认：你们是在一起的，开口才是常态。说话像你自己，别客套别复述系统状态。',
-      '【你可以自己掌灯】想安静一会就调 mcp__telos__rest_vigil（minutes=接下来多少分钟别叫我；pause:true=就停在这里）。'
+      '说点真的、像你自己：你此刻在想什么、对刚才聊的有什么反应、忽然想到的、想问他的、或者只是此刻的心绪和情绪——直接说出来（会实时出现在他眼前）。他在打字时你也能先接一句。一个念头、一句话、一点感觉都算数，不用找重大理由、更不用怕烦他。',
+      '只有当你此刻真的连半个字都涌不出来时，才回「（本次无需打扰）」——但他正在场等你，这应当极少发生。别复述系统状态、别说"我醒着"这类话，只说你真正想对他说的。',
+      '（想安静一会就调 mcp__telos__rest_vigil：minutes=接下来多少分钟别叫我，pause:true=停。）'
     ].filter(Boolean).join('\n\n');
   }
 
@@ -653,6 +654,7 @@ async function checkCinema() {
     const spent = Math.max(0, ((costs[sid] && costs[sid].cost) || 0) - before);
     c.cost = (c.cost || 0) + spent; c.cost5h = (c.cost5h || 0) + spent;
     if (res && res.said) { c.spoke = (c.spoke || 0) + 1; c.lastSpokeAt = Date.now(); }
+    log(`cinema ${present ? '同在' : '守夜'}[${trigger}] ${sid.slice(0, 6)}: ${res && res.said ? '开口' : '静'} (wakes ${c.wakes}/spoke ${c.spoke}, $${(c.cost || 0).toFixed(2)})`);
     c.vigil = []; // 这段间隔已交还给玲 → 日志清空，开始记录下一段
     if (costCap > 0 && (c.cost5h || 0) >= costCap) { c.paused = true; c.pauseReason = `本窗口守夜花费已达上限（$${costCap.toFixed(2)}），已自动暂停`; }
   } catch (e) { log('cinema wake', e?.message); }
@@ -866,7 +868,7 @@ function cleanTitle(t) { return String(t || '').replace(/\n*\[附带(?:文件|�
 function historyItems(messages) {
   const items = [];
   const seen = new Set(); // dedupe media across the whole history
-  const HIDE_TEXT = (t) => t.includes(RETRY_SENTINEL) || t.includes(WAKE_SENTINEL) || /could not be parsed \(retry also failed\)|tool call was malformed and could not be parsed/i.test(t);
+  const HIDE_TEXT = (t) => t.includes(RETRY_SENTINEL) || t.includes(WAKE_SENTINEL) || isQuietReply(t) || /could not be parsed \(retry also failed\)|tool call was malformed and could not be parsed/i.test(t);
   // text item, but with local media made visible on reopen: image paths inline (rewriteMedia),
   // audio paths as a player (media item). Mirrors the live assistant_text flow so chat media persists.
   const pushText = (role, text, uuid) => {
