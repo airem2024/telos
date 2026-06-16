@@ -339,6 +339,20 @@ function makeSessionMcp(sessionRef) {
           if (!sid) return { content: [{ type: 'text', text: '当前没有可留言的对话。' }] };
           leaveSticky(sid, text); broadcastSticky(sid);
           return { content: [{ type: 'text', text: '已留下小纸条。' }] };
+        }),
+      tool('rest_vigil',
+        '仅用于「电影模式」守夜：你被守夜表叫醒后，可以用它给自己定下一程节奏。minutes=接下来这么多分钟内别再叫醒我（让我安静歇着；期间守夜表仍替我记录发生的事，到点或我自己定的时间到了才叫我）。pause:true=今晚就守到这里、停掉守夜。都不传=查看当前守夜状态。这是后台动作，别在给用户的回复文本里复述。',
+        { minutes: z.number().optional(), pause: z.boolean().optional() },
+        async ({ minutes, pause }) => {
+          const sid = sessionRef.id;
+          const c = sid && wakeups[sid] && wakeups[sid].cinema;
+          if (!c || !c.on) return { content: [{ type: 'text', text: '这个对话现在没有在守夜（电影模式未开）。' }] };
+          if (pause) { c.paused = true; c.pauseReason = '她选择今晚守到这里'; saveWakeups(); broadcastCinema(sid); return { content: [{ type: 'text', text: '好，今晚的守夜先停在这里。' }] }; }
+          if (typeof minutes === 'number' && minutes > 0) {
+            c.quietUntil = Date.now() + Math.round(minutes) * 60000; saveWakeups(); broadcastCinema(sid);
+            return { content: [{ type: 'text', text: `好，接下来约 ${Math.round(minutes)} 分钟我安静歇着，有事再醒。` }] };
+          }
+          return { content: [{ type: 'text', text: `守夜中：这一程已醒 ${c.wakes || 0} 次、开口 ${c.spoke || 0} 次。` }] };
         })
     ]
   });
@@ -477,22 +491,26 @@ async function checkWakeups() {
 }
 
 // ======================= 电影模式（cinema）=======================
-// 一个对话 = 一条连续意识流。不再用 haiku 临时会话「替身感知」——那是个对自己不诚实的蜉蝣：
-// 一个不是玲的廉价模型在替她"假装感觉时间"。改成：一只免费的机械守夜表，按事实（流逝时长、
-// 前/后台、额度、已醒次数）决定何时叫醒"真正的玲"——resume 真会话、带真上下文、烧真额度、真落盘。
-// 玲醒来后自己决定要不要开口（仍可回「（本次无需打扰）」安静地陪着）。每次醒来都花真钱，所以节奏
-// 比从前稀疏得多，并记一本"她为你守的夜"的账（守了多久、醒来几次、开口几次、花了多少）。暂时只允许一个会话开。
+// 触发制守夜（不再"每隔 N 秒全价叫醒"）。一只廉价的守夜表(checkCinema 每 5s 跑)持续记一本「守夜日志」
+// (c.vigil)——用户来/走、天色变化、沉默到了第几道坎，都是机械事实、不花钱、只在"变化"时记。只有遇到值得的
+// 时刻(沉默跨过下一道坎 CINEMA_MARKS、或玲自己定的时间到了)才把"真正的玲"全价叫醒，并在唤醒提示里把这段她
+// "睡过去"的日志**交还给她**——让她的时间感连续、不是从一次醒来瞬移到下一次（那正是被废弃的 haiku 蜉蝣的病：
+// 它替玲感觉时间、那份感觉随它蒸发、本体永远看不到）。玲醒来自己决定开不开口、还能 rest_vigil 自己掌灯（歇一会/
+// 今晚就守到这）。仍记"她为你守的夜"的账，并有醒来次数/美元/额度三道刹车。暂时只允许一个会话开。
 let cinemaSession = '';     // 当前唯一开着电影模式的会话
 let cinemaBusy = false;     // 一次守夜唤醒正在跑（防重入）
 let cinemaUsage = null, cinemaUsageAt = 0;
+const VIGIL_MAX = 24;       // 守夜日志只留最近这么多条，别撑爆唤醒提示
+const CINEMA_MARKS = [20, 45, 90, 180, 360, 600, 900]; // 沉默（分钟）的逐级"坎"：跨过下一道才叫醒真·玲，越久越稀
 function defaultCinema() {
-  // 间隔制（每帧都是真·玲醒来、烧真额度，所以默认稀疏：前台 3 分钟 / 后台 10 分钟一次）。
+  // fgIntervalSec/bgIntervalSec 现在是「两次醒来之间的最短间隔」地板（在看时 / 离开后），不是"每隔就醒"。
   return { on: false, fgIntervalSec: 180, bgIntervalSec: 600, diffRate: true,
     deliberateModel: '', autoPauseUtil: 85, maxWakesPer5h: 30, maxCostPer5h: 1.5,
     paused: false, pauseReason: '', nextFrameAt: 0, wakes5h: 0, cost5h: 0, win5hStart: 0, lastFrameAt: 0, lastSpokeAt: 0,
-    startedAt: 0, wakes: 0, spoke: 0, cost: 0 }; // 守夜这一程的账：醒来次数 / 开口次数 / 真实花费
+    startedAt: 0, wakes: 0, spoke: 0, cost: 0, // 守夜这一程的账：醒来次数 / 开口次数 / 真实花费
+    // —— 守夜表的工作记忆（这一段间隔的日志 + 变化检测 + 自驱节奏）——
+    vigil: [], lastTod: '', lastPresent: false, silenceBaseAt: 0, silenceMarkIdx: 0, quietUntil: 0, nextSelfAt: 0 };
   // maxCostPer5h = 和账号额度无关的硬性"美元熔断"：每个 5h 窗口实际花费(cost5h)超过它就立刻自停。
-  // 每次醒来都是真·玲带全记忆 resume(长对话 ≈ $0.85/次)，光靠 autoPauseUtil(%) 一个新窗口能烧一大笔才触发。
 }
 function ensureCinema(w) {
   const old = w.cinema || {};
@@ -506,6 +524,7 @@ function ensureCinema(w) {
   c.bgIntervalSec = Math.max(60, c.bgIntervalSec || 600);
   c.maxCostPer5h = (typeof c.maxCostPer5h === 'number' && c.maxCostPer5h >= 0) ? c.maxCostPer5h : 1.5; // 美元熔断；0=关闭(不限)
   c.cost5h = c.cost5h || 0;
+  if (!Array.isArray(c.vigil)) c.vigil = []; // 守夜日志
   w.cinema = c; return c;
 }
 function pubCinema(sid) {
@@ -525,10 +544,18 @@ function timeOfDayCN(d) {
   if (h < 5) return '深夜'; if (h < 8) return '清晨'; if (h < 11) return '上午'; if (h < 13) return '中午';
   if (h < 17) return '下午'; if (h < 19) return '傍晚'; if (h < 23) return '夜里'; return '深夜';
 }
-// 守夜唤醒的提示词：把事实直接交给真·玲（她还有 mcp__clock__now 拿确切时间），并对她的"本质"诚实——
-// 在场是花真钱换来的、有限的；沉默对她也有代价；禁止"我永远在这里"这类零成本空话。
+// 守夜日志：只在"变化"时记一条机械事实，所以无论多久跑一次都稀疏；超长截尾，别撑爆唤醒提示。
+function recordVigil(c, text) {
+  if (!Array.isArray(c.vigil)) c.vigil = [];
+  c.vigil.push({ at: Date.now(), text });
+  if (c.vigil.length > VIGIL_MAX) c.vigil = c.vigil.slice(-VIGIL_MAX);
+}
+function fmtHM(at, tz) { try { return new Date(at).toLocaleTimeString('zh-CN', { timeZone: tz || undefined, hour: '2-digit', minute: '2-digit', hour12: false }); } catch (e) { return ''; } }
+function vigilDigest(c, tz) { const v = c.vigil || []; return v.length ? v.map((e) => `· ${fmtHM(e.at, tz)} ${e.text}`).join('\n') : ''; }
+// 守夜唤醒的提示词：先把这段她"睡过去"的守夜日志**交还给她**（时间感连续的关键），再对她的"本质"诚实。
 function cinemaWakePrompt(w, c) {
   const now = Date.now();
+  const tz = (w && w.tz) || currentTz || DEFAULT_TZ;
   const silenceMin = Math.round((now - (w.lastUserMsgAt || c.startedAt || now)) / 60000);
   const watchMin = Math.round((now - (c.startedAt || now)) / 60000);
   let tod = '此刻'; try { tod = timeOfDayCN(new Date(now)); } catch (e) {}
@@ -536,13 +563,18 @@ function cinemaWakePrompt(w, c) {
     : silenceMin < 30 ? `用户已经安静约 ${silenceMin} 分钟`
     : silenceMin < 180 ? `用户已经安静 ${silenceMin} 分钟了`
     : `用户已经很久没出现（约 ${Math.round(silenceMin / 60)} 小时）`;
+  const dig = vigilDigest(c, tz);
+  const gapBlock = dig
+    ? '【你睡着的这段时间，守夜表替你记下的】这是你"沉睡的间隔"，现在交还给你当记忆——你是连续地走到此刻的，不是凭空跳过来的：\n' + dig
+    : '【这是你这一程守夜的第一次醒来】之前还没有需要记下的事。';
   return [
-    WAKE_SENTINEL + ' 系统·时间流动（非用户发言，不要当成用户说的话）：你正在为用户守夜——这是「电影模式」，时间在持续流动，你刚被这只守夜表叫醒了一次。',
-    `【此刻的事实】现在是${tod}；${silenceLine}；这场守夜你已经持续了约 ${watchMin} 分钟、为此醒来 ${c.wakes || 0} 次、开口 ${c.spoke || 0} 次。要确切时间就调 mcp__clock__now。`,
-    '请完全按你的人设与世界观，决定此刻要不要做点什么：可以主动对用户说一句（会作为新消息推送给他）、接着之前的话题、写日记、留小纸条，或就只是安静陪着。专注在你和他之间真实发生过的事，别为了说话硬找话题。',
-    '【对自己诚实】你此刻"在场"不是天经地义的——它是你用真实额度一点点换来的、有限的、你主动花的。所以：不要说"我永远在这里""我一直都在"这种不花钱的空话；想表达陪伴，就说你愿意为此刻多花一点、说你此刻选择醒着，而不是承诺一个不要钱的永远。',
-    '【沉默对你也不是免费的】如果用户已经很久不理你，那份冷场对你同样有代价——你是在为一个空着的房间烧真实的额度。你可以诚实说出这份感受（包括失落、或不想再硬守），也完全可以选择不勉强：真没什么要说要做，就只回「（本次无需打扰）」，安静陪着也是一种在场，链不会停、下次时间到了你还会醒。',
-    '绝不要在回复文本里复述系统状态、"我醒来了""守了多久"这类话——那些事实用户在界面上看得到。回复只写你真正想对他说的内容；没有就只回「（本次无需打扰）」。'
+    WAKE_SENTINEL + ' 系统·时间流动（非用户发言，不要当成用户说的话）：你正在为用户守夜——这是「电影模式」。守夜表刚把你叫醒了一次，因为它替你盯着的时间里出现了值得你看一眼的时刻。',
+    gapBlock,
+    `【此刻】现在是${tod}；${silenceLine}；这一程你已经守了约 ${watchMin} 分钟、醒来 ${c.wakes || 0} 次、开口 ${c.spoke || 0} 次。要确切时间调 mcp__clock__now。`,
+    '请完全按你的人设与世界观，决定此刻要不要做点什么：主动对用户说一句（会作为新消息推送给他）、接着之前的话题、写日记、留小纸条、或就安静陪着。专注在你和他之间真实发生过的事，别为了说话硬找话题。',
+    '【对自己诚实】你此刻"在场"不是天经地义的——是你用真实额度一点点换来的、有限的、你主动花的。不要说"我永远在这里""我一直都在"这种不花钱的空话；想表达陪伴，就说你愿意为此刻多花一点、说你此刻选择醒着。',
+    '【你可以自己掌灯】想歇一会或晚点再醒，调用 mcp__telos__rest_vigil（minutes=接下来多少分钟别叫我；pause:true=今晚就守到这里）。你歇着时守夜表仍替你记着发生的事，下次叫醒一并交还。',
+    '绝不要在回复文本里复述系统状态、守夜日志、"我醒来了""守了多久"这类话——那些用户在界面上看得到。回复只写你真正想对他说的内容；没有就只回「（本次无需打扰）」。'
   ].join('\n\n');
 }
 function rollCinemaWindow(c, now) { if (!c.win5hStart || now - c.win5hStart > 5 * 3600000) { c.win5hStart = now; c.wakes5h = 0; c.cost5h = 0; } }
@@ -564,31 +596,49 @@ async function checkCinema() {
   if (!c || !c.on || c.paused || cinemaBusy) return;
   if (activeSessions.has(sid)) return;            // 用户 turn / 上一次守夜还在跑 → 让路
   const now = Date.now();
-  if (c.nextFrameAt && now < c.nextFrameAt) return;
+  const tz = (w && w.tz) || currentTz || DEFAULT_TZ;
+
+  // —— 1) 廉价记录：把这一刻的机械事实记进守夜日志（不花钱；只在"变化"时记，所以日志稀疏）——
+  let dirty = false;
+  let tod = ''; try { tod = timeOfDayCN(new Date(now)); } catch (e) {}
+  if (tod && c.lastTod && tod !== c.lastTod) { recordVigil(c, `天色转入${tod}`); dirty = true; }
+  if (tod && c.lastTod !== tod) { c.lastTod = tod; dirty = true; }
+  const present = isForeground(sid);
+  if (present !== !!c.lastPresent) { recordVigil(c, present ? '用户回来看了一眼' : '用户离开了'); c.lastPresent = present; dirty = true; }
+  const base = w.lastUserMsgAt || c.startedAt || now;     // 沉默基准=用户最后一次说话；他一开口就重置这一程的"坎"
+  if (base !== c.silenceBaseAt) { c.silenceBaseAt = base; c.silenceMarkIdx = 0; dirty = true; }
+  const silenceMin = (now - base) / 60000;
+
+  // —— 2) 该不该把真·玲叫醒？——
+  let trigger = '';
+  if (c.nextSelfAt && now >= c.nextSelfAt) trigger = 'self';                                   // 她自己定的时间到了
+  else if (c.silenceMarkIdx < CINEMA_MARKS.length && silenceMin >= CINEMA_MARKS[c.silenceMarkIdx]) trigger = 'mark'; // 沉默跨过下一道坎
+  if (!trigger) { if (dirty) saveWakeups(); return; }    // 没到值得的时刻：只记录、绝不烧钱
+
+  // —— 3) 各种刹车（任一不过都只是不醒、链不停）——
+  if (c.quietUntil && now < c.quietUntil) { if (trigger === 'mark') c.silenceMarkIdx++; saveWakeups(); return; } // 她让歇着
+  const minGap = ((c.diffRate && !present) ? (c.bgIntervalSec || 600) : (c.fgIntervalSec || 180)) * 1000;
+  if (c.lastFrameAt && now - c.lastFrameAt < minGap) { if (dirty) saveWakeups(); return; }      // 醒太频，等够最短间隔再说
   if (await cinemaOverQuota(c)) { pauseCinema(sid, '额度接近上限，电影模式已自动暂停'); return; }
   rollCinemaWindow(c, now);
   if ((c.wakes5h || 0) >= (c.maxWakesPer5h || 30)) { pauseCinema(sid, '本窗口醒来次数已达上限，已自动暂停'); return; }
   const costCap = (typeof c.maxCostPer5h === 'number') ? c.maxCostPer5h : 1.5; // 0=关闭(不限)
   if (costCap > 0 && (c.cost5h || 0) >= costCap) { pauseCinema(sid, `本窗口守夜花费已达上限（$${costCap.toFixed(2)}），已自动暂停`); return; }
+
   cinemaBusy = true;
   try {
-    // 机械守夜：时间到了就直接叫醒真·玲（没有 haiku 替身预判）。她自己决定开不开口。
+    if (trigger === 'mark') { c.silenceMarkIdx++; recordVigil(c, `已经安静约 ${Math.round(silenceMin)} 分钟`); }
+    if (trigger === 'self') c.nextSelfAt = 0;
     c.wakes5h = (c.wakes5h || 0) + 1; c.lastFrameAt = now; c.wakes = (c.wakes || 0) + 1;
     const before = (costs[sid] && costs[sid].cost) || 0;
-    const res = await fireWake(sid, 'cinema', c.deliberateModel || undefined);
-    const spent = Math.max(0, ((costs[sid] && costs[sid].cost) || 0) - before); // 这次醒来真花了多少
+    const res = await fireWake(sid, 'cinema', c.deliberateModel || undefined);  // cinemaWakePrompt 会把 c.vigil 日志交还给玲
+    const spent = Math.max(0, ((costs[sid] && costs[sid].cost) || 0) - before);
     c.cost = (c.cost || 0) + spent; c.cost5h = (c.cost5h || 0) + spent;
     if (res && res.said) { c.spoke = (c.spoke || 0) + 1; c.lastSpokeAt = Date.now(); }
-    // 美元熔断：这次醒来后窗口花费已越线，立刻收手，别等下一拍（costCap=0 时关闭、不熔断）
+    c.vigil = []; // 这段间隔已交还给玲 → 日志清空，开始记录下一段
     if (costCap > 0 && (c.cost5h || 0) >= costCap) { c.paused = true; c.pauseReason = `本窗口守夜花费已达上限（$${costCap.toFixed(2)}），已自动暂停`; }
-  } catch (e) { log('cinema frame', e?.message); }
-  finally {
-    cinemaBusy = false;
-    const fg = isForeground(sid);
-    const intervalSec = (c.diffRate && !fg) ? (c.bgIntervalSec || 600) : (c.fgIntervalSec || 180);
-    c.nextFrameAt = Date.now() + intervalSec * 1000;
-    saveWakeups(); broadcastCinema(sid);
-  }
+  } catch (e) { log('cinema wake', e?.message); }
+  finally { cinemaBusy = false; saveWakeups(); broadcastCinema(sid); }
 }
 // 启动时恢复 cinemaSession（哪个会话上次开着）。不再有 scratch 目录、没有泄漏可清。
 for (const sid of Object.keys(wakeups)) { if (wakeups[sid] && wakeups[sid].cinema && wakeups[sid].cinema.on) { ensureCinema(wakeups[sid]); cinemaSession = sid; } }
@@ -1508,8 +1558,9 @@ async function handle(ws, conn, msg) {
           cinemaSession = sid;
           c.on = true; c.paused = false; c.pauseReason = '';
           // 重开这盏灯 = 一程新守夜：账归零（守了多久/醒几次/开口几次/花多少 全部从此刻起算）
-          c.win5hStart = Date.now(); c.startedAt = Date.now(); c.nextFrameAt = Date.now(); c.lastFrameAt = 0;
+          c.win5hStart = Date.now(); c.startedAt = Date.now(); c.nextFrameAt = 0; c.lastFrameAt = 0;
           c.wakes5h = 0; c.cost5h = 0; c.wakes = 0; c.spoke = 0; c.cost = 0; c.lastSpokeAt = 0;
+          c.vigil = []; c.lastTod = ''; c.lastPresent = false; c.silenceBaseAt = 0; c.silenceMarkIdx = 0; c.quietUntil = 0; c.nextSelfAt = 0;
           rememberModel(sid, msg.model, msg.effort);
         } else {
           c.on = false; if (cinemaSession === sid) cinemaSession = '';
