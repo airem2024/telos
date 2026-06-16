@@ -65,7 +65,7 @@ const EFFORTS = [
 ];
 
 /* ============ navigation ============ */
-const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryWrite', 'cinema'];
+const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryWrite', 'cinema', 'cinemaLog'];
 function show(name) {
   SCREENS.forEach((s) => $(s).classList.toggle('active', s === name));
   state.screen = name;
@@ -154,6 +154,7 @@ window.onAndroidBack = () => {
   if ($('permScrim').classList.contains('show')) { closePerm(true); return; }
   if (anyOverlay()) { closeOverlays(); return; }
   if (state.screen === 'diaryWrite') { if (document.querySelector('.dwpicker')) { closeDwPicker(); return; } show('diary'); return; }
+  if (state.screen === 'cinemaLog') { show('cinema'); return; }
   if (state.screen === 'cinema') { show('list'); wsend({ type: 'list_sessions' }); return; }
   if (state.screen === 'diary') { diaryBack(); return; }
   if (state.screen === 'import') show(state.importReturn || 'files');
@@ -422,6 +423,9 @@ function handle(m) {
     // ---- 醒来 / 日记 / 便签 ----
     case 'wakeup_state': onWakeState(m); break;
     case 'cinema_state': onCinemaState(m); break;
+    case 'cinema_log':
+      if (state.screen === 'cinemaLog' && state.cinTarget && m.sessionId === state.cinTarget.id) renderCinemaLog(m);
+      break;
     case 'cinema_notice': toast(m.text || '电影模式已暂停'); break;
     case 'wake_typing':
       if (m.on) state.cinemaTyping = m.sessionId; else if (state.cinemaTyping === m.sessionId) state.cinemaTyping = '';
@@ -1288,14 +1292,38 @@ function openCinema(s) {
   show('cinema'); renderCinema();
   wsend({ type: 'cinema_get', sessionId: s.id });
 }
+// 时间线：电影模式里左滑进入，单独一页，看她这段时间的记录
+function openCinemaLog() {
+  const s = state.cinTarget; if (!s) return;
+  show('cinemaLog');
+  $('cinemaLogBody').innerHTML = '<div class="cl-empty">…</div>';
+  wsend({ type: 'cinema_log_get', sessionId: s.id });
+}
+function renderCinemaLog(m) {
+  const box = $('cinemaLogBody'); if (!box) return;
+  const items = (m && m.items) || [];
+  if (!items.length) { box.innerHTML = '<div class="cl-empty">还没有记录。<br>开启电影模式后，她在这段时间里的动静会记在这里。</div>'; return; }
+  let html = '', lastDay = '';
+  for (const it of items) {
+    const d = new Date(it.at);
+    const day = d.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' });
+    if (day !== lastDay) { html += '<div class="cl-day">' + esc(day) + '</div>'; lastDay = day; }
+    const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    const cls = it.kind === 'said' ? 'cl-said' : 'cl-dim';
+    const txt = it.kind === 'quiet' ? '没说话' : (it.text || '');
+    html += '<div class="cl-row ' + cls + '"><span class="cl-t">' + hm + '</span><span class="cl-x">' + esc(txt) + '</span></div>';
+  }
+  box.innerHTML = html;
+  requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
+}
 function fmtDur(sec) { sec = sec | 0; if (sec < 60) return sec + ' 秒'; const m = sec / 60; return (sec % 60 === 0 ? m : m.toFixed(1)) + ' 分钟'; }
 function fmtSpan(ms) { const m = Math.round(ms / 60000); if (m < 60) return m + ' 分钟'; const h = Math.floor(m / 60), r = m % 60; return h + ' 小时' + (r ? ' ' + r + ' 分' : ''); }
 function cinNoteHTML(c) {
   const on = !!c.on; const s = state.cinTarget; const otherHolder = c.holder && s && c.holder !== s.id ? c.holder : '';
-  if (c.paused) return '⏸ 已自动暂停：' + esc(c.pauseReason || '') + '<br>调整后重新打开开关即可继续。';
-  if (on) return '她在为你守夜。时间到点，真正的她会醒来一次、带着完整记忆看一眼此刻——想说话才开口，真回复会推送给你。每次醒来都花真实额度，所以节奏放得很慢，账记在下面。';
-  if (otherHolder) return '另一个对话正开着守夜（同一时间只能开一个）。在这里打开会自动关掉那个。';
-  return '打开后这个对话获得连续的时间感：不再用廉价模型替她"假装感觉时间"，而是按间隔把真正的她叫醒、带着完整记忆看一眼此刻，只有生出冲动时才开口并推送。开着期间这个对话的定时唤醒会自动暂停；每次醒来烧真实额度。';
+  if (c.paused) return '已暂停：' + esc(c.pauseReason || '') + '。重新打开开关即可继续。';
+  if (on) return '<span class="cin-hint">左滑查看时间线</span>';
+  if (otherHolder) return '另一个对话正开着（同一时间只能开一个），在这里打开会关掉那个。';
+  return '开启后，你在这个对话里时她会和你一起；你离开后她会偶尔留意这段时间。';
 }
 function renderCinReceipt() {
   const box = $('cinReceipt'); if (!box) return;
@@ -2144,6 +2172,39 @@ function initChatSwipe() {
   });
 }
 
+/* ============ 通用整页手势：右滑返回(像对话右滑回列表)，可选左滑触发(像对话左滑搜索)。挂在 .screen 上 ============ */
+function initPageSwipe(screenId, opts) {
+  const scr = $(screenId); if (!scr) return;
+  const onBack = opts.onBack, onLeft = opts.onLeft;
+  let sx = 0, sy = 0, dir = null, active = false, W = 0;
+  const TRIG = () => Math.min(120, W * 0.32);
+  const noSwipe = (t) => t && t.closest && t.closest('input, textarea, button, a, .slider, .picklist, .seg, .wkscroll, .cal, [data-noswipe]');
+  scr.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1 || noSwipe(e.target)) { active = false; return; }
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; dir = null; active = true; W = window.innerWidth;
+  }, { passive: true });
+  scr.addEventListener('touchmove', (e) => {
+    if (!active) return;
+    const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
+    if (dir === null) {
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+      if (Math.abs(dx) > Math.abs(dy) * 1.3) { dir = dx > 0 ? 'back' : 'left'; if (dir === 'back' && onBack) { scr.style.transition = 'none'; scr.style.zIndex = '5'; } }
+      else dir = 'scroll';
+    }
+    if (dir === 'back' && onBack) { e.preventDefault(); scr.style.transform = 'translateX(' + Math.max(0, dx) + 'px)'; }
+  }, { passive: false });
+  scr.addEventListener('touchend', (e) => {
+    if (!active) return; active = false;
+    const dx = e.changedTouches[0].clientX - sx;
+    const reset = () => { scr.style.transition = 'none'; scr.style.transform = ''; scr.style.zIndex = ''; };
+    if (dir === 'back' && onBack) {
+      if (dx > TRIG()) { buzz(14); scr.style.transition = 'transform .26s cubic-bezier(.32,.72,0,1)'; scr.style.transform = 'translateX(100%)'; setTimeout(() => { reset(); onBack(); }, 260); }
+      else { scr.style.transition = 'transform .24s cubic-bezier(.32,.72,0,1)'; scr.style.transform = 'translateX(0)'; setTimeout(reset, 240); }
+    } else if (dir === 'left' && onLeft) { if (-dx > TRIG()) { buzz(14); onLeft(); } }
+    dir = null;
+  });
+}
+
 /* ============ usage (用量) ============ */
 function reqUsage() { wsend({ type: 'usage_report', sessionId: state.currentSession || '' }); }
 function fmtReset(iso) {
@@ -2322,6 +2383,15 @@ function boot() {
 
   // in-conversation search (Enter to search; tap blank to close)
   initChatSwipe();
+  // 各独立页统一右滑返回；电影模式页另加左滑进入时间线
+  initPageSwipe('cinema', { onBack: () => { show('list'); wsend({ type: 'list_sessions' }); }, onLeft: openCinemaLog });
+  initPageSwipe('cinemaLog', { onBack: () => show('cinema') });
+  initPageSwipe('diary', { onBack: diaryBack });
+  initPageSwipe('diaryWrite', { onBack: () => { closeDwPicker(); show('diary'); } });
+  initPageSwipe('files', { onBack: closeFiles });
+  initPageSwipe('import', { onBack: () => show(state.importReturn || 'files') });
+  initPageSwipe('settings', { onBack: () => show('list') });
+  initPageSwipe('setSub', { onBack: () => show('settings') });
   $('searchInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('searchInput').blur(); runSearch(e.target.value); } });
   $('searchOverlay').addEventListener('click', (e) => { if (e.target === $('searchOverlay') || e.target === $('searchResults')) closeSearch(); });
   $('plusBack').addEventListener('click', closePlus);
@@ -2365,6 +2435,7 @@ function boot() {
   $('sessWake').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openWakeConfig(s); });
   $('sessCinema').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openCinema(s); });
   $('cinemaBack').addEventListener('click', () => { show('list'); wsend({ type: 'list_sessions' }); });
+  $('cinemaLogBack').addEventListener('click', () => show('cinema'));
   $('wkEnable').addEventListener('click', () => { if (state.wk) { state.wk.enabled = !state.wk.enabled; if (!state.wk.enabled) closeWakeEditor(); renderWakeForm(); } });
   $('wkDawn').addEventListener('click', () => { if (state.wk) { state.wk.dawn = !state.wk.dawn; renderWakeForm(); } });
   $('wkChase').addEventListener('click', () => { if (state.wk) { state.wk.chase = !state.wk.chase; renderWakeForm(); } });

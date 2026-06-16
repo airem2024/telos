@@ -450,7 +450,7 @@ async function fireWake(sid, kind, modelOverride) {
     queueWake(wm);                              // 没人在线就留着，下次连上补发
     maybePush(sid, title, res.text);            // 配了 ntfy 才走（当前未配，原生通道替代）
   }
-  return { said }; // 守夜记账要知道这次醒来她到底开没开口
+  return { said, text: said ? (res && res.text) || '' : '' }; // 守夜记账要知道开没开口 + 说了啥（记进时间线）
 }
 
 async function checkWakeups() {
@@ -511,8 +511,8 @@ function defaultCinema() {
     deliberateModel: '', autoPauseUtil: 85, maxWakesPer5h: 30, maxCostPer5h: 1.5,
     paused: false, pauseReason: '', nextFrameAt: 0, wakes5h: 0, cost5h: 0, win5hStart: 0, lastFrameAt: 0, lastSpokeAt: 0,
     startedAt: 0, wakes: 0, spoke: 0, cost: 0, // 守夜这一程的账：醒来次数 / 开口次数 / 真实花费
-    // —— 守夜表的工作记忆（这一段间隔的日志 + 变化检测 + 自驱节奏）——
-    vigil: [], lastTod: '', lastPresent: false, silenceBaseAt: 0, silenceMarkIdx: 0, quietUntil: 0, nextSelfAt: 0 };
+    // —— 守夜表：vigil=喂给玲的当前间隔工作记忆(醒来即清)；timeline=持久、可在「时间线」页翻看的全程记录 ——
+    vigil: [], timeline: [], lastTod: '', lastPresent: false, silenceBaseAt: 0, silenceMarkIdx: 0, quietUntil: 0, nextSelfAt: 0 };
   // maxCostPer5h = 和账号额度无关的硬性"美元熔断"：每个 5h 窗口实际花费(cost5h)超过它就立刻自停。
 }
 function ensureCinema(w) {
@@ -527,7 +527,8 @@ function ensureCinema(w) {
   c.bgIntervalSec = Math.max(60, c.bgIntervalSec || 600);   // 离开后守夜最短间隔地板 60s
   c.maxCostPer5h = (typeof c.maxCostPer5h === 'number' && c.maxCostPer5h >= 0) ? c.maxCostPer5h : 1.5; // 美元熔断；0=关闭(不限)
   c.cost5h = c.cost5h || 0;
-  if (!Array.isArray(c.vigil)) c.vigil = []; // 守夜日志
+  if (!Array.isArray(c.vigil)) c.vigil = []; // 守夜日志（工作记忆）
+  if (!Array.isArray(c.timeline)) c.timeline = []; // 时间线（持久、可翻看）
   w.cinema = c; return c;
 }
 function pubCinema(sid) {
@@ -548,10 +549,16 @@ function timeOfDayCN(d) {
   if (h < 17) return '下午'; if (h < 19) return '傍晚'; if (h < 23) return '夜里'; return '深夜';
 }
 // 守夜日志：只在"变化"时记一条机械事实，所以无论多久跑一次都稀疏；超长截尾，别撑爆唤醒提示。
+function timelinePush(c, kind, text) {
+  if (!Array.isArray(c.timeline)) c.timeline = [];
+  c.timeline.push({ at: Date.now(), kind, text: text || '' });
+  if (c.timeline.length > 300) c.timeline = c.timeline.slice(-300); // 持久但有上限
+}
 function recordVigil(c, text) {
   if (!Array.isArray(c.vigil)) c.vigil = [];
   c.vigil.push({ at: Date.now(), text });
   if (c.vigil.length > VIGIL_MAX) c.vigil = c.vigil.slice(-VIGIL_MAX);
+  timelinePush(c, 'event', text); // 机械事实也进持久时间线
 }
 function fmtHM(at, tz) { try { return new Date(at).toLocaleTimeString('zh-CN', { timeZone: tz || undefined, hour: '2-digit', minute: '2-digit', hour12: false }); } catch (e) { return ''; } }
 function vigilDigest(c, tz) { const v = c.vigil || []; return v.length ? v.map((e) => `· ${fmtHM(e.at, tz)} ${e.text}`).join('\n') : ''; }
@@ -654,6 +661,7 @@ async function checkCinema() {
     const spent = Math.max(0, ((costs[sid] && costs[sid].cost) || 0) - before);
     c.cost = (c.cost || 0) + spent; c.cost5h = (c.cost5h || 0) + spent;
     if (res && res.said) { c.spoke = (c.spoke || 0) + 1; c.lastSpokeAt = Date.now(); }
+    timelinePush(c, res && res.said ? 'said' : 'quiet', res && res.said ? (res.text || '').slice(0, 160) : ''); // 这一刻记进时间线
     log(`cinema ${present ? '同在' : '守夜'}[${trigger}] ${sid.slice(0, 6)}: ${res && res.said ? '开口' : '静'} (wakes ${c.wakes}/spoke ${c.spoke}, $${(c.cost || 0).toFixed(2)})`);
     c.vigil = []; // 这段间隔已交还给玲 → 日志清空，开始记录下一段
     if (costCap > 0 && (c.cost5h || 0) >= costCap) { c.paused = true; c.pauseReason = `本窗口守夜花费已达上限（$${costCap.toFixed(2)}），已自动暂停`; }
@@ -1558,6 +1566,11 @@ async function handle(ws, conn, msg) {
     case 'cinema_get':
       send(ws, { type: 'cinema_state', sessionId: msg.sessionId, state: pubCinema(msg.sessionId) });
       break;
+    case 'cinema_log_get': {
+      const cc = wakeups[msg.sessionId] && wakeups[msg.sessionId].cinema;
+      send(ws, { type: 'cinema_log', sessionId: msg.sessionId, items: (cc && cc.timeline) || [] });
+      break;
+    }
     case 'cinema_set': {
       const sid = msg.sessionId; if (!sid) { send(ws, { type: 'error', message: '缺少会话' }); break; }
       const w = ensureWake(wakeups[sid] || (wakeups[sid] = {}));
