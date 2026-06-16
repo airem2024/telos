@@ -2186,6 +2186,7 @@ function renderUsageStrip() {
     inner += rcRow('累计花费', '$' + (t.cost || 0).toFixed(2), 'rc-total') + rcRow('合计会话', rcNum(t.sessions));
   }
   inner += RC_RULE + rcRow('今日花费', '$' + (u.today || 0).toFixed(2)) + rcRow('活跃天数', (u.activeDays || 0) + ' 天');
+  if (f && f.resets_at) inner += rcRow('5h 恢复', fmtReset(f.resets_at), 'rc-dim');
   $('usDetail').innerHTML = '<div class="receipt mini">' + inner + '<div class="rc-barcode"></div></div>';
 }
 function renderUsageFull() {
@@ -2196,7 +2197,10 @@ function renderUsageFull() {
   const U = u.usage, t = u.totals || {};
   const pctg = (g) => g && g.utilization != null ? Math.round(g.utilization) + '%' : '—';
   let inner = rcRow('PROVIDER', 'ANTHROPIC');
-  inner += rcRow('5 小时额度', pctg(U.five_hour)) + rcRow('本周额度', pctg(U.seven_day));
+  inner += rcRow('5 小时额度', pctg(U.five_hour));
+  if (U.five_hour && U.five_hour.resets_at) inner += rcRow('5 小时恢复', fmtReset(U.five_hour.resets_at), 'rc-dim');
+  inner += rcRow('本周额度', pctg(U.seven_day));
+  if (U.seven_day && U.seven_day.resets_at) inner += rcRow('本周恢复', fmtReset(U.seven_day.resets_at), 'rc-dim');
   if (U.seven_day_opus && U.seven_day_opus.utilization != null) inner += rcRow('Opus 周', pctg(U.seven_day_opus));
   if (U.seven_day_sonnet && U.seven_day_sonnet.utilization != null) inner += rcRow('Sonnet 周', pctg(U.seven_day_sonnet));
   const xu = U.extra_usage;
