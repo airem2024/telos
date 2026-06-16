@@ -960,23 +960,53 @@ function syncModelSub() {
   state.sessionModel = base ? modelDisplay(base) + (base === id ? '' : ' 1M') : 'Claude';
   updateHeader();
 }
+// 模型按系列归组：claude-<family>-… → Fable/Opus/Sonnet/Haiku，其余归「其他」
+function familyOf(id) { const m = /^claude-([a-z]+)/.exec(id || ''); return ({ fable: 'Fable', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' })[m ? m[1] : ''] || '其他'; }
+function pickModel(id) { state.model = id; state.modelMine = true; if (state.currentSession) { sendPresence(); syncModelSub(); } else LS.model = id; openModelSheet(); }
 function openModelSheet() {
   closeMenu();
   const mo = $('modelOpts'); mo.innerHTML = '';
-  modelList().forEach((x) => {
-    const o = el('button', 'opt' + (state.model === x.id ? ' on' : ''));
-    const tag = x.ctx >= 1000000 ? ' <span class="tag1m">1M</span>' : '';
-    o.innerHTML = `<div><div>${x.name}${tag}</div>${x.sub ? `<div class="osub">${x.sub}</div>` : ''}</div><span class="check">✓</span>`;
-    o.addEventListener('click', () => { state.model = x.id; state.modelMine = true; if (state.currentSession) { sendPresence(); syncModelSub(); } else LS.model = x.id; openModelSheet(); });
-    mo.appendChild(o);
-  });
-  // hide effort if the chosen model declares it unsupported
+  const list = modelList(); const hasDef = !!(list[0] && list[0].id === '');
+  const def = hasDef ? list[0] : { id: '', name: '默认（继承会话）', sub: '' };
+  const models = hasDef ? list.slice(1) : list;
+  const mkOpt = (x, checked) => { const o = el('button', 'opt' + (checked ? ' on' : '')); const tag = x && x.ctx >= 1000000 ? ' <span class="tag1m">1M</span>' : ''; o.innerHTML = `<div><div>${x.name}${tag}</div>${x && x.sub ? `<div class="osub">${x.sub}</div>` : ''}</div><span class="check">✓</span>`; return o; };
+  const fam = state.modelFam || '';
+  if (!fam) {
+    const od = mkOpt(def, state.model === ''); od.addEventListener('click', () => pickModel('')); mo.appendChild(od);
+    const groups = {}; models.forEach((m) => { const f = familyOf(m.id); (groups[f] = groups[f] || []).push(m); });
+    ['Fable', 'Opus', 'Sonnet', 'Haiku', '其他'].forEach((f) => {
+      const g = groups[f]; if (!g) return;
+      const sel = g.find((m) => m.id === state.model);
+      const o = el('button', 'opt' + (sel ? ' on' : ''));
+      const sub = sel ? modelDisplay(sel.id.replace('[1m]', '')) + (/\[1m\]$/.test(sel.id) ? ' 1M' : '') : g.length + ' 个';
+      o.innerHTML = `<div><div>${f}</div><div class="osub">${sub}</div></div><span class="check chev">›</span>`;
+      o.addEventListener('click', () => { state.modelFam = f; openModelSheet(); });
+      mo.appendChild(o);
+    });
+  } else {
+    const back = el('button', 'opt opt-back'); back.innerHTML = '<div>‹ 返回</div>'; back.addEventListener('click', () => { state.modelFam = ''; openModelSheet(); }); mo.appendChild(back);
+    models.filter((m) => familyOf(m.id) === fam).forEach((x) => { const o = mkOpt(x, state.model === x.id); o.addEventListener('click', () => pickModel(x.id)); mo.appendChild(o); });
+  }
+  renderEffortSlider();
+  openScrim('modelScrim');
+}
+// 思考度：带刻度点的滑块（默认→low→medium→high→x-high→max）
+function renderEffortSlider() {
+  const box = $('effortOpts'); box.innerHTML = '';
   const chosen = (state.availModels || []).find((x) => x.id === state.model);
   const showEffort = !chosen || chosen.effort;
-  const eo = $('effortOpts'); eo.innerHTML = '';
-  $('effortOpts').parentElement.querySelector('.sub2').style.display = showEffort ? '' : 'none';
-  if (showEffort) EFFORTS.forEach((x) => { const o = el('button', 'opt' + (state.effort === x.id ? ' on' : '')); o.innerHTML = `<div><div>${x.name}</div>${x.sub ? `<div class="osub">${x.sub}</div>` : ''}</div><span class="check">✓</span>`; o.addEventListener('click', () => { state.effort = x.id; state.modelMine = true; if (state.currentSession) sendPresence(); else LS.effort = x.id; openModelSheet(); }); eo.appendChild(o); });
-  openScrim('modelScrim');
+  const t2 = box.parentElement.querySelector('.sub2'); if (t2) t2.style.display = showEffort ? '' : 'none';
+  box.style.display = showEffort ? '' : 'none'; if (!showEffort) return;
+  let cur = EFFORTS.findIndex((e) => e.id === (state.effort || '')); if (cur < 0) cur = 0;
+  const wrap = el('div', 'effslider');
+  const val = el('div', 'eff-val'); val.textContent = EFFORTS[cur].name + (EFFORTS[cur].sub ? ' · ' + EFFORTS[cur].sub : ''); wrap.appendChild(val);
+  const r = document.createElement('input'); r.type = 'range'; r.className = 'slider'; r.min = 0; r.max = EFFORTS.length - 1; r.step = 1; r.value = cur;
+  r.addEventListener('input', () => { const e = EFFORTS[+r.value]; val.textContent = e.name + (e.sub ? ' · ' + e.sub : ''); });
+  r.addEventListener('change', () => { const e = EFFORTS[+r.value].id; state.effort = e; state.modelMine = true; if (state.currentSession) sendPresence(); else LS.effort = e; });
+  wrap.appendChild(r);
+  const ticks = el('div', 'eff-ticks'); EFFORTS.forEach((e, i) => { const s = el('span', 'eff-tick' + (i === cur ? ' on' : '')); ticks.appendChild(s); }); wrap.appendChild(ticks);
+  const ends = el('div', 'eff-ends'); ends.innerHTML = '<span>默认</span><span>max</span>'; wrap.appendChild(ends);
+  box.appendChild(wrap);
 }
 
 /* ============ mode sheet ============ */
@@ -1305,14 +1335,19 @@ function renderCinemaLog(m) {
   if (!items.length) { box.innerHTML = '<div class="cl-empty">还没有记录。<br>开启电影模式后，她在这段时间里的动静会记在这里。</div>'; return; }
   let html = '', lastDay = '';
   for (const it of items) {
+    if (it.kind === 'quiet') continue;        // 旧的"没说话"噪音，不显示
     const d = new Date(it.at);
     const day = d.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' });
     if (day !== lastDay) { html += '<div class="cl-day">' + esc(day) + '</div>'; lastDay = day; }
     const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-    const cls = it.kind === 'said' ? 'cl-said' : 'cl-dim';
-    const txt = it.kind === 'quiet' ? '没说话' : (it.text || '');
+    let cls = 'cl-evt', txt = it.text || '';
+    if (it.kind === 'said') cls = 'cl-said';
+    else if (it.kind === 'mood') cls = 'cl-mood';
+    else if (it.kind === 'here') txt = '在线';
+    else if (it.kind === 'away') txt = '离开';
     html += '<div class="cl-row ' + cls + '"><span class="cl-t">' + hm + '</span><span class="cl-x">' + esc(txt) + '</span></div>';
   }
+  if (!html) { box.innerHTML = '<div class="cl-empty">还没有记录。<br>开启电影模式后，她在这段时间里的动静会记在这里。</div>'; return; }
   box.innerHTML = html;
   requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
 }
@@ -1477,10 +1512,7 @@ function renderWakeList() {
 }
 function renderDawnArea() {
   const w = state.wk; const box = $('wkDawnArea'); box.innerHTML = '';
-  const hours = []; for (let h = 0; h < 24; h++) hours.push(h);
-  const mins = []; for (let m = 0; m < 60; m++) mins.push(m);
-  box.appendChild(wkTimeRow('时', hours, () => w.dawnH, (v) => pad2(v), (v) => { w.dawnH = v; }));
-  box.appendChild(wkTimeRow('分', mins, () => w.dawnM, (v) => pad2(v), (v) => { w.dawnM = v; }));
+  box.appendChild(wkClock(() => w.dawnH, (v) => { w.dawnH = v; }, () => w.dawnM, (v) => { w.dawnM = v; }));
 }
 function openWakeEditor() {
   const w = state.wk; if (!w) return; const now = new Date();
@@ -1498,12 +1530,48 @@ function addFromEditor() {
   w.list.push(item); closeWakeEditor(); renderWakeForm();
 }
 function wkChip(label, on, cb) { const b = el('button', 'wkt' + (on ? ' on' : '')); b.textContent = label; b.addEventListener('click', cb); return b; }
-function wkTimeRow(label, values, getSel, fmt, cb) {
-  const row = el('div', 'wktrow'); const l = el('div', 'wktrl'); l.textContent = label; row.appendChild(l);
-  const sc = el('div', 'wkscroll');
-  values.forEach((v) => { const c = wkChip(fmt(v), v === getSel(), () => { cb(v); sc.querySelectorAll('.wkt').forEach((x) => x.classList.toggle('on', x === c)); }); sc.appendChild(c); });
-  row.appendChild(sc);
-  setTimeout(() => { const on = sc.querySelector('.wkt.on'); if (on) on.scrollIntoView({ inline: 'center', block: 'nearest' }); }, 0);
+// 闹钟式竖向滚轮：上下滚、吸附居中、可循环。values=值数组，sel=初始下标，fmt(v)=显示，onSel(i)=选中回调
+function wkWheel(values, sel, fmt, onSel, loop) {
+  const ITEM = 36, VIS = 5, CTR = 2;                 // 5 行、中间第 2 行为选中槽
+  const n = values.length, COPIES = loop ? 9 : 1, MID = loop ? (COPIES >> 1) : 0;
+  const wrap = el('div', 'whl'); wrap.style.height = (ITEM * VIS) + 'px';
+  const scr = el('div', 'whl-scroll'); wrap.appendChild(scr);
+  wrap.appendChild(el('div', 'whl-band'));
+  const items = [];
+  const pad = () => el('div', 'whl-item whl-pad');
+  if (!loop) for (let i = 0; i < CTR; i++) scr.appendChild(pad());
+  for (let c = 0; c < COPIES; c++) for (let i = 0; i < n; i++) { const d = el('div', 'whl-item'); d.textContent = fmt(values[i]); scr.appendChild(d); items.push(d); }
+  if (!loop) for (let i = 0; i < CTR; i++) scr.appendChild(pad());
+  let cur = -1;
+  const hl = (k) => items.forEach((d, j) => d.classList.toggle('on', j === k));
+  function settle() {
+    if (loop) {
+      let g = Math.round(scr.scrollTop / ITEM) + CTR;
+      if (g < n * 2 || g > n * (COPIES - 2)) { const vi = ((g % n) + n) % n; g = MID * n + vi; scr.scrollTop = (g - CTR) * ITEM; }
+      const vi = ((g % n) + n) % n; hl(g); if (vi !== cur) { cur = vi; onSel(vi); buzz(6); }
+    } else {
+      let si = Math.max(0, Math.min(n - 1, Math.round(scr.scrollTop / ITEM))); hl(si); if (si !== cur) { cur = si; onSel(si); buzz(6); }
+    }
+  }
+  let t = null;
+  scr.addEventListener('scroll', () => { clearTimeout(t); t = setTimeout(settle, 90); });
+  setTimeout(() => { const g = loop ? (MID * n + sel) : sel; scr.scrollTop = (loop ? (g - CTR) : g) * ITEM; cur = ((sel % n) + n) % n; hl(loop ? g : sel); }, 0);
+  return wrap;
+}
+// 时:分 两滚轮并排（闹钟样）
+function wkClock(getH, setH, getM, setM) {
+  const row = el('div', 'wkclock');
+  const hours = []; for (let h = 0; h < 24; h++) hours.push(h);
+  const mins = []; for (let m = 0; m < 60; m++) mins.push(m);
+  row.appendChild(wkWheel(hours, getH(), (v) => pad2(v), (i) => setH(i), true));
+  const sep = el('div', 'wkclock-sep'); sep.textContent = ':'; row.appendChild(sep);
+  row.appendChild(wkWheel(mins, getM(), (v) => pad2(v), (i) => setM(i), true));
+  return row;
+}
+function wkTimeRow(label, values, getSel, fmt, cb, loop) {
+  const row = el('div', 'wktrow'); if (label) { const l = el('div', 'wktrl'); l.textContent = label; row.appendChild(l); }
+  let si = values.indexOf(getSel()); if (si < 0) si = 0;
+  row.appendChild(wkWheel(values, si, fmt, (i) => cb(values[i]), !!loop));
   return row;
 }
 function renderWakeModeArea() {
@@ -1521,10 +1589,7 @@ function renderWakeModeArea() {
     box.appendChild(wkTimeRow('', dates, () => w.eDate, (v) => dateChipLabel(v), (v) => { w.eDate = v; }));
   }
   const tl = el('div', 'wklabel'); tl.textContent = '时间'; box.appendChild(tl);
-  const hours = []; for (let h = 0; h < 24; h++) hours.push(h);
-  const mins = []; for (let m = 0; m < 60; m++) mins.push(m);
-  box.appendChild(wkTimeRow('时', hours, () => w.eHour, (v) => pad2(v), (v) => { w.eHour = v; }));
-  box.appendChild(wkTimeRow('分', mins, () => w.eMin, (v) => pad2(v), (v) => { w.eMin = v; }));
+  box.appendChild(wkClock(() => w.eHour, (v) => { w.eHour = v; }, () => w.eMin, (v) => { w.eMin = v; }));
 }
 function dateChipLabel(ds) {
   const t = new Date(); t.setHours(0, 0, 0, 0);
@@ -1909,12 +1974,11 @@ function renderSetSub() {
       row.classList.add('pickrow');
       const lab = el('span', 'seg-label'); lab.textContent = it.name; row.appendChild(lab);
       const cur = P(it.key), curOff = tzToOffset(cur);
-      const sc = el('div', 'wkscroll'); sc.style.marginTop = '12px';
-      const pick = (val, chip) => { setPref(it.key, val); if (it.onChange) it.onChange(); buzz(12); sc.querySelectorAll('.wkt').forEach((x) => x.classList.toggle('on', x === chip)); refreshSettingsRows(); };
-      const autoChip = wkChip('自动', cur === '', () => pick('', autoChip)); sc.appendChild(autoChip);
-      for (let o = -12; o <= 14; o++) { const tz = tzFromOffset(o); const chip = wkChip(tzOffLabel(o), curOff === o, () => pick(tz, chip)); sc.appendChild(chip); }
-      row.appendChild(sc);
-      setTimeout(() => { const on = sc.querySelector('.wkt.on'); if (on) on.scrollIntoView({ inline: 'center', block: 'nearest' }); }, 0);
+      const vals = ['']; for (let o = -12; o <= 14; o++) vals.push(o);
+      let si = (cur === '') ? 0 : (curOff != null ? vals.indexOf(curOff) : 0); if (si < 0) si = 0;
+      row.appendChild(wkWheel(vals, si, (v) => v === '' ? '自动' : tzOffLabel(v), (i) => {
+        const v = vals[i]; setPref(it.key, v === '' ? '' : tzFromOffset(v)); if (it.onChange) it.onChange(); refreshSettingsRows();
+      }, false));
     } else if (it.type === 'info') {
       row.classList.add('togglerow'); const lab = el('span'); lab.textContent = it.name; const v = el('span', 'sr-desc'); v.textContent = it.value(); row.appendChild(lab); row.appendChild(v);
     }
@@ -2182,7 +2246,7 @@ function initPageSwipe(screenId, opts) {
   const onBack = opts.onBack, onLeft = opts.onLeft;
   let sx = 0, sy = 0, dir = null, active = false, W = 0;
   const TRIG = () => Math.min(120, W * 0.32);
-  const noSwipe = (t) => t && t.closest && t.closest('input, textarea, button, a, .slider, .picklist, .seg, .wkscroll, .cal, [data-noswipe]');
+  const noSwipe = (t) => t && t.closest && t.closest('input, textarea, button, a, .slider, .picklist, .seg, .whl, .cal, [data-noswipe]');
   scr.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1 || noSwipe(e.target)) { active = false; return; }
     sx = e.touches[0].clientX; sy = e.touches[0].clientY; dir = null; active = true; W = window.innerWidth;
@@ -2419,7 +2483,7 @@ function boot() {
   $('claudeSave').addEventListener('click', saveClaudeMd);
   $('claudePrev').addEventListener('click', () => setClaudePreview($('claudeView').style.display === 'none'));
   $('compactSave').addEventListener('click', () => { setPref('compactPrompt', $('compactText').value); closeScrim('compactScrim'); toast('压缩提示词已保存'); });
-  $('mModel').addEventListener('click', openModelSheet);
+  $('mModel').addEventListener('click', () => { state.modelFam = ''; openModelSheet(); });
   $('mRename').addEventListener('click', () => { closeMenu(); openPrompt('重命名会话', state.curTitle || '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }); });
   $('mCopyDir').addEventListener('click', () => { closeMenu(); navigator.clipboard && navigator.clipboard.writeText(state.cwd || ''); toast('已复制目录'); });
   $('mDelete').addEventListener('click', () => { closeMenu(); openPrompt('输入「删除」确认', '', (v) => { if (v === '删除') { wsend({ type: 'delete', sessionId: state.currentSession }); goList(); } else toast('已取消'); }); });

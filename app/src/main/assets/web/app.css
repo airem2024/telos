@@ -346,6 +346,19 @@ button.model:active { opacity: .6; }
 .opt .check { margin-left: auto; color: var(--accent); font-weight: 700; opacity: 0; }
 .opt.on .check { opacity: 1; }
 .tag1m { display: inline-block; margin-left: 7px; padding: 1px 6px; border-radius: 6px; background: var(--accent-weak); color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: .04em; vertical-align: middle; }
+.opt .check.chev { opacity: 1; color: var(--muted); font-weight: 400; font-size: 20px; }
+.opt-back { color: var(--muted); border-style: dashed; }
+/* 思考度：带刻度点的滑块 */
+.effslider { padding: 2px 2px 0; }
+.eff-val { font-size: 14px; color: var(--text); font-weight: 600; margin-bottom: 12px; }
+.effslider .slider { width: 100%; }
+.eff-ticks { display: flex; justify-content: space-between; padding: 7px 9px 0; }
+.eff-tick { width: 6px; height: 6px; border-radius: 50%; background: var(--border); }
+.eff-tick.on { background: var(--accent); }
+.eff-ends { display: flex; justify-content: space-between; padding: 5px 2px 0; font-size: 11px; color: var(--muted); }
+/* 时间线：事件(在线/离开) / 心情 */
+.cl-row.cl-evt .cl-x { color: var(--muted); }
+.cl-row.cl-mood .cl-x { color: var(--accent); font-style: italic; }
 
 /* ---------- dir picker ---------- */
 .dirlist { margin: 8px 0 14px; }
@@ -945,6 +958,16 @@ body.sysfont {
 .wkscroll::-webkit-scrollbar { display: none; }
 .wkt { flex: none; min-width: 44px; padding: 9px 12px; text-align: center; border-radius: 10px; background: var(--surface-2); color: var(--text); border: none; font-size: 14px; }
 .wkt.on { background: var(--accent); color: #fff; font-weight: 600; }
+/* 闹钟式竖向滚轮（时/分/日期/时区共用） */
+.wkclock { display: flex; align-items: center; justify-content: center; gap: 4px; }
+.wkclock-sep { font-size: 22px; color: var(--text); font-weight: 600; padding-bottom: 2px; }
+.whl { position: relative; width: 100%; overflow: hidden; -webkit-mask-image: linear-gradient(180deg, transparent, #000 26%, #000 74%, transparent); mask-image: linear-gradient(180deg, transparent, #000 26%, #000 74%, transparent); }
+.wkclock .whl { width: auto; flex: 1; max-width: 104px; }
+.whl-scroll { height: 100%; overflow-y: scroll; scroll-snap-type: y mandatory; scrollbar-width: none; overscroll-behavior: contain; }
+.whl-scroll::-webkit-scrollbar { display: none; }
+.whl-item { height: 36px; line-height: 36px; text-align: center; scroll-snap-align: center; font-variant-numeric: tabular-nums; font-size: 19px; color: var(--muted); transition: color .12s, font-size .12s; }
+.whl-item.on { color: var(--text); font-weight: 600; font-size: 21px; }
+.whl-band { position: absolute; left: 4px; right: 4px; top: 72px; height: 36px; pointer-events: none; border-top: 1px solid var(--accent); border-bottom: 1px solid var(--accent); opacity: .5; }
 /* 多个唤醒时间：列表 + 添加 */
 .wkitem { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 12px; background: var(--surface-2); margin-bottom: 8px; }
 .wkitem .wki-main { flex: 1; min-width: 0; }
