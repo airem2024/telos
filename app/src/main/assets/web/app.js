@@ -424,6 +424,7 @@ function handle(m) {
     // ---- 醒来 / 日记 / 便签 ----
     case 'wakeup_state': onWakeState(m); break;
     case 'cinema_state': onCinemaState(m); break;
+    case 'mood': if (m.sessionId === state.currentSession) { state.mood = m.mood || null; updateHeader(); syncMoodMenu(); } break;
     case 'cinema_log':
       if (state.screen === 'cinemaLog' && state.cinTarget && m.sessionId === state.cinTarget.id) renderCinemaLog(m);
       break;
@@ -484,15 +485,15 @@ function renderTabs() {
   (state.folders || []).forEach((f) => mk(esc(f), f, state.sessions.filter((s) => s.folder === f).length, true));
 }
 // 文件夹收起：由 Telos 标题旁的小三角控制整条 #tabs 显隐（像命令一样可收起）。
-// 只有存在文件夹时才出现三角；收起时回到「全部」，免得过滤生效却看不见 chip。
+// 只有存在文件夹时才出现三角；收起时**停在当前文件夹**（不再弹回「全部」），三角后显示当前夹名免得不知身在哪。
 function syncFoldCaret() {
   const hasFolders = (state.folders || []).length > 0;
   const collapsed = hasFolders && P('foldersCollapsed');
-  if (collapsed && state.activeFolder) state.activeFolder = null;
   const caret = $('foldCaret');
   if (!caret) return;
   caret.style.display = hasFolders ? '' : 'none';
-  caret.textContent = collapsed ? '▸' : '▾';
+  const name = (collapsed && state.activeFolder) ? state.activeFolder : '';
+  caret.innerHTML = (collapsed ? '▸' : '▾') + (name ? ' <span class="foldcur">' + esc(name) + '</span>' : '');
   $('tabs').style.display = collapsed ? 'none' : '';
 }
 function renderSessions() {
@@ -824,10 +825,15 @@ function toolsLeftAction() {
 }
 
 /* ============ open / new / history ============ */
+function moodHue(s) { let h = 0; for (let i = 0; i < (s || '').length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return 'hsl(' + h + ',52%,56%)'; }
 function updateHeader() {
   $('chatTitle').textContent = state.currentSession ? (state.curTitle || 'Claude Code') : '新会话';
-  if (P('showModel') && state.currentSession) { $('chatSub').textContent = state.sessionModel || 'Claude'; $('chatSub').style.display = 'block'; }
-  else $('chatSub').style.display = 'none';
+  const md = state.mood, hasMood = !!(md && md.on && md.label);
+  if (state.currentSession && (P('showModel') || hasMood)) {
+    let html = P('showModel') ? esc(state.sessionModel || 'Claude') : '';
+    if (hasMood) html += (html ? '<span class="mood-sep">·</span>' : '') + '<span class="mood-dot" style="background:' + moodHue(md.label) + '"></span><span class="mood-lab">' + esc(md.label) + '</span>';
+    $('chatSub').innerHTML = html; $('chatSub').style.display = 'block';
+  } else $('chatSub').style.display = 'none';
   // dir chip only matters for a brand-new session (where you can still choose the dir)
   $('dirChip').style.display = state.currentSession ? 'none' : 'inline-flex';
   $('dirChipLabel').textContent = shortCwd(state.cwd || state.defaultCwd);
@@ -855,7 +861,7 @@ function openSession(s) {
   // re-entering the session whose turn is still running → keep the live view (message +
   // spinner + partial reply); don't clobber it with stale history that lacks the in-flight turn
   if (state.currentSession === s.id && state.activeTurn && !state.activeTurn.done) { show('chat'); return; }
-  state.currentSession = s.id; state.cwd = s.cwd || ''; state.curTitle = s.title; state.sessionModel = 'Claude'; state.lastModel = '';
+  state.currentSession = s.id; state.cwd = s.cwd || ''; state.curTitle = s.title; state.sessionModel = 'Claude'; state.lastModel = ''; state.mood = null;
   // 模型/effort 是每对话一份的（服务端 sessmodel.json）：先拿全局默认占位，等 history 带回这个对话
   // 记住的 pref 再切过去；占位期间 modelMine=false → presence 不带 model，不会盖掉服务端那份。
   // [1m] 这类运行时变体也存在 pref 里，重开对话不会掉回 200K 底座被自动 compact。
@@ -882,7 +888,7 @@ function renderHistory(m) {
     const p = m.pref || {};
     state.model = p.model || ''; state.effort = p.effort || ''; state.modelMine = true;
   }
-  if (m.sessionId === state.currentSession) { state.lastModel = m.lastModel || ''; syncModelSub(); }
+  if (m.sessionId === state.currentSession) { state.lastModel = m.lastModel || ''; syncModelSub(); state.mood = m.mood || null; updateHeader(); }
   let group = null, userB = null; // userB: 最近的用户气泡——它的附图回填成气泡内缩略图，而不是 cc 侧大图
   (m.items || []).forEach((it) => {
     if (it.kind === 'text') { group = null; if (it.role === 'user') userB = addUser(it.text, it.uuid); else { userB = null; addAssistantText(it.text); } }
@@ -1284,10 +1290,26 @@ function openMenu() {
   // CLAUDE.md / model / MCP / copy-dir work for a brand-new session too (they act on the
   // chosen working dir / globally); only hide the items that need an existing session.
   const newSess = !state.currentSession;
-  ['mRegen', 'mRename', 'mDelete'].forEach((id) => { $(id).style.display = newSess ? 'none' : ''; });
+  ['mRegen', 'mRename', 'mDelete', 'mMood'].forEach((id) => { $(id).style.display = newSess ? 'none' : ''; });
+  syncMoodMenu();
   clearTimeout(mp._hideT);
   mb.classList.add('show'); mp.classList.add('show');
   requestAnimationFrame(() => { mb.classList.add('in'); mp.classList.add('in'); });
+}
+function syncMoodMenu() {
+  const dot = $('mMoodDot'); if (!dot) return;
+  const on = !!(state.mood && state.mood.on);
+  dot.classList.toggle('on', on);
+  dot.style.background = (on && state.mood.label) ? moodHue(state.mood.label) : '';
+}
+// 每对话「情绪」开关：开了她会带着常驻心情回应（标签由模型自己写）。默认关、不动现有对话。
+function toggleMood() {
+  if (!state.currentSession) return;
+  const on = !(state.mood && state.mood.on);
+  state.mood = { ...(state.mood || {}), on };   // 乐观更新
+  wsend({ type: 'mood_set', sessionId: state.currentSession, on });
+  updateHeader(); syncMoodMenu();
+  toast(on ? '情绪已开：她会带着心情回应' : '情绪已关');
 }
 function closeMenu() {
   const mb = $('menuback'), mp = $('menuPop');
@@ -1548,7 +1570,7 @@ function renderWakeList() {
 }
 function renderDawnArea() {
   const w = state.wk; const box = $('wkDawnArea'); box.innerHTML = '';
-  box.appendChild(wkClock(() => w.dawnH, (v) => { w.dawnH = v; }, () => w.dawnM, (v) => { w.dawnM = v; }));
+  box.appendChild(wkInline('写日记时间', wkClock(() => w.dawnH, (v) => { w.dawnH = v; }, () => w.dawnM, (v) => { w.dawnM = v; })));
 }
 function openWakeEditor() {
   const w = state.wk; if (!w) return; const now = new Date();
@@ -1567,12 +1589,12 @@ function addFromEditor() {
 }
 function wkChip(label, on, cb) { const b = el('button', 'wkt' + (on ? ' on' : '')); b.textContent = label; b.addEventListener('click', cb); return b; }
 // 闹钟式竖向滚轮：上下滚、吸附居中、可循环。values=值数组，sel=初始下标，fmt(v)=显示，onSel(i)=选中回调
-function wkWheel(values, sel, fmt, onSel, loop) {
-  const ITEM = 30, VIS = 5, CTR = 2;                 // 5 行、中间第 2 行为选中槽（ITEM 改了要同步 .whl-item 高度）
+function wkWheel(values, sel, fmt, onSel, loop, vis) {
+  const ITEM = 30, VIS = vis || 1, CTR = (VIS - 1) >> 1;   // 默认紧凑：VIS=1 只显当前值、无上下预览（ITEM 改了要同步 .whl-item 高度）
   const n = values.length, COPIES = loop ? 9 : 1, MID = loop ? (COPIES >> 1) : 0;
-  const wrap = el('div', 'whl'); wrap.style.height = (ITEM * VIS) + 'px';
+  const wrap = el('div', 'whl' + (VIS === 1 ? ' whl-flat' : '')); wrap.style.height = (ITEM * VIS) + 'px';
   const scr = el('div', 'whl-scroll'); wrap.appendChild(scr);
-  const band = el('div', 'whl-band'); band.style.top = (ITEM * CTR) + 'px'; band.style.height = ITEM + 'px'; wrap.appendChild(band);
+  if (VIS > 1) { const band = el('div', 'whl-band'); band.style.top = (ITEM * CTR) + 'px'; band.style.height = ITEM + 'px'; wrap.appendChild(band); }
   const items = [];
   const pad = () => el('div', 'whl-item whl-pad');
   if (!loop) for (let i = 0; i < CTR; i++) scr.appendChild(pad());
@@ -1594,20 +1616,21 @@ function wkWheel(values, sel, fmt, onSel, loop) {
   setTimeout(() => { const g = loop ? (MID * n + sel) : sel; scr.scrollTop = (loop ? (g - CTR) : g) * ITEM; cur = ((sel % n) + n) % n; hl(loop ? g : sel); }, 0);
   return wrap;
 }
-// 时:分 两滚轮并排（闹钟样）
+// 时:分 两滚轮并排，紧凑 12:00（每格只显当前值、上下滚改、无预览）
 function wkClock(getH, setH, getM, setM) {
-  const row = el('div', 'wkclock');
+  const row = el('div', 'wkclock compact');
   const hours = []; for (let h = 0; h < 24; h++) hours.push(h);
   const mins = []; for (let m = 0; m < 60; m++) mins.push(m);
-  row.appendChild(wkWheel(hours, getH(), (v) => pad2(v), (i) => setH(i), true));
+  row.appendChild(wkWheel(hours, getH(), (v) => pad2(v), (i) => setH(i), true, 1));
   const sep = el('div', 'wkclock-sep'); sep.textContent = ':'; row.appendChild(sep);
-  row.appendChild(wkWheel(mins, getM(), (v) => pad2(v), (i) => setM(i), true));
+  row.appendChild(wkWheel(mins, getM(), (v) => pad2(v), (i) => setM(i), true, 1));
   return row;
 }
-function wkTimeRow(label, values, getSel, fmt, cb, loop) {
-  const row = el('div', 'wktrow'); if (label) { const l = el('div', 'wktrl'); l.textContent = label; row.appendChild(l); }
-  let si = values.indexOf(getSel()); if (si < 0) si = 0;
-  row.appendChild(wkWheel(values, si, fmt, (i) => cb(values[i]), !!loop));
+// 标签 + 控件同一行（不再「标签一行、控件单独空一行」）
+function wkInline(label, control) {
+  const row = el('div', 'wkinline');
+  const l = el('div', 'wkinline-l'); l.textContent = label; row.appendChild(l);
+  control.classList.add('wkinline-c'); row.appendChild(control);
   return row;
 }
 function renderWakeModeArea() {
@@ -1619,13 +1642,12 @@ function renderWakeModeArea() {
     box.appendChild(row); return;
   }
   if (w.eMode === 'once') {
-    const lbl = el('div', 'wklabel'); lbl.textContent = '日期'; box.appendChild(lbl);
     const base = new Date(); base.setHours(0, 0, 0, 0);
     const dates = []; for (let i = 0; i < 60; i++) { const d = new Date(base.getTime() + i * 86400000); dates.push(d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())); }
-    box.appendChild(wkTimeRow('', dates, () => w.eDate, (v) => dateChipLabel(v), (v) => { w.eDate = v; }));
+    let si = dates.indexOf(w.eDate); if (si < 0) si = 0;
+    box.appendChild(wkInline('日期', wkWheel(dates, si, (v) => dateChipLabel(v), (i) => { w.eDate = dates[i]; }, false, 1)));
   }
-  const tl = el('div', 'wklabel'); tl.textContent = '时间'; box.appendChild(tl);
-  box.appendChild(wkClock(() => w.eHour, (v) => { w.eHour = v; }, () => w.eMin, (v) => { w.eMin = v; }));
+  box.appendChild(wkInline('时间', wkClock(() => w.eHour, (v) => { w.eHour = v; }, () => w.eMin, (v) => { w.eMin = v; })));
 }
 function dateChipLabel(ds) {
   const t = new Date(); t.setHours(0, 0, 0, 0);
@@ -2008,14 +2030,15 @@ function renderSetSub() {
       });
       row.appendChild(list);
     } else if (it.type === 'tzoff') {
-      row.classList.add('pickrow');
-      const lab = el('span', 'seg-label'); lab.textContent = it.name; row.appendChild(lab);
+      row.classList.add('togglerow');   // 标签左、滚轮右，同一行（不再竖排空一行）
+      const lab = el('span'); lab.textContent = it.name; row.appendChild(lab);
       const cur = P(it.key), curOff = tzToOffset(cur);
       const vals = ['']; for (let o = -12; o <= 14; o++) vals.push(o);
       let si = (cur === '') ? 0 : (curOff != null ? vals.indexOf(curOff) : 0); if (si < 0) si = 0;
-      row.appendChild(wkWheel(vals, si, (v) => v === '' ? '自动' : tzOffLabel(v), (i) => {
+      const tw = wkWheel(vals, si, (v) => v === '' ? '自动' : tzOffLabel(v), (i) => {
         const v = vals[i]; setPref(it.key, v === '' ? '' : tzFromOffset(v)); if (it.onChange) it.onChange(); refreshSettingsRows();
-      }, false));
+      }, false, 1);
+      tw.classList.add('wkinline-c'); row.appendChild(tw);
     } else if (it.type === 'info') {
       row.classList.add('togglerow'); const lab = el('span'); lab.textContent = it.name; const v = el('span', 'sr-desc'); v.textContent = it.value(); row.appendChild(lab); row.appendChild(v);
     }
@@ -2549,6 +2572,7 @@ function boot() {
   $('claudePrev').addEventListener('click', () => setClaudePreview($('claudeView').style.display === 'none'));
   $('compactSave').addEventListener('click', () => { setPref('compactPrompt', $('compactText').value); closeScrim('compactScrim'); toast('压缩提示词已保存'); });
   $('mModel').addEventListener('click', () => { state.modelCtx = null; state.modelFam = ''; openModelSheet(); });
+  $('mMood').addEventListener('click', toggleMood);
   $('mRename').addEventListener('click', () => { closeMenu(); openPrompt('重命名会话', state.curTitle || '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }); });
   $('mCopyDir').addEventListener('click', () => { closeMenu(); navigator.clipboard && navigator.clipboard.writeText(state.cwd || ''); toast('已复制目录'); });
   $('mDelete').addEventListener('click', () => { closeMenu(); openPrompt('输入「删除」确认', '', (v) => { if (v === '删除') { wsend({ type: 'delete', sessionId: state.currentSession }); goList(); } else toast('已取消'); }); });

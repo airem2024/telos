@@ -108,6 +108,7 @@ input, textarea {
 /* 文件夹收起：标题旁的小三角（▾ 展开 / ▸ 收起），只有有文件夹时才显示 */
 .foldcaret { border: none; background: transparent; color: var(--muted); font-size: 14px; line-height: 1; padding: 8px 6px; align-self: center; }
 .foldcaret:active { color: var(--accent); }
+.foldcaret .foldcur { font-family: 'Inter'; font-size: 13px; font-weight: 600; color: var(--accent); }
 .tabs { display: flex; gap: 10px; padding: 0 20px 12px; }
 .tab {
   border: none; background: var(--surface); color: var(--muted);
@@ -445,6 +446,12 @@ button.model:active { opacity: .6; }
 .mitem:active { background: var(--surface-2); }
 .mitem.danger { color: var(--err); }
 .mitem.danger svg { color: var(--err); }
+/* 情绪：菜单里的状态点（关=空心描边，开=实心着色），标题下的心情小点+标签 */
+.mooddot { width: 11px; height: 11px; border-radius: 50%; flex: none; border: 1.5px solid var(--muted); background: transparent; }
+.mooddot.on { border-color: transparent; }
+.mood-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; vertical-align: middle; margin-right: 4px; }
+.mood-lab { color: var(--muted); }
+.mood-sep { margin: 0 5px; color: var(--border); }
 
 /* ===== tool group row in thread ===== */
 .toolrow {
@@ -967,9 +974,20 @@ body.sysfont {
 .wkt.on { background: var(--accent); color: #fff; font-weight: 600; }
 /* 闹钟式竖向滚轮（时/分/日期/时区共用） */
 .wkclock { display: flex; align-items: center; justify-content: center; gap: 3px; }
-.wkclock-sep { font-size: 19px; color: var(--text); font-weight: 600; padding-bottom: 2px; }
+.wkclock-sep { font-size: 18px; color: var(--text); font-weight: 600; padding-bottom: 2px; }
 .whl { position: relative; width: 100%; overflow: hidden; -webkit-mask-image: linear-gradient(180deg, transparent, #000 26%, #000 74%, transparent); mask-image: linear-gradient(180deg, transparent, #000 26%, #000 74%, transparent); }
 .wkclock .whl { width: auto; flex: 1; max-width: 84px; }
+/* 紧凑单行滚轮（VIS=1）：只显当前值、无上下预览、无渐隐遮罩，做成可滚的小药丸 */
+.whl-flat { -webkit-mask-image: none; mask-image: none; background: var(--surface-2); border-radius: 8px; }
+.wkclock.compact { gap: 5px; }
+.wkclock.compact .whl { min-width: 44px; max-width: 52px; }
+.wkclock.compact .whl-item, .wkinline-c .whl-item { color: var(--text); font-size: 17px; }
+.wkclock.compact .whl-item.on, .wkinline-c .whl-item.on { font-size: 17px; font-weight: 600; }
+/* 标签 + 控件同一行 */
+.wkinline { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 2px; }
+.wkinline-l { color: var(--muted); font-size: 15px; flex: none; }
+.wkinline-c { flex: none; }
+.wkinline-c.whl-flat { min-width: 92px; max-width: 132px; padding: 0 4px; }
 .whl-scroll { height: 100%; overflow-y: scroll; scroll-snap-type: y mandatory; scrollbar-width: none; overscroll-behavior: contain; }
 .whl-scroll::-webkit-scrollbar { display: none; }
 /* 行高要和 wkWheel 里的 ITEM 一致（现 30）；band 的 top/height 由 JS 按 ITEM 行内设定 */
