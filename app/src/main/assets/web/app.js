@@ -1398,7 +1398,11 @@ function fmtSpan(ms) { const m = Math.round(ms / 60000); if (m < 60) return m + 
 function cinNoteHTML(c) {
   const on = !!c.on; const s = state.cinTarget; const otherHolder = c.holder && s && c.holder !== s.id ? c.holder : '';
   if (c.paused) return '已暂停：' + esc(c.pauseReason || '') + '。重新打开开关即可继续。';
-  if (on) return '<span class="cin-hint">左滑查看时间线</span>';
+  if (on) {
+    const md = c.mood; let now = '';
+    if (md && md.label) now = '此刻 <span class="mood-dot" style="background:' + moodHue(md.label) + '"></span><span class="mood-lab">' + esc(md.label) + '</span><span class="mood-sep">·</span>';
+    return '<span class="cin-hint">' + now + '左滑查看时间线</span>';
+  }
   if (otherHolder) return '另一个对话正开着（同一时间只能开一个），在这里打开会关掉那个。';
   return '开启后，你在这个对话里时她会和你一起；你离开后她会偶尔留意这段时间。';
 }

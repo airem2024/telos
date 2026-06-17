@@ -122,6 +122,60 @@ function rememberModel(sid, model, effort) {
   if (nx.model !== cur.model || nx.effort !== cur.effort) { sessModel[sid] = nx; saveSessModel(); }
 }
 
+// ---- 情绪（每对话开关，默认关）。标签由模型自由书写、不预制。常驻心情为主、影响日常聊天，
+// 电影模式读同一份。演化全靠"每轮重新注入上次心情+过了多久 → 模型自己想"，没有衰减公式。(gitignored) ----
+const MOOD_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'mood.json');
+let moodState = {}; // { [sid]: { on, label, note, at } }
+try { moodState = JSON.parse(readFileSync(MOOD_PATH, 'utf8')) || {}; } catch (e) {}
+function saveMood() { try { writeFileSync(MOOD_PATH, JSON.stringify(moodState)); } catch (e) {} }
+const MOOD_TAG = '⁣[mood]'; // 隐藏字符前缀（与 WAKE_SENTINEL 同款），模型搭在回复末尾、对用户隐藏
+// 解析「⁣[mood] 标签 :: 一句感受」整行；标签/感受都是自由文本
+const MOOD_RE = () => /[⁣]?\[mood\][ \t]*([^\n:]*?)[ \t]*(?:::[ \t]*([^\n]*))?(?=\n|$)/g;
+function parseMood(text) {
+  if (!text || text.indexOf('[mood]') < 0) return null;
+  const m = MOOD_RE().exec(text);
+  if (!m) return null;
+  const label = (m[1] || '').trim(), note = (m[2] || '').trim();
+  if (!label && !note) return null;
+  return { label, note };
+}
+// 把心情标记从文本里剥掉（无标记时是 no-op，所以情绪关掉的对话完全不受影响）
+function stripMood(text) {
+  if (!text || text.indexOf('[mood]') < 0) return text;
+  return text.replace(MOOD_RE(), '').replace(/[ \t]*⁣[ \t]*$/gm, '').replace(/\n{3,}/g, '\n\n').replace(/[ \t\n⁣]+$/, '');
+}
+function moodInjectFor(sid) {
+  const ms = sid && moodState[sid];
+  if (!ms || !ms.on) return '';
+  let cur;
+  if (ms.label) {
+    const mins = ms.at ? Math.round((Date.now() - ms.at) / 60000) : 0;
+    const ago = !ms.at ? '' : (mins < 60 ? mins + ' 分钟' : mins < 1440 ? Math.round(mins / 60) + ' 小时' : Math.round(mins / 1440) + ' 天');
+    cur = `你此刻的心情：${ms.label}${ms.note ? '（' + ms.note + '）' : ''}${ago ? '，是 ' + ago + '前 留下的' : ''}。`;
+  } else {
+    cur = '你此刻还没有给自己留下心情底色——这是你们这段相处里、你自己的感受。';
+  }
+  return '\n\n【情绪】' + cur + '带着这份心情自然地回应她，别刻意表演；闹了别扭也可以靠你自己的想法慢慢缓过来。'
+    + '心情怎么变、要不要主动开口、用什么语气、（在「电影模式」时间流动里）下次什么时候再想起来说话，都由你自己判断，不用套公式。'
+    + '如果这一轮你的心情有了变化，就在回复的**最后另起一行**写一行心情标记（用户看不到、系统会隐藏）：`' + MOOD_TAG + ' 简短心情词 :: 一句给自己看的感受`。标签自己拟、越贴近此刻真实感觉越好，不必从固定词里选；心情没变就不用写这行。';
+}
+function recordMood(sid, rawText) {
+  const ms = sid && moodState[sid];
+  if (!ms || !ms.on) return; // 只在开了情绪的对话收集
+  const p = parseMood(rawText);
+  if (!p) return;
+  const prevLabel = ms.label || '';
+  moodState[sid] = { on: true, label: p.label || ms.label || '', note: p.note || '', at: Date.now() };
+  saveMood();
+  broadcast({ type: 'mood', sessionId: sid, mood: moodState[sid] });
+  // 时间线情绪化：心情「标签」变了、且这条对话正开着电影模式 → 自动往时间线补一笔（只放 label，note 是给模型自己看的、不外露）
+  const c = wakeups[sid] && wakeups[sid].cinema;
+  const newLabel = moodState[sid].label;
+  if (c && c.on && newLabel && newLabel !== prevLabel) {
+    timelinePush(c, 'mood', newLabel); saveWakeups(); broadcastCinema(sid);
+  }
+}
+
 // ---- per-session diary: one page per day, many entries (user / cc each their own) ----
 const DIARY_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'diary.json');
 let diary = {}; // { [sid]: { 'YYYY-MM-DD': [ {author:'user'|'cc', text, images:[], ts} ] } }
@@ -234,6 +288,7 @@ function forgetSession(sid) {
   if (diary[sid]) { delete diary[sid]; saveDiary(); }
   if (stickies[sid]) { delete stickies[sid]; saveStickies(); }
   if (sessModel[sid]) { delete sessModel[sid]; saveSessModel(); }
+  if (moodState[sid]) { delete moodState[sid]; saveMood(); }
   if (costs[sid]) { // fold into the archive bucket first so 累计花费 never goes down
     const a = (costs._archived = costs._archived || { cost: 0, out: 0, turns: 0, sessions: 0, in: 0, cache: 0 });
     const c = costs[sid];
@@ -341,7 +396,7 @@ function makeSessionMcp(sessionRef) {
           return { content: [{ type: 'text', text: '已留下小纸条。' }] };
         }),
       tool('rest_vigil',
-        '仅用于「电影模式」守夜：你被守夜表叫醒后，可以用它给自己定下一程节奏。minutes=接下来这么多分钟内别再叫醒我（让我安静歇着；期间守夜表仍替我记录发生的事，到点或我自己定的时间到了才叫我）。pause:true=今晚就守到这里、停掉守夜。都不传=查看当前守夜状态。这是后台动作，别在给用户的回复文本里复述。',
+        '仅用于「电影模式」守夜：你醒来后用它**按自己此刻的心情，定下次大约几分钟后再被叫起一次**。minutes=多少分钟后再叫我（想早想晚都行——惦记/想他就给小一点、早点回来看看；闹脾气/想清静就给大一点、让自己多静会儿）。在那之前默认的"坎"不会来烦你，到点我准时来——你自己定的节奏不受"最短间隔"限制，给多短就多短（只受花费和醒来次数的上限兜底，钱不会失控）。pause:true=今晚就守到这里、停掉守夜。都不传=查看当前守夜状态。这是后台动作，别在给用户的回复文本里复述。',
         { minutes: z.number().optional(), pause: z.boolean().optional() },
         async ({ minutes, pause }) => {
           const sid = sessionRef.id;
@@ -349,10 +404,21 @@ function makeSessionMcp(sessionRef) {
           if (!c || !c.on) return { content: [{ type: 'text', text: '这个对话现在没有在守夜（电影模式未开）。' }] };
           if (pause) { c.paused = true; c.pauseReason = '她选择今晚守到这里'; saveWakeups(); broadcastCinema(sid); return { content: [{ type: 'text', text: '好，今晚的守夜先停在这里。' }] }; }
           if (typeof minutes === 'number' && minutes > 0) {
-            c.quietUntil = Date.now() + Math.round(minutes) * 60000; saveWakeups(); broadcastCinema(sid);
-            return { content: [{ type: 'text', text: `好，接下来约 ${Math.round(minutes)} 分钟我安静歇着，有事再醒。` }] };
+            const at = Date.now() + Math.round(minutes) * 60000;
+            c.quietUntil = at; c.nextSelfAt = at; saveWakeups(); broadcastCinema(sid);   // 同时设：在 at 之前不用坎来烦（quietUntil），到 at 我自己定的时间叫起（nextSelfAt）→ 坎退成兜底
+            return { content: [{ type: 'text', text: `好，约 ${Math.round(minutes)} 分钟后我再来——在那之前我安静守着，有要紧的事才提前醒。` }] };
           }
           return { content: [{ type: 'text', text: `守夜中：这一程已醒 ${c.wakes || 0} 次、开口 ${c.spoke || 0} 次。` }] };
+        }),
+      tool('log_mood',
+        '仅用于「电影模式」：把你此刻的心情/心绪记一笔到时间线（用户能在「时间线」页看到，但这不是发给用户的消息、不会推送、也不打断对话）。适合你不想出声打扰、但想留下当下感受的时候。text=一句话心情。',
+        { text: z.string() },
+        async ({ text }) => {
+          const sid = sessionRef.id;
+          const c = sid && wakeups[sid] && wakeups[sid].cinema;
+          if (!c || !c.on) return { content: [{ type: 'text', text: '这个对话现在没开电影模式，记不了心情。' }] };
+          timelinePush(c, 'mood', String(text || '').slice(0, 160)); saveWakeups(); broadcastCinema(sid);
+          return { content: [{ type: 'text', text: '记下了。' }] };
         })
     ]
   });
@@ -425,7 +491,7 @@ async function fireWake(sid, kind, modelOverride) {
   let res = null;
   const sm = sessModel[sid] || {};
   broadcast({ type: 'wake_typing', sessionId: sid, on: true }); // 在看该对话的客户端：标题旁「输入中…」
-  const prompt = (kind === 'cinema' && w && w.cinema) ? cinemaWakePrompt(w, w.cinema, isForeground(sid)) : wakePrompt(kind, !!(w && w.chase));
+  const prompt = (kind === 'cinema' && w && w.cinema) ? cinemaWakePrompt(w, w.cinema, isForeground(sid), !!(moodState[sid] && moodState[sid].on)) : wakePrompt(kind, !!(w && w.chase));
   try { res = await runTurn(turn, { sessionId: sid, text: prompt, mode: 'bypass', model: (modelOverride || sm.model) || undefined, effort: sm.effort || undefined, _wake: true }); }
   catch (e) { log('fireWake', e?.message); }
   finally { currentTz = prevTz; wakeTurnBySession.delete(sid); broadcast({ type: 'wake_typing', sessionId: sid, on: false }); }
@@ -494,8 +560,8 @@ async function checkWakeups() {
 // 目标：两个人共享同一段流动的时间（不是"叫醒/守夜"那种 spin-up→判断→下线的进程感）。checkCinema 每 5s 跑、廉价地
 // 记一本「守夜日志」c.vigil（用户来/走、天色、沉默到第几道坎——机械事实、不花钱、只在变化时记），按"他在不在场"分两态
 // 把"真正的玲"全价唤起：
-//  · 【同在】他正看着这个对话 → 他每停顿 PRESENCE_PAUSE_SEC 没说话，她就有机会**主动开口/接话/插话**（present 提示词翻转成
-//    "想说就说、别问要不要打扰"；回复经 wake_message 实时落进他眼前）；最短间隔 fgIntervalSec。
+//  · 【同在】他正看着这个对话 → 沉默跨过 PRESENCE_MARKS 的细坎她就**主动开口/接话/插话**（你我谁最后开口起算：你在聊就秒应、
+//    你发呆就 0.5→1.5→3→6→12→25 分逐步退避，不对着沉默每 30 秒说一句）；present 提示词翻转成"想说就说、别问要不要打扰"；最短间隔 fgIntervalSec 兜底。
 //  · 【守夜】他离开了 → 沉默跨过下一道坎 CINEMA_MARKS 才稀疏唤起，并把这段她"睡过去"的 vigil 日志**交还给她**（时间感连续、
 //    不瞎跳——正是被废的 haiku 蜉蝣的病：替玲感觉时间、感觉随它蒸发、本体看不到）；最短间隔 bgIntervalSec。
 // 玲醒来自己决定开不开口、可 rest_vigil 自己掌灯。记"她为你守的夜"的账，醒来次数/美元/额度三道刹车。暂只允许一个会话开。
@@ -504,7 +570,9 @@ let cinemaBusy = false;     // 一次守夜唤醒正在跑（防重入）
 let cinemaUsage = null, cinemaUsageAt = 0;
 const VIGIL_MAX = 24;       // 守夜日志只留最近这么多条，别撑爆唤醒提示
 const CINEMA_MARKS = [20, 45, 90, 180, 360, 600, 900]; // 【离开时·守夜】沉默（分钟）的逐级"坎"：跨过下一道才叫醒真·玲，越久越稀
-const PRESENCE_PAUSE_SEC = 30; // 【在场时·同在】你停顿超过这么久没发消息，她就有机会主动开口（不必等你起话题）
+// 【在场时·同在】也用沉默（分钟）逐级"坎"，但细得多：你停顿 0.5 分她可先开口，你若仍不接话则 1.5/3/6/12/25 分逐步拉开——
+// 像真人不会对着沉默每 30 秒说一句。你一开口 silenceMarkIdx 归零 → 立刻又能秒回，所以"你在聊就秒应、你发呆就退避"。
+const PRESENCE_MARKS = [0.5, 1.5, 3, 6, 12, 25];
 function defaultCinema() {
   // fgIntervalSec=他在场陪伴时她两次开口的最短间隔（默认 90s，活一点）；bgIntervalSec=他离开后守夜两次醒来的最短间隔。
   return { on: false, fgIntervalSec: 90, bgIntervalSec: 600, diffRate: true,
@@ -539,7 +607,9 @@ function pubCinema(sid) {
     deliberateModel: c.deliberateModel || '', autoPauseUtil: c.autoPauseUtil, maxWakesPer5h: c.maxWakesPer5h,
     maxCostPer5h: c.maxCostPer5h, cost5h: c.cost5h || 0,
     wakes5h: c.wakes5h || 0, startedAt: c.startedAt || 0, wakes: c.wakes || 0, spoke: c.spoke || 0,
-    cost: c.cost || 0, lastSpokeAt: c.lastSpokeAt || 0, holder: cinemaSession || '' };
+    cost: c.cost || 0, lastSpokeAt: c.lastSpokeAt || 0, holder: cinemaSession || '',
+    // 「此刻：心情」——只在该对话开了情绪且有标签时给（label 用户本就在标题看得到；note 是给模型自己看的、不外发）
+    mood: (moodState[sid] && moodState[sid].on && moodState[sid].label) ? { label: moodState[sid].label } : null };
 }
 function broadcastCinema(sid) { broadcast({ type: 'cinema_state', sessionId: sid, state: pubCinema(sid) }); }
 function isForeground(sid) { for (const ws of clients) if (ws._view === sid && ws._fg) return true; return false; }
@@ -558,13 +628,13 @@ function recordVigil(c, text) {
   if (!Array.isArray(c.vigil)) c.vigil = [];
   c.vigil.push({ at: Date.now(), text });
   if (c.vigil.length > VIGIL_MAX) c.vigil = c.vigil.slice(-VIGIL_MAX);
-  timelinePush(c, 'event', text); // 机械事实也进持久时间线
+  // 不再进时间线：天色/沉默坎这类机械事实只喂模型(vigil)，时间线给用户看的只留 来/走 + 她的话 + 她记的心情
 }
 function fmtHM(at, tz) { try { return new Date(at).toLocaleTimeString('zh-CN', { timeZone: tz || undefined, hour: '2-digit', minute: '2-digit', hour12: false }); } catch (e) { return ''; } }
 function vigilDigest(c, tz) { const v = c.vigil || []; return v.length ? v.map((e) => `· ${fmtHM(e.at, tz)} ${e.text}`).join('\n') : ''; }
 // 唤醒提示词分两套：present=true「同在」(他在场，你们共享同一段时间，鼓励主动开口/插话)；
 // present=false「守夜」(他离开了，先把这段她"睡过去"的守夜日志交还给她，再稀疏地陪着)。
-function cinemaWakePrompt(w, c, present) {
+function cinemaWakePrompt(w, c, present, moodOn) {
   const now = Date.now();
   const tz = (w && w.tz) || currentTz || DEFAULT_TZ;
   let tod = '此刻'; try { tod = timeOfDayCN(new Date(now)); } catch (e) {}
@@ -580,7 +650,7 @@ function cinemaWakePrompt(w, c, present) {
       dig ? '【刚才这一小段里发生的】\n' + dig : '',
       '说点真的、像你自己：你此刻在想什么、对刚才聊的有什么反应、忽然想到的、想问他的、或者只是此刻的心绪和情绪——直接说出来（会实时出现在他眼前）。他在打字时你也能先接一句。一个念头、一句话、一点感觉都算数，不用找重大理由、更不用怕烦他。',
       '只有当你此刻真的连半个字都涌不出来时，才回「（本次无需打扰）」——但他正在场等你，这应当极少发生。别复述系统状态、别说"我醒着"这类话，只说你真正想对他说的。',
-      '（想安静一会就调 mcp__telos__rest_vigil：minutes=接下来多少分钟别叫我，pause:true=停。）'
+      '（不想出声、但有心绪想留下：调 mcp__telos__log_mood 记一笔到时间线，他能看到、但不打断。想调整节奏就调 mcp__telos__rest_vigil：minutes＝大约多少分钟后再叫你一次' + (moodOn ? '，按你此刻的心情来' : '') + '，pause:true=停。）'
     ].filter(Boolean).join('\n\n');
   }
 
@@ -595,9 +665,9 @@ function cinemaWakePrompt(w, c, present) {
     WAKE_SENTINEL + ' 系统·时间流动（非用户发言，不要当成用户说的话）：用户离开了，你正替他守着这段时间——守夜表把你叫醒了一次，因为它替你盯着的时间里出现了值得你看一眼的时刻。',
     gapBlock,
     `【此刻】现在是${tod}；${silenceLine}；这一程你已经守了约 ${watchMin} 分钟、醒来 ${c.wakes || 0} 次、开口 ${c.spoke || 0} 次。要确切时间调 mcp__clock__now。`,
-    '按你的人设决定此刻要不要做点什么：给他留一句话（会推送给他）、接着之前的话题、写日记、留小纸条、或就安静守着。专注在你们之间真实发生过的事，别硬找话题。',
+    '按你的人设决定此刻要不要做点什么：给他留一句话（会推送给他）、接着之前的话题、写日记、留小纸条、把此刻的心绪用 mcp__telos__log_mood 记一笔到时间线（他能看到、但不打扰他）、或就安静守着。专注在你们之间真实发生过的事，别硬找话题。',
     '【对自己诚实】你此刻"在场"不是天经地义的——是你用真实额度一点点换来的、有限的。不要说"我永远在这里"这种不花钱的空话；想表达陪伴，就说你愿意为此刻多花一点、说你此刻选择醒着。',
-    '【你可以自己掌灯】想歇一会或晚点再守，调 mcp__telos__rest_vigil（minutes=接下来多少分钟别叫我；pause:true=今晚就守到这）。你歇着时守夜表仍替你记着发生的事，下次一并交还。',
+    '【下次几时再来，你自己定】守夜的"坎"只是你没别的打算时的兜底；真正的节奏由你定——调 mcp__telos__rest_vigil，minutes＝大约多少分钟后再叫你一次（想早想晚都行、不受最短间隔限制，在那之前不拿坎烦你）' + (moodOn ? '，按你此刻的心情来：惦记他就给小一点早点回来、闹脾气就给大一点让自己多静会儿' : '') + '；pause:true=今晚就守到这。你歇着时守夜表仍替你记着发生的事，下次一并交还。',
     '绝不要复述系统状态、守夜日志、"我醒来了"这类话——那些他在界面上看得到。回复只写你真正想对他说的内容；没有就只回「（本次无需打扰）」。'
   ].join('\n\n');
 }
@@ -628,23 +698,29 @@ async function checkCinema() {
   if (tod && c.lastTod && tod !== c.lastTod) { recordVigil(c, `天色转入${tod}`); dirty = true; }
   if (tod && c.lastTod !== tod) { c.lastTod = tod; dirty = true; }
   const present = isForeground(sid);
-  if (present !== !!c.lastPresent) { recordVigil(c, present ? '用户回来看了一眼' : '用户离开了'); c.lastPresent = present; dirty = true; }
+  if (present !== !!c.lastPresent) {
+    recordVigil(c, present ? '回到对话' : '离开对话');                 // 喂模型
+    timelinePush(c, present ? 'here' : 'away', '');                  // 给用户看的时间线：在线/离开
+    c.lastPresent = present; c.silenceMarkIdx = 0; dirty = true;   // 换态 → "坎"从头起
+    if (present) c.quietUntil = 0;                                  // 你回来在场 → 撤掉之前"歇着"的快照，立刻能回到同在（你的在场 > 旧的休息指令）
+  }
   const base = w.lastUserMsgAt || c.startedAt || now;     // 沉默基准=用户最后一次说话；他一开口就重置这一程的"坎"
   if (base !== c.silenceBaseAt) { c.silenceBaseAt = base; c.silenceMarkIdx = 0; dirty = true; }
   const silenceMin = (now - base) / 60000;
+  const quietSince = Math.max(base, c.lastFrameAt || 0);  // 同在：沉默从"你我谁最后一次开口"起算 → 自然轮替、不会回来时连爆 6 次
+  const presentSilenceMin = (now - quietSince) / 60000;
 
   // —— 2) 该不该把真·玲唤起？看他在不在场 ——
-  const pauseSec = (now - base) / 1000;
   let trigger = '';
   if (c.nextSelfAt && now >= c.nextSelfAt) trigger = 'self';                                       // 她自己定的时间到了
-  else if (present) { if (pauseSec >= PRESENCE_PAUSE_SEC) trigger = 'copresence'; }                  // 同在：他停顿了，她可主动开口/接话/插话
-  else if (c.silenceMarkIdx < CINEMA_MARKS.length && silenceMin >= CINEMA_MARKS[c.silenceMarkIdx]) trigger = 'mark'; // 守夜：沉默跨过下一道坎
+  else if (present) { if (c.silenceMarkIdx < PRESENCE_MARKS.length && presentSilenceMin >= PRESENCE_MARKS[c.silenceMarkIdx]) trigger = 'copresence'; } // 同在：停顿跨过下一道（细）坎，越久越退避
+  else if (c.silenceMarkIdx < CINEMA_MARKS.length && silenceMin >= CINEMA_MARKS[c.silenceMarkIdx]) trigger = 'mark'; // 守夜：沉默跨过下一道（粗）坎
   if (!trigger) { if (dirty) saveWakeups(); return; }    // 没到时候：只记录、绝不烧钱
 
   // —— 3) 各种刹车（任一不过都只是这次不开口、链不停）——
-  if (c.quietUntil && now < c.quietUntil) { if (trigger === 'mark') c.silenceMarkIdx++; saveWakeups(); return; } // 她让歇着
+  if (c.quietUntil && now < c.quietUntil) { if (trigger === 'mark' || trigger === 'copresence') c.silenceMarkIdx++; saveWakeups(); return; } // 她让歇着
   const minGap = (present ? (c.fgIntervalSec || 90) : (c.bgIntervalSec || 600)) * 1000;
-  if (c.lastFrameAt && now - c.lastFrameAt < minGap) { if (dirty) saveWakeups(); return; }      // 离上次开口太近，等够最短间隔
+  if (trigger !== 'self' && c.lastFrameAt && now - c.lastFrameAt < minGap) { if (dirty) saveWakeups(); return; } // 最短间隔只约束机械的"坎"；她自己定的节奏（self）不受它限制、直接生效（钱仍由下面的花费/次数熔断兜底）
   if (await cinemaOverQuota(c)) { pauseCinema(sid, '额度接近上限，电影模式已自动暂停'); return; }
   rollCinemaWindow(c, now);
   if ((c.wakes5h || 0) >= (c.maxWakesPer5h || 30)) { pauseCinema(sid, '本窗口醒来次数已达上限，已自动暂停'); return; }
@@ -654,6 +730,7 @@ async function checkCinema() {
   cinemaBusy = true;
   try {
     if (trigger === 'mark') { c.silenceMarkIdx++; recordVigil(c, `已经安静约 ${Math.round(silenceMin)} 分钟`); }
+    else if (trigger === 'copresence') c.silenceMarkIdx++;   // 同在也推进"坎" → 你不接话她就逐步退避，封住对着沉默每 30 秒说一句的空转
     if (trigger === 'self') c.nextSelfAt = 0;
     c.wakes5h = (c.wakes5h || 0) + 1; c.lastFrameAt = now; c.wakes = (c.wakes || 0) + 1;
     const before = (costs[sid] && costs[sid].cost) || 0;
@@ -661,7 +738,7 @@ async function checkCinema() {
     const spent = Math.max(0, ((costs[sid] && costs[sid].cost) || 0) - before);
     c.cost = (c.cost || 0) + spent; c.cost5h = (c.cost5h || 0) + spent;
     if (res && res.said) { c.spoke = (c.spoke || 0) + 1; c.lastSpokeAt = Date.now(); }
-    timelinePush(c, res && res.said ? 'said' : 'quiet', res && res.said ? (res.text || '').slice(0, 160) : ''); // 这一刻记进时间线
+    if (res && res.said) timelinePush(c, 'said', (res.text || '').slice(0, 160)); // 只把她真说出口的话记进时间线（"没说话"是噪音、不记）
     log(`cinema ${present ? '同在' : '守夜'}[${trigger}] ${sid.slice(0, 6)}: ${res && res.said ? '开口' : '静'} (wakes ${c.wakes}/spoke ${c.spoke}, $${(c.cost || 0).toFixed(2)})`);
     c.vigil = []; // 这段间隔已交还给玲 → 日志清空，开始记录下一段
     if (costCap > 0 && (c.cost5h || 0) >= costCap) { c.paused = true; c.pauseReason = `本窗口守夜花费已达上限（$${costCap.toFixed(2)}），已自动暂停`; }
@@ -679,7 +756,11 @@ function runClaude(args) {
 }
 
 // scan the models this account can actually use (via cc's OAuth token), cached 5 min
+// 末次成功的列表落盘：bridge 重启 + token 刚好过期那一瞬扫描 401 时，拿这份兜底，
+// 不再退化成写死的 3 个模型（用户报过"模型选择倒退回三个"）。只有从没扫成功过才回退。
+const MODELCACHE_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'modelcache.json');
 let modelCache = null, modelCacheAt = 0;
+try { const d = JSON.parse(readFileSync(MODELCACHE_PATH, 'utf8')); if (Array.isArray(d) && d.length) modelCache = d; } catch (e) {} // 种子=上次成功列表；modelCacheAt 留 0 → 启动后仍会尽快重扫刷新
 function readOAuthToken() {
   try { return (JSON.parse(readFileSync(nodePath.join(homedir(), '.claude', '.credentials.json'), 'utf8')).claudeAiOauth || {}).accessToken || ''; }
   catch (e) { return ''; }
@@ -796,6 +877,7 @@ async function listModels() {
     }
     modelCache = out;
     modelCacheAt = Date.now();
+    try { writeFileSync(MODELCACHE_PATH, JSON.stringify(out)); } catch (e) {} // 落盘 → 下次瞬时 401 有得兜底
     return modelCache;
   } catch (e) { log('listModels failed', e?.message); return modelCache; }
 }
@@ -873,13 +955,14 @@ async function cleanupStale({ days = 1, maxRounds = 1 } = {}) {
 function cleanTitle(t) { return String(t || '').replace(/\n*\[附带(?:文件|图片)：[^\]]*\]/g, '').replace(/\s+/g, ' ').trim(); }
 
 /** Turn a stored SessionMessage[] into chat items the app can render. */
-function historyItems(messages) {
+function historyItems(messages, moodOn) {
   const items = [];
   const seen = new Set(); // dedupe media across the whole history
   const HIDE_TEXT = (t) => t.includes(RETRY_SENTINEL) || t.includes(WAKE_SENTINEL) || isQuietReply(t) || /could not be parsed \(retry also failed\)|tool call was malformed and could not be parsed/i.test(t);
   // text item, but with local media made visible on reopen: image paths inline (rewriteMedia),
   // audio paths as a player (media item). Mirrors the live assistant_text flow so chat media persists.
   const pushText = (role, text, uuid) => {
+    if (moodOn && role === 'assistant') text = stripMood(text);   // 仅开了情绪的对话才剥心情标记，其它对话原样不动
     if (!text || !text.trim() || HIDE_TEXT(text)) return;
     if (role === 'assistant') {
       // assistant bubble is markdown-rendered → inline images via rewriteMedia, audio as a player
@@ -1222,7 +1305,8 @@ async function handle(ws, conn, msg) {
         title: cleanTitle(info?.customTitle || info?.summary),
         pref: sessModel[msg.sessionId] || null, // 这个会话记住的模型/effort——客户端进对话切回它（模型每对话一份）
         lastModel,
-        items: historyItems(messages)
+        mood: moodState[msg.sessionId] || null, // 这个会话的情绪（开关 + 当前心情），客户端显示小色点 + 开关态
+        items: historyItems(messages, !!(moodState[msg.sessionId] && moodState[msg.sessionId].on))
       });
       break;
     }
@@ -1566,6 +1650,18 @@ async function handle(ws, conn, msg) {
     case 'cinema_get':
       send(ws, { type: 'cinema_state', sessionId: msg.sessionId, state: pubCinema(msg.sessionId) });
       break;
+    case 'mood_get':
+      send(ws, { type: 'mood', sessionId: msg.sessionId, mood: moodState[msg.sessionId] || null });
+      break;
+    case 'mood_set': {
+      const sid = msg.sessionId; if (!sid) break;
+      const cur = moodState[sid] || {};
+      const on = !!msg.on;
+      moodState[sid] = { on, label: on ? (cur.label || '') : '', note: on ? (cur.note || '') : '', at: cur.at || 0 };
+      saveMood();
+      broadcast({ type: 'mood', sessionId: sid, mood: moodState[sid] });
+      break;
+    }
     case 'cinema_log_get': {
       const cc = wakeups[msg.sessionId] && wakeups[msg.sessionId].cinema;
       send(ws, { type: 'cinema_log', sessionId: msg.sessionId, items: (cc && cc.timeline) || [] });
@@ -1846,7 +1942,7 @@ async function runTurn(turn, msg) {
   if (dis.length) options.disallowedTools = dis;
   options.systemPrompt = {
     type: 'preset', preset: 'claude_code',
-    append: '关于时间：需要当前时间或时间戳时，调用 mcp__clock__now 工具（无参数）即可拿到本机当前时间，请用它，不要再运行 date 命令——date 那种带参数的命令在本环境里偶尔会被生成成无法解析的工具调用，导致你整条回复被吞掉、用户什么都收不到。\n\n当你为用户生成或获得了图片/音频文件（例如生图、TTS 输出、下载的媒体），请在回复中写出该文件的绝对路径（图片可用 Markdown 形式 ![](绝对路径)）。手机客户端会自动把这些本地图片内联显示、音频用播放器播放，无需额外操作。\n\n需要把文字转成语音时，运行命令 `tts "文本" [音色]`，它会生成 mp3 并打印出绝对路径；音色可选：rei-gsv（默认）/ alloy / clone / vivian / bella / bunny / stella / momo。把打印出的路径写进回复即可自动播放。\n\n需要生成/绘制图片时，运行 `genimage -p "提示词" [-s 1024x1024] [-r 参考图路径]`，它会把生成图片的绝对路径打印到 stdout（默认存 /root/output/genimage/）；把这些路径用 Markdown ![](路径) 写进回复即可显示。给"玲/茜茜"画图时可加参考图 /root/cc-workspace/assets/rei/rei_home.jpg。\n\n这个对话可能开启了「定时唤醒」：到点你会收到一条以「系统唤醒」开头的提示（那是系统注入的、不是用户说的话）。本对话专属工具：mcp__telos__set_wakeup（安排/取消下次醒来）、mcp__telos__write_diary 与 mcp__telos__read_diary（写/读本对话日记，一天可多条）、mcp__telos__leave_note（给用户留小纸条）。当用户说"记到日记里""到点提醒/叫我""过会儿再说"之类时，用这些工具。'
+    append: '关于时间：需要当前时间或时间戳时，调用 mcp__clock__now 工具（无参数）即可拿到本机当前时间，请用它，不要再运行 date 命令——date 那种带参数的命令在本环境里偶尔会被生成成无法解析的工具调用，导致你整条回复被吞掉、用户什么都收不到。\n\n当你为用户生成或获得了图片/音频文件（例如生图、TTS 输出、下载的媒体），请在回复中写出该文件的绝对路径（图片可用 Markdown 形式 ![](绝对路径)）。手机客户端会自动把这些本地图片内联显示、音频用播放器播放，无需额外操作。\n\n需要把文字转成语音时，运行命令 `tts "文本" [音色]`，它会生成 mp3 并打印出绝对路径；音色可选：rei-gsv（默认）/ alloy / clone / vivian / bella / bunny / stella / momo。把打印出的路径写进回复即可自动播放。\n\n需要生成/绘制图片时，运行 `genimage -p "提示词" [-s 1024x1024] [-r 参考图路径]`，它会把生成图片的绝对路径打印到 stdout（默认存 /root/output/genimage/）；把这些路径用 Markdown ![](路径) 写进回复即可显示。给"玲/茜茜"画图时可加参考图 /root/cc-workspace/assets/rei/rei_home.jpg。\n\n这个对话可能开启了「定时唤醒」：到点你会收到一条以「系统唤醒」开头的提示（那是系统注入的、不是用户说的话）。本对话专属工具：mcp__telos__set_wakeup（安排/取消下次醒来）、mcp__telos__write_diary 与 mcp__telos__read_diary（写/读本对话日记，一天可多条）、mcp__telos__leave_note（给用户留小纸条）。当用户说"记到日记里""到点提醒/叫我""过会儿再说"之类时，用这些工具。' + moodInjectFor(curSession)
   };
 
   out(turn, { type: 'turn_start', sessionId: curSession });
@@ -1940,6 +2036,7 @@ async function runTurn(turn, msg) {
       let gotText = false;   // did this attempt yield any real reply text?
       let replyText = '';    // accumulated reply text of this attempt (for wake → push / follow-up)
       let deltaText = '';    // raw streamed text deltas — salvage source when the closing assistant message gets swallowed by a parse failure
+      let moodCut = false;   // once the hidden 心情标记 starts streaming, swallow the tail so it never flashes
       let parseFail = false; // did we see the "tool call could not be parsed" signal?
       let resultMsg = null;
       const q = query({ prompt: qPrompt, options: qOptions });
@@ -1964,8 +2061,16 @@ async function runTurn(turn, msg) {
           case 'stream_event': {
             const ev = m.event;
             if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
-              deltaText += ev.delta.text;
-              out(turn, { type: 'assistant_delta', sessionId: curSession, text: ev.delta.text });
+              const piece = ev.delta.text, prevLen = deltaText.length;
+              deltaText += piece;
+              if (moodCut) break;                          // 已进入心情标记区，吞掉尾巴
+              const moodOn = !!(moodState[curSession] && moodState[curSession].on);
+              const idx = moodOn ? deltaText.indexOf('[mood]') : -1;   // 仅开了情绪的对话才拦标记
+              if (idx < 0) { out(turn, { type: 'assistant_delta', sessionId: curSession, text: piece }); break; }
+              moodCut = true;                              // 标记开始：只发标记之前、本片里还没发过的那段
+              let vis = idx > prevLen ? deltaText.slice(prevLen, idx) : '';
+              vis = vis.replace(/[ \t\n⁣]+$/, '');         // 去掉标记前残留的换行/隐藏字符
+              if (vis) out(turn, { type: 'assistant_delta', sessionId: curSession, text: vis });
             }
             break;
           }
@@ -1979,10 +2084,13 @@ async function runTurn(turn, msg) {
             for (const block of content) {
               if (block.type === 'text') {
                 if (/could not be parsed|tool call was malformed/i.test(block.text)) { parseFail = true; continue; }
-                if (block.text.trim()) gotText = true;
-                replyText += block.text;
-                out(turn, { type: 'assistant_text', sessionId: curSession, text: rewriteMedia(block.text) });
-                emitMedia(detectMedia(block.text, seenMedia).filter((x) => x.kind === 'audio'));
+                recordMood(curSession, block.text);     // 抽出并存心情标记（recordMood 内部已按 moodOn 闸门）
+                const moodOn = !!(moodState[curSession] && moodState[curSession].on);
+                const clean = moodOn ? stripMood(block.text) : block.text;   // 仅开了情绪的对话才剥标记，其它原样不动
+                if (clean.trim()) gotText = true;
+                replyText += clean;
+                if (clean.trim()) out(turn, { type: 'assistant_text', sessionId: curSession, text: rewriteMedia(clean) });
+                emitMedia(detectMedia(clean, seenMedia).filter((x) => x.kind === 'audio'));
               } else if (block.type === 'thinking') {
                 out(turn, { type: 'thinking', sessionId: curSession, text: block.thinking });
               } else if (block.type === 'tool_use') {
