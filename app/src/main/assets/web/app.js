@@ -1300,7 +1300,7 @@ function syncMoodMenu() {
   const dot = $('mMoodDot'); if (!dot) return;
   const on = !!(state.mood && state.mood.on);
   dot.classList.toggle('on', on);
-  dot.style.background = (on && state.mood.label) ? moodHue(state.mood.label) : '';
+  dot.style.background = on ? (state.mood.label ? moodHue(state.mood.label) : 'var(--accent)') : '';
 }
 // 每对话「情绪」开关：开了她会带着常驻心情回应（标签由模型自己写）。默认关、不动现有对话。
 function toggleMood() {
