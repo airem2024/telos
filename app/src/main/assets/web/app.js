@@ -8,6 +8,7 @@ const LS = {
   get model() { return localStorage.getItem('cc_model') || ''; }, set model(v) { localStorage.setItem('cc_model', v); },
   get effort() { return localStorage.getItem('cc_effort') || ''; }, set effort(v) { localStorage.setItem('cc_effort', v); },
   get mode() { return localStorage.getItem('cc_mode') || 'code'; }, set mode(v) { localStorage.setItem('cc_mode', v); },
+  get lastSid() { return localStorage.getItem('cc_last_sid') || ''; }, set lastSid(v) { localStorage.setItem('cc_last_sid', v || ''); },
   clear() { ['cc_url', 'cc_token', 'cc_cwd', 'cc_model', 'cc_effort', 'cc_mode'].forEach((k) => localStorage.removeItem(k)); }
 };
 
@@ -19,7 +20,7 @@ const PREF_DEFAULTS = {
   interruptOnLeave: false, autoScroll: true, pasteAsFile: true, pasteThreshold: 1200, timezone: '',
   haptics: true, genHaptic: false, updateNotify: true, showStatusBar: true, discFx: true, discBlink: false,
   autoCleanup: true, wakePush: true, compactPrompt: '',
-  theme: 'warm', accent: 'brick', foldersCollapsed: false
+  theme: 'warm', accent: 'brick', foldersCollapsed: false, autoOpenLast: false
 };
 function loadPrefs() {
   const p = { ...PREF_DEFAULTS };
@@ -367,7 +368,7 @@ function handle(m) {
       if (state.everAuthed) connbar('重连中…', true);
       else { connbar('鉴权失败：token 不对', true); toast('Token 不正确'); show('settings'); }
       break;
-    case 'sessions': state.sessions = m.sessions || []; if (m.folders) state.folders = m.folders; renderSessions(); break;
+    case 'sessions': state.sessions = m.sessions || []; if (m.folders) state.folders = m.folders; renderSessions(); maybeAutoOpen(); break;
     case 'usage': state.usage = m; renderUsageStrip(); if ($('usageFull').classList.contains('show')) renderUsageFull(); break;
     case 'app_update': onAppUpdate(m); break;
     case 'folders':
@@ -840,7 +841,17 @@ function applyMode() {
   else if (state.mode === 'acceptEdits') chip.classList.add('auto');
   else if (state.mode === 'bypass') chip.classList.add('bypass');
 }
+// 启动后第一份会话列表到手时，若开了「自动进入上个对话」且还停在列表屏，直接打开缓存里的那个对话。只跑一次/启动。
+function maybeAutoOpen() {
+  if (state._autoOpened) return;
+  state._autoOpened = true;
+  if (!P('autoOpenLast') || state.screen !== 'list') return;
+  const sid = LS.lastSid; if (!sid) return;
+  const s = (state.sessions || []).find((x) => x.id === sid);
+  if (s) openSession(s);
+}
 function openSession(s) {
+  LS.lastSid = s.id; // 客户端缓存「上一个打开的对话」，供「进入应用自动进入上个对话」用（服务端按最新回复会乱，故存本地）
   // re-entering the session whose turn is still running → keep the live view (message +
   // spinner + partial reply); don't clobber it with stale history that lacks the in-flight turn
   if (state.currentSession === s.id && state.activeTurn && !state.activeTurn.done) { show('chat'); return; }
@@ -963,20 +974,33 @@ function syncModelSub() {
 // 模型按系列归组：claude-<family>-… → Fable/Opus/Sonnet/Haiku，其余归「其他」
 function familyOf(id) { const m = /^claude-([a-z]+)/.exec(id || ''); return ({ fable: 'Fable', opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku' })[m ? m[1] : ''] || '其他'; }
 function pickModel(id) { state.model = id; state.modelMine = true; if (state.currentSession) { sendPresence(); syncModelSub(); } else LS.model = id; openModelSheet(); }
+// 电影模式「醒来用哪个模型」复用同一套系列分组选择器：只换「当前值/默认项文案/落点」，不显示思考度
+function openCinModelSheet() {
+  state.modelFam = '';
+  state.modelCtx = {
+    cur: () => (state.cin || {}).deliberateModel || '',
+    defLabel: '跟随对话默认',
+    onPick: (id) => { if (state.cin) state.cin.deliberateModel = id; cinSend({ deliberateModel: id }); openModelSheet(); },
+  };
+  openModelSheet();
+}
 function openModelSheet() {
   closeMenu();
+  const ctx = state.modelCtx || null;
+  const curModel = ctx ? ctx.cur() : state.model;
+  const onPick = ctx ? ctx.onPick : pickModel;
   const mo = $('modelOpts'); mo.innerHTML = '';
   const list = modelList(); const hasDef = !!(list[0] && list[0].id === '');
-  const def = hasDef ? list[0] : { id: '', name: '默认（继承会话）', sub: '' };
+  const def = ctx ? { id: '', name: ctx.defLabel, sub: '' } : (hasDef ? list[0] : { id: '', name: '默认（继承会话）', sub: '' });
   const models = hasDef ? list.slice(1) : list;
   const mkOpt = (x, checked) => { const o = el('button', 'opt' + (checked ? ' on' : '')); const tag = x && x.ctx >= 1000000 ? ' <span class="tag1m">1M</span>' : ''; o.innerHTML = `<div><div>${x.name}${tag}</div>${x && x.sub ? `<div class="osub">${x.sub}</div>` : ''}</div><span class="check">✓</span>`; return o; };
   const fam = state.modelFam || '';
   if (!fam) {
-    const od = mkOpt(def, state.model === ''); od.addEventListener('click', () => pickModel('')); mo.appendChild(od);
+    const od = mkOpt(def, curModel === ''); od.addEventListener('click', () => onPick('')); mo.appendChild(od);
     const groups = {}; models.forEach((m) => { const f = familyOf(m.id); (groups[f] = groups[f] || []).push(m); });
     ['Fable', 'Opus', 'Sonnet', 'Haiku', '其他'].forEach((f) => {
       const g = groups[f]; if (!g) return;
-      const sel = g.find((m) => m.id === state.model);
+      const sel = g.find((m) => m.id === curModel);
       const o = el('button', 'opt' + (sel ? ' on' : ''));
       const sub = sel ? modelDisplay(sel.id.replace('[1m]', '')) + (/\[1m\]$/.test(sel.id) ? ' 1M' : '') : g.length + ' 个';
       o.innerHTML = `<div><div>${f}</div><div class="osub">${sub}</div></div><span class="check chev">›</span>`;
@@ -985,9 +1009,11 @@ function openModelSheet() {
     });
   } else {
     const back = el('button', 'opt opt-back'); back.innerHTML = '<div>‹ 返回</div>'; back.addEventListener('click', () => { state.modelFam = ''; openModelSheet(); }); mo.appendChild(back);
-    models.filter((m) => familyOf(m.id) === fam).forEach((x) => { const o = mkOpt(x, state.model === x.id); o.addEventListener('click', () => pickModel(x.id)); mo.appendChild(o); });
+    models.filter((m) => familyOf(m.id) === fam).forEach((x) => { const o = mkOpt(x, curModel === x.id); o.addEventListener('click', () => onPick(x.id)); mo.appendChild(o); });
   }
-  renderEffortSlider();
+  const eb = $('effortOpts'); const t2 = eb.parentElement.querySelector('.sub2');
+  if (ctx) { eb.innerHTML = ''; eb.style.display = 'none'; if (t2) t2.style.display = 'none'; }
+  else renderEffortSlider();
   openScrim('modelScrim');
 }
 // 思考度：带刻度点的滑块（默认→low→medium→high→x-high→max）
@@ -1310,12 +1336,6 @@ function cinSlider(label, val, min, max, step, fmt, onDone) {
   r.addEventListener('change', () => onDone(pr(r.value)));
   row.appendChild(r); return row;
 }
-function cinPick(label, val, opts, onPick) {
-  const row = el('div', 'setitem pickrow'); const lab = el('span', 'seg-label'); lab.textContent = label; row.appendChild(lab);
-  const list = el('div', 'picklist');
-  opts.forEach(([v, n]) => { const o = el('button', 'pickopt' + (val === v ? ' on' : '')); o.innerHTML = '<span>' + esc(n) + '</span><span class="pickck">✓</span>'; o.addEventListener('click', () => { list.querySelectorAll('.pickopt').forEach((x) => x.classList.remove('on')); o.classList.add('on'); onPick(v); }); list.appendChild(o); });
-  row.appendChild(list); return row;
-}
 function openCinema(s) {
   state.cinTarget = s; state.cinAdv = false;   // 每次进来高级设置默认收起
   if (!state.cin || state.cin._sid !== s.id) state.cin = null;
@@ -1325,8 +1345,8 @@ function openCinema(s) {
 // 时间线：电影模式里左滑进入，单独一页，看她这段时间的记录
 function openCinemaLog() {
   const s = state.cinTarget; if (!s) return;
-  show('cinemaLog');
   $('cinemaLogBody').innerHTML = '<div class="cl-empty">…</div>';
+  showForward('cinemaLog', 'cinema');   // 时间线从右滑入，电影模式页垫在底下退出去（对称、符合直觉）
   wsend({ type: 'cinema_log_get', sessionId: s.id });
 }
 function renderCinemaLog(m) {
@@ -1387,27 +1407,43 @@ function renderCinema() {
   const note = el('div', 'cinnote'); note.id = 'cinStatus'; note.innerHTML = cinNoteHTML(c); body.appendChild(note);
   const rc = el('div'); rc.id = 'cinReceipt'; body.appendChild(rc); // 这一程的小票
 
-  // —— 高级设置：默认收起，点开才铺开（去拥挤、渐进披露）——
+  // —— 高级设置：默认收起；点开后按「节奏 / 用量与刹车 / 模型」分组成卡片，不再一长条平铺 ——
   const adv = el('div', 'setmenu');
   const ah = el('div', 'setitem cin-advhead' + (state.cinAdv ? ' open' : ''));
   ah.innerHTML = '<span>高级设置</span><span class="cin-caret">›</span>';
   ah.addEventListener('click', () => { state.cinAdv = !state.cinAdv; renderCinema(); });
-  adv.appendChild(ah);
+  adv.appendChild(ah); body.appendChild(adv);
   if (state.cinAdv) {
     const cap = (typeof c.maxCostPer5h === 'number') ? c.maxCostPer5h : 1.5; // 0=关熔断；滑到最右存 0
-    adv.appendChild(cinSlider('最短间隔（你在看时）', c.fgIntervalSec || 180, 30, 1800, 30, fmtDur, (v) => cinSend({ fgIntervalSec: v })));
-    adv.appendChild(cinSlider('离开后最短间隔', c.bgIntervalSec || 600, 60, 3600, 60, fmtDur, (v) => cinSend({ bgIntervalSec: v })));
-    adv.appendChild(cinToggle('离开后放慢节奏', !!c.diffRate, () => cinSend({ diffRate: !c.diffRate })));
-    adv.appendChild(cinSlider('花费上限（每 5 小时）', cap === 0 ? 20.5 : Math.min(20, Math.max(0.5, cap)), 0.5, 20.5, 0.5,
-      (v) => v >= 20.5 ? '不限' : '$' + v.toFixed(1), (v) => cinSend({ maxCostPer5h: v >= 20.5 ? 0 : v })));
-    adv.appendChild(cinSlider('每 5 小时最多醒几次', c.maxWakesPer5h || 30, 5, 120, 5, (v) => v + ' 次', (v) => cinSend({ maxWakesPer5h: v })));
-    adv.appendChild(cinSlider('额度到多少 % 自动停', c.autoPauseUtil || 85, 50, 100, 1, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v })));
-    const models = (state.availModels || []).map((x) => [x.id, x.name || x.id]);
-    const aliases = [['haiku', 'haiku'], ['sonnet', 'sonnet'], ['opus', 'opus']];
-    adv.appendChild(cinPick('醒来用哪个模型', c.deliberateModel || '', [['', '跟随对话默认'], ...aliases, ...models], (v) => cinSend({ deliberateModel: v })));
+    body.appendChild(cinGroup('节奏',
+      cinSlider('最短间隔（你在看时）', c.fgIntervalSec || 180, 30, 1800, 30, fmtDur, (v) => cinSend({ fgIntervalSec: v })),
+      cinSlider('离开后最短间隔', c.bgIntervalSec || 600, 60, 3600, 60, fmtDur, (v) => cinSend({ bgIntervalSec: v })),
+      cinToggle('离开后放慢节奏', !!c.diffRate, () => cinSend({ diffRate: !c.diffRate }))));
+    body.appendChild(cinGroup('用量与刹车',
+      cinSlider('花费上限（每 5 小时）', cap === 0 ? 20.5 : Math.min(20, Math.max(0.5, cap)), 0.5, 20.5, 0.5,
+        (v) => v >= 20.5 ? '不限' : '$' + v.toFixed(1), (v) => cinSend({ maxCostPer5h: v >= 20.5 ? 0 : v })),
+      cinSlider('每 5 小时最多醒几次', c.maxWakesPer5h || 30, 5, 120, 5, (v) => v + ' 次', (v) => cinSend({ maxWakesPer5h: v })),
+      cinSlider('额度到多少 % 自动停', c.autoPauseUtil || 85, 50, 100, 1, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v }))));
+    body.appendChild(cinGroup('模型', cinModelRow(c)));
   }
-  body.appendChild(adv);
   renderCinReceipt();
+}
+function cinGroup(title) {
+  const card = el('div', 'setmenu cin-group');
+  const h = el('div', 'cin-grouphd'); h.textContent = title; card.appendChild(h);
+  for (let i = 1; i < arguments.length; i++) if (arguments[i]) card.appendChild(arguments[i]);
+  return card;
+}
+function cinModelRow(c) {
+  const row = el('div', 'setitem cin-modelrow');
+  const lab = el('span', 'seg-label'); lab.textContent = '醒来用哪个模型'; row.appendChild(lab);
+  const id = c.deliberateModel || '';
+  const val = el('span', 'cin-modelval');
+  val.textContent = id ? (modelDisplay(id.replace('[1m]', '')) + (/\[1m\]$/.test(id) ? ' 1M' : '')) : '跟随对话默认';
+  row.appendChild(val);
+  const chev = el('span', 'cin-modelchev'); chev.textContent = '›'; row.appendChild(chev);
+  row.addEventListener('click', openCinModelSheet);
+  return row;
 }
 function onCinemaState(m) {
   const st = m.state || {};
@@ -1532,11 +1568,11 @@ function addFromEditor() {
 function wkChip(label, on, cb) { const b = el('button', 'wkt' + (on ? ' on' : '')); b.textContent = label; b.addEventListener('click', cb); return b; }
 // 闹钟式竖向滚轮：上下滚、吸附居中、可循环。values=值数组，sel=初始下标，fmt(v)=显示，onSel(i)=选中回调
 function wkWheel(values, sel, fmt, onSel, loop) {
-  const ITEM = 36, VIS = 5, CTR = 2;                 // 5 行、中间第 2 行为选中槽
+  const ITEM = 30, VIS = 5, CTR = 2;                 // 5 行、中间第 2 行为选中槽（ITEM 改了要同步 .whl-item 高度）
   const n = values.length, COPIES = loop ? 9 : 1, MID = loop ? (COPIES >> 1) : 0;
   const wrap = el('div', 'whl'); wrap.style.height = (ITEM * VIS) + 'px';
   const scr = el('div', 'whl-scroll'); wrap.appendChild(scr);
-  wrap.appendChild(el('div', 'whl-band'));
+  const band = el('div', 'whl-band'); band.style.top = (ITEM * CTR) + 'px'; band.style.height = ITEM + 'px'; wrap.appendChild(band);
   const items = [];
   const pad = () => el('div', 'whl-item whl-pad');
   if (!loop) for (let i = 0; i < CTR; i++) scr.appendChild(pad());
@@ -1882,6 +1918,7 @@ const SET_CATS = {
     { type: 'toggle', key: 'discBlink', name: '断联闪烁', onChange: applyDiscBlink }
   ] },
   chat: { name: '对话', items: [
+    { type: 'toggle', key: 'autoOpenLast', name: '进入应用自动打开上个对话' },
     { type: 'toggle', key: 'interruptOnLeave', name: '退出对话时中断回复' },
     { type: 'toggle', key: 'autoScroll', name: '生成时自动滚到底部' },
     { type: 'toggle', key: 'pasteAsFile', name: '长文本粘贴为文件' },
@@ -2240,13 +2277,17 @@ function initChatSwipe() {
   });
 }
 
-/* ============ 通用整页手势：右滑返回(像对话右滑回列表)，可选左滑触发(像对话左滑搜索)。挂在 .screen 上 ============ */
+/* ============ 通用整页手势：右滑返回(像对话右滑回列表)，可选左滑触发(像对话左滑搜索)。挂在 .screen 上 ============
+   opts.under = 上一级的 screen id（字符串或函数）。给了就在右滑时把它垫在底下露出来，跟着手指滑动，
+   动作和「对话右滑回列表」一致、看得到上一级；没给则只滑出当前页（保留旧行为）。under 必须等于 onBack 落到的页。 */
 function initPageSwipe(screenId, opts) {
   const scr = $(screenId); if (!scr) return;
   const onBack = opts.onBack, onLeft = opts.onLeft;
-  let sx = 0, sy = 0, dir = null, active = false, W = 0;
+  const underId = () => { const u = opts.under; return (typeof u === 'function') ? u() : u; };
+  let sx = 0, sy = 0, dir = null, active = false, W = 0, under = null;
   const TRIG = () => Math.min(120, W * 0.32);
   const noSwipe = (t) => t && t.closest && t.closest('input, textarea, button, a, .slider, .picklist, .seg, .whl, .cal, [data-noswipe]');
+  const reset = () => { scr.style.transition = 'none'; scr.style.transform = ''; scr.style.zIndex = ''; scr.style.boxShadow = ''; };
   scr.addEventListener('touchstart', (e) => {
     if (e.touches.length !== 1 || noSwipe(e.target)) { active = false; return; }
     sx = e.touches[0].clientX; sy = e.touches[0].clientY; dir = null; active = true; W = window.innerWidth;
@@ -2256,20 +2297,44 @@ function initPageSwipe(screenId, opts) {
     const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
     if (dir === null) {
       if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
-      if (Math.abs(dx) > Math.abs(dy) * 1.3) { dir = dx > 0 ? 'back' : 'left'; if (dir === 'back' && onBack) { scr.style.transition = 'none'; scr.style.zIndex = '5'; } }
-      else dir = 'scroll';
+      if (Math.abs(dx) > Math.abs(dy) * 1.3) {
+        dir = dx > 0 ? 'back' : 'left';
+        if (dir === 'back' && onBack) {
+          scr.style.transition = 'none'; scr.style.zIndex = '2'; scr.style.boxShadow = '-12px 0 40px rgba(40,38,31,.18)';
+          const uid = underId(); const u = uid && $(uid);
+          if (u && u !== scr) { u.classList.add('active'); u.style.zIndex = '1'; under = u; }   // 把上一级垫在底下露出来
+        }
+      } else dir = 'scroll';
     }
     if (dir === 'back' && onBack) { e.preventDefault(); scr.style.transform = 'translateX(' + Math.max(0, dx) + 'px)'; }
   }, { passive: false });
   scr.addEventListener('touchend', (e) => {
     if (!active) return; active = false;
     const dx = e.changedTouches[0].clientX - sx;
-    const reset = () => { scr.style.transition = 'none'; scr.style.transform = ''; scr.style.zIndex = ''; };
     if (dir === 'back' && onBack) {
-      if (dx > TRIG()) { buzz(14); scr.style.transition = 'transform .26s cubic-bezier(.32,.72,0,1)'; scr.style.transform = 'translateX(100%)'; setTimeout(() => { reset(); onBack(); }, 260); }
-      else { scr.style.transition = 'transform .24s cubic-bezier(.32,.72,0,1)'; scr.style.transform = 'translateX(0)'; setTimeout(reset, 240); }
+      if (dx > TRIG()) {                       // 完成返回：onBack() 会 show(上一级)，由它接管 active；这里只清行内样式
+        buzz(14); scr.style.transition = 'transform .26s cubic-bezier(.32,.72,0,1)'; scr.style.transform = 'translateX(100%)';
+        setTimeout(() => { onBack(); reset(); if (under) { under.style.zIndex = ''; under = null; } }, 260);
+      } else {                                 // 取消：弹回，并把临时垫出来的上一级收回（当前页仍是唯一 active）
+        scr.style.transition = 'transform .24s cubic-bezier(.32,.72,0,1)'; scr.style.transform = 'translateX(0)';
+        setTimeout(() => { reset(); if (under) { under.classList.remove('active'); under.style.zIndex = ''; under = null; } }, 240);
+      }
     } else if (dir === 'left' && onLeft) { if (-dx > TRIG()) { buzz(14); onLeft(); } }
     dir = null;
+  });
+}
+// 进入下一级：新页从右侧滑入盖住当前页（与右滑返回方向相反、对称）。立刻 show(目标) 以免动画期间丢消息，
+// 来源页临时留在底层垫着，动画结束再收。
+function showForward(toId, fromId) {
+  const to = $(toId), from = fromId && $(fromId);
+  if (!to || !from || from === to) { show(toId); return; }
+  show(toId);                                  // state.screen/active/presence 立刻到位
+  from.classList.add('active'); from.style.zIndex = '1';
+  to.style.zIndex = '6'; to.style.boxShadow = '-12px 0 40px rgba(40,38,31,.18)';
+  to.style.transition = 'none'; to.style.transform = 'translateX(100%)';
+  requestAnimationFrame(() => {
+    to.style.transition = 'transform .26s cubic-bezier(.32,.72,0,1)'; to.style.transform = 'translateX(0)';
+    setTimeout(() => { to.style.transition = ''; to.style.transform = ''; to.style.zIndex = ''; to.style.boxShadow = ''; from.classList.remove('active'); from.style.zIndex = ''; }, 270);
   });
 }
 
@@ -2452,14 +2517,14 @@ function boot() {
   // in-conversation search (Enter to search; tap blank to close)
   initChatSwipe();
   // 各独立页统一右滑返回；电影模式页另加左滑进入时间线
-  initPageSwipe('cinema', { onBack: () => { show('list'); wsend({ type: 'list_sessions' }); }, onLeft: openCinemaLog });
-  initPageSwipe('cinemaLog', { onBack: () => show('cinema') });
-  initPageSwipe('diary', { onBack: diaryBack });
-  initPageSwipe('diaryWrite', { onBack: () => { closeDwPicker(); show('diary'); } });
-  initPageSwipe('files', { onBack: closeFiles });
-  initPageSwipe('import', { onBack: () => show(state.importReturn || 'files') });
-  initPageSwipe('settings', { onBack: () => show('list') });
-  initPageSwipe('setSub', { onBack: () => show('settings') });
+  initPageSwipe('cinema', { onBack: () => { show('list'); wsend({ type: 'list_sessions' }); }, onLeft: openCinemaLog, under: 'list' });
+  initPageSwipe('cinemaLog', { onBack: () => show('cinema'), under: 'cinema' });
+  initPageSwipe('diary', { onBack: diaryBack });   // diary 是同屏 overview/detail 双视图，返回落点会变，不垫上一级
+  initPageSwipe('diaryWrite', { onBack: () => { closeDwPicker(); show('diary'); }, under: 'diary' });
+  initPageSwipe('files', { onBack: closeFiles, under: () => state.filesReturn || 'list' });
+  initPageSwipe('import', { onBack: () => show(state.importReturn || 'files'), under: () => state.importReturn || 'files' });
+  initPageSwipe('settings', { onBack: () => show('list'), under: 'list' });
+  initPageSwipe('setSub', { onBack: () => show('settings'), under: 'settings' });
   $('searchInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('searchInput').blur(); runSearch(e.target.value); } });
   $('searchOverlay').addEventListener('click', (e) => { if (e.target === $('searchOverlay') || e.target === $('searchResults')) closeSearch(); });
   $('plusBack').addEventListener('click', closePlus);
@@ -2483,7 +2548,7 @@ function boot() {
   $('claudeSave').addEventListener('click', saveClaudeMd);
   $('claudePrev').addEventListener('click', () => setClaudePreview($('claudeView').style.display === 'none'));
   $('compactSave').addEventListener('click', () => { setPref('compactPrompt', $('compactText').value); closeScrim('compactScrim'); toast('压缩提示词已保存'); });
-  $('mModel').addEventListener('click', () => { state.modelFam = ''; openModelSheet(); });
+  $('mModel').addEventListener('click', () => { state.modelCtx = null; state.modelFam = ''; openModelSheet(); });
   $('mRename').addEventListener('click', () => { closeMenu(); openPrompt('重命名会话', state.curTitle || '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }); });
   $('mCopyDir').addEventListener('click', () => { closeMenu(); navigator.clipboard && navigator.clipboard.writeText(state.cwd || ''); toast('已复制目录'); });
   $('mDelete').addEventListener('click', () => { closeMenu(); openPrompt('输入「删除」确认', '', (v) => { if (v === '删除') { wsend({ type: 'delete', sessionId: state.currentSession }); goList(); } else toast('已取消'); }); });

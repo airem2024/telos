@@ -812,6 +812,13 @@ body.sysfont {
 .cin-advhead { display: flex; align-items: center; justify-content: space-between; cursor: pointer; font-size: 16px; color: var(--text); }
 .cin-advhead .cin-caret { color: var(--muted); transition: transform .2s ease; }
 .cin-advhead.open .cin-caret { transform: rotate(90deg); }
+/* 高级设置：分组卡片（节奏 / 用量与刹车 / 模型），不再一长条平铺 */
+.cin-group { margin-top: 8px; }
+.cin-grouphd { padding: 11px 16px 3px; font-size: 12px; color: var(--muted); letter-spacing: .5px; }
+.cin-modelrow { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.cin-modelrow .seg-label { font-size: 16px; flex: 1; }
+.cin-modelrow .cin-modelval { color: var(--muted); font-size: 14px; text-align: right; }
+.cin-modelrow .cin-modelchev { color: var(--muted); font-size: 18px; flex: none; }
 /* 时间线页（中性、简洁） */
 .cl-day { text-align: center; color: var(--muted); font-size: 12px; margin: 20px 0 8px; letter-spacing: .5px; }
 .cl-row { display: flex; gap: 12px; padding: 5px 6px; font-size: 14px; line-height: 1.6; }
@@ -959,15 +966,16 @@ body.sysfont {
 .wkt { flex: none; min-width: 44px; padding: 9px 12px; text-align: center; border-radius: 10px; background: var(--surface-2); color: var(--text); border: none; font-size: 14px; }
 .wkt.on { background: var(--accent); color: #fff; font-weight: 600; }
 /* 闹钟式竖向滚轮（时/分/日期/时区共用） */
-.wkclock { display: flex; align-items: center; justify-content: center; gap: 4px; }
-.wkclock-sep { font-size: 22px; color: var(--text); font-weight: 600; padding-bottom: 2px; }
+.wkclock { display: flex; align-items: center; justify-content: center; gap: 3px; }
+.wkclock-sep { font-size: 19px; color: var(--text); font-weight: 600; padding-bottom: 2px; }
 .whl { position: relative; width: 100%; overflow: hidden; -webkit-mask-image: linear-gradient(180deg, transparent, #000 26%, #000 74%, transparent); mask-image: linear-gradient(180deg, transparent, #000 26%, #000 74%, transparent); }
-.wkclock .whl { width: auto; flex: 1; max-width: 104px; }
+.wkclock .whl { width: auto; flex: 1; max-width: 84px; }
 .whl-scroll { height: 100%; overflow-y: scroll; scroll-snap-type: y mandatory; scrollbar-width: none; overscroll-behavior: contain; }
 .whl-scroll::-webkit-scrollbar { display: none; }
-.whl-item { height: 36px; line-height: 36px; text-align: center; scroll-snap-align: center; font-variant-numeric: tabular-nums; font-size: 19px; color: var(--muted); transition: color .12s, font-size .12s; }
-.whl-item.on { color: var(--text); font-weight: 600; font-size: 21px; }
-.whl-band { position: absolute; left: 4px; right: 4px; top: 72px; height: 36px; pointer-events: none; border-top: 1px solid var(--accent); border-bottom: 1px solid var(--accent); opacity: .5; }
+/* 行高要和 wkWheel 里的 ITEM 一致（现 30）；band 的 top/height 由 JS 按 ITEM 行内设定 */
+.whl-item { height: 30px; line-height: 30px; text-align: center; scroll-snap-align: center; font-variant-numeric: tabular-nums; font-size: 16px; color: var(--muted); transition: color .12s, font-size .12s; }
+.whl-item.on { color: var(--text); font-weight: 600; font-size: 18px; }
+.whl-band { position: absolute; left: 4px; right: 4px; top: 60px; height: 30px; pointer-events: none; border-top: 1px solid var(--accent); border-bottom: 1px solid var(--accent); opacity: .5; }
 /* 多个唤醒时间：列表 + 添加 */
 .wkitem { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 12px; background: var(--surface-2); margin-bottom: 8px; }
 .wkitem .wki-main { flex: 1; min-width: 0; }
