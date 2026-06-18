@@ -986,6 +986,15 @@ async function cleanupStale({ days = 1, maxRounds = 1 } = {}) {
 // 标题回退到首条消息时，别把 [附带文件：路径] 行漏出来
 function cleanTitle(t) { return String(t || '').replace(/\n*\[附带(?:文件|图片)：[^\]]*\]/g, '').replace(/\s+/g, ' ').trim(); }
 
+// 平时聊天回合：buildPrompt 在她消息前发的隐藏心情消息，会被 CLI 合并进同一条 user 消息
+// （形态：`MOOD_SENTINEL 心情块\n她真正说的话`，心情块是**单行**——见 moodTail）。
+// 重载历史时只剥掉心情前缀、保留她尾部的话；纯心情（无尾部话）返回空→后续被当空消息隐藏。
+function stripMoodPreamble(t) {
+  if (!t || t.indexOf(MOOD_SENTINEL) < 0) return t;   // 不含心情前缀 → 原样（普通消息/唤醒提示都不受影响）
+  const nl = t.indexOf('\n');                          // 心情块单行，首个换行之后即她的话
+  return nl < 0 ? '' : t.slice(nl + 1);
+}
+
 /** Turn a stored SessionMessage[] into chat items the app can render. */
 function historyItems(messages, moodOn) {
   const items = [];
@@ -994,6 +1003,7 @@ function historyItems(messages, moodOn) {
   // text item, but with local media made visible on reopen: image paths inline (rewriteMedia),
   // audio paths as a player (media item). Mirrors the live assistant_text flow so chat media persists.
   const pushText = (role, text, uuid) => {
+    if (role === 'user') text = stripMoodPreamble(text);          // 把合并进来的隐藏心情前缀剥掉，保留她真正说的话（修"重进吞回复"）
     if (moodOn && role === 'assistant') text = stripMood(text);   // 仅开了情绪的对话才剥心情标记，其它对话原样不动
     if (!text || !text.trim() || HIDE_TEXT(text)) return;
     if (role === 'assistant') {
