@@ -346,7 +346,7 @@ function handle(m) {
     case 'auth_ok':
       state.authed = true; state.everAuthed = true; state.defaultCwd = m.defaultCwd || ''; connbar(''); hideDisc();
       state.lastRx = Date.now(); startLiveness();
-      checkUpdate(false); wsend({ type: 'model_list' });
+      checkUpdate(false); wsend({ type: 'model_list' }); wsend({ type: 'cache_ttl_get' });
       if (state.screen === 'setup') show('list');
       wsend({ type: 'list_sessions' });
       sendPushPref(); sendPresence(); applyNativeNotify();
@@ -429,6 +429,7 @@ function handle(m) {
       if (state.screen === 'cinemaLog' && state.cinTarget && m.sessionId === state.cinTarget.id) renderCinemaLog(m);
       break;
     case 'cinema_notice': toast(m.text || '电影模式已暂停'); break;
+    case 'cache_ttl': state.cacheTtl = m.ttl || '1h'; if (state.screen === 'setSub' && state.setCat === 'chat') renderSetSub(); break;
     case 'wake_typing':
       if (m.on) state.cinemaTyping = m.sessionId; else if (state.cinemaTyping === m.sessionId) state.cinemaTyping = '';
       updateCinemaBar(); break;
@@ -1384,10 +1385,17 @@ function renderCinemaLog(m) {
     const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
     let cls = 'cl-evt', txt = it.text || '';
     if (it.kind === 'said') cls = 'cl-said';
-    else if (it.kind === 'mood') cls = 'cl-mood';
-    else if (it.kind === 'here') txt = '在线';
-    else if (it.kind === 'away') txt = '离开';
-    html += '<div class="cl-row ' + cls + '"><span class="cl-t">' + hm + '</span><span class="cl-x">' + esc(txt) + '</span></div>';
+    else if (it.kind === 'mood') { cls = 'cl-mood'; txt = '心情 · ' + txt; }
+    else if (it.kind === 'here') { cls = 'cl-dim'; txt = '回到对话'; }
+    else if (it.kind === 'away') { cls = 'cl-dim'; txt = '离开'; }
+    else if (it.kind === 'watch') { cls = 'cl-watch'; txt = '醒了一下，没出声'; }   // 守夜/到点醒来但选择沉默 → 留一笔暗痕
+    let meta = '';
+    if (it.trigger === 'self') meta = '你定的时间';        // 她自己定的下次时间到了
+    else if (it.trigger === 'mark') meta = '守夜';         // 守夜的坎兜底叫起
+    const dotHtml = (it.kind !== 'mood' && it.mood) ? '<span class="cl-dot" style="background:' + moodHue(it.mood) + '" title="' + esc(it.mood) + '"></span>' : '';
+    html += '<div class="cl-row ' + cls + '"><span class="cl-t">' + hm + '</span>' + dotHtml
+      + '<span class="cl-x">' + esc(txt) + '</span>'
+      + (meta ? '<span class="cl-meta">' + meta + '</span>' : '') + '</div>';
   }
   if (!html) { box.innerHTML = '<div class="cl-empty">还没有记录。<br>开启电影模式后，她在这段时间里的动静会记在这里。</div>'; return; }
   box.innerHTML = html;
@@ -1508,7 +1516,7 @@ function fillWakeForm(st) {
   const now = new Date();
   const dp = String(st.dawnTime || '04:00').split(':');
   const w = state.wk = {
-    enabled: !!st.enabled, chase: !!st.chase, dawn: !!st.dawn,
+    enabled: !!st.enabled, chase: !!st.chase, wakeOnEnter: !!st.wakeOnEnter, dawn: !!st.dawn,
     dawnH: (+dp[0] || 0), dawnM: (+dp[1] || 0),
     list: (st.schedules || []).filter((s) => s.by !== 'cc' && (s.nextAt || s.repeat)).map((s) => ({ nextAt: s.nextAt || 0, repeat: s.repeat || null })),
     cc: (st.schedules || []).filter((s) => s.by === 'cc').map((s) => ({ id: s.id, nextAt: s.nextAt || 0, repeat: s.repeat || null })),
@@ -1521,6 +1529,7 @@ function renderWakeForm() {
   const w = state.wk; if (!w) return;
   $('wkEnable').classList.toggle('on', w.enabled);
   $('wkChase').classList.toggle('on', w.chase);
+  $('wkEnter').classList.toggle('on', w.wakeOnEnter);
   $('wkDawn').classList.toggle('on', w.dawn);
   $('wkConfig').style.display = w.enabled ? '' : 'none';
   $('wkDawnCfg').style.display = w.dawn ? '' : 'none';
@@ -1667,7 +1676,7 @@ function saveWake() {
   const dawnTime = pad2(w.dawnH) + ':' + pad2(w.dawnM);
   if (w.enabled && !w.list.length) { toast('还没添加唤醒时间，或关掉「开启定时唤醒」'); return; }
   const schedules = w.list.map((sch) => ({ nextAt: sch.nextAt || 0, repeat: sch.repeat || null }));
-  wsend({ type: 'wakeup_set', sessionId: s.id, enabled: w.enabled, schedules, chase: w.chase, dawn: w.dawn, dawnTime });
+  wsend({ type: 'wakeup_set', sessionId: s.id, enabled: w.enabled, schedules, chase: w.chase, wakeOnEnter: w.wakeOnEnter, dawn: w.dawn, dawnTime });
   closeScrim('wakeScrim');
   if (!w.enabled) { toast(w.dawn ? '已关闭唤醒 · 仅定时写日记 ' + dawnTime : '已关闭定时唤醒'); return; }
   const next = schedules.map((x) => x.nextAt).filter(Boolean).sort((a, b) => a - b)[0];
@@ -1951,6 +1960,7 @@ const SET_CATS = {
     { type: 'slider', key: 'pasteThreshold', name: '文本长度阈值', min: 200, max: 8000, step: 100, fmt: (v) => v + ' 字', dep: 'pasteAsFile' },
     { type: 'toggle', key: 'autoCleanup', name: '自动清理一天前的单轮对话', onChange: cleanupNow },
     { type: 'toggle', key: 'wakePush', name: '后台唤醒通知', onChange: onWakePushToggle },
+    { type: 'segment', server: 'cacheTtl', name: '上下文缓存时长', opts: [['1h', '1 小时'], ['5m', '5 分钟']], send: (v) => ({ type: 'cache_ttl_set', ttl: v }) },
     { type: 'tzoff', key: 'timezone', name: 'cc 读到的时区', onChange: sendPresence },
     { type: 'button', name: '编辑压缩提示词', action: openCompactPrompt }
   ] },
@@ -2006,7 +2016,8 @@ function renderSetSub() {
       row.classList.add('segrow');
       const lab = el('span', 'seg-label'); lab.textContent = it.name; row.appendChild(lab);
       const seg = el('div', 'segment');
-      it.opts.forEach(([v, n]) => { const b = el('button', 'seg' + (P(it.key) === v ? ' on' : '')); b.textContent = n; b.addEventListener('click', () => { setPref(it.key, v); if (it.onChange) it.onChange(); renderSetSub(); refreshSettingsRows(); }); seg.appendChild(b); });
+      const segCur = it.server ? (state[it.server] || it.opts[0][0]) : P(it.key);   // server: 读运行时状态（如缓存时长），不走 localStorage
+      it.opts.forEach(([v, n]) => { const b = el('button', 'seg' + (segCur === v ? ' on' : '')); b.textContent = n; b.addEventListener('click', () => { if (it.server) { state[it.server] = v; if (it.send) wsend(it.send(v)); buzz(12); } else setPref(it.key, v); if (it.onChange) it.onChange(); renderSetSub(); refreshSettingsRows(); }); seg.appendChild(b); });
       row.appendChild(seg);
     } else if (it.type === 'swatch') {
       row.classList.add('swatchrow');
@@ -2600,6 +2611,7 @@ function boot() {
   $('wkEnable').addEventListener('click', () => { if (state.wk) { state.wk.enabled = !state.wk.enabled; if (!state.wk.enabled) closeWakeEditor(); renderWakeForm(); } });
   $('wkDawn').addEventListener('click', () => { if (state.wk) { state.wk.dawn = !state.wk.dawn; renderWakeForm(); } });
   $('wkChase').addEventListener('click', () => { if (state.wk) { state.wk.chase = !state.wk.chase; renderWakeForm(); } });
+  $('wkEnter').addEventListener('click', () => { if (state.wk) { state.wk.wakeOnEnter = !state.wk.wakeOnEnter; renderWakeForm(); } });
   $('wkMode').addEventListener('click', (e) => { const b = e.target.closest('button[data-m]'); if (!b || !state.wk) return; state.wk.eMode = b.dataset.m; document.querySelectorAll('#wkMode button').forEach((x) => x.classList.toggle('on', x === b)); renderWakeModeArea(); });
   $('wkAdd').addEventListener('click', openWakeEditor);
   $('wkEditCancel').addEventListener('click', () => { closeWakeEditor(); });

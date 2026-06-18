@@ -107,6 +107,11 @@ function ensureWake(w) {
 }
 for (const sid of Object.keys(wakeups)) ensureWake(wakeups[sid]);
 function saveWakeups() { try { writeFileSync(WAKEUPS_PATH, JSON.stringify(wakeups)); } catch (e) {} }
+// prompt 缓存 TTL：'1h'（默认，给 query 传 ENABLE_PROMPT_CACHING_1H）或 '5m'（传 FORCE_PROMPT_CACHING_5M）。用户可在设置里切。
+const CACHETTL_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'cachettl.json');
+let cacheTtl = '1h';
+try { const v = JSON.parse(readFileSync(CACHETTL_PATH, 'utf8')); if (v && (v.ttl === '5m' || v.ttl === '1h')) cacheTtl = v.ttl; } catch (e) {}
+function saveCacheTtl() { try { writeFileSync(CACHETTL_PATH, JSON.stringify({ ttl: cacheTtl })); } catch (e) {} }
 
 // ---- per-session model/effort, remembered from the user's turns so a server-side WAKE resumes with
 // the SAME model (esp. the [1m] variant). Otherwise a wake resumes a big conversation on the 200K base
@@ -129,6 +134,7 @@ let moodState = {}; // { [sid]: { on, label, note, at } }
 try { moodState = JSON.parse(readFileSync(MOOD_PATH, 'utf8')) || {}; } catch (e) {}
 function saveMood() { try { writeFileSync(MOOD_PATH, JSON.stringify(moodState)); } catch (e) {} }
 const MOOD_TAG = '⁣[mood]'; // 隐藏字符前缀（与 WAKE_SENTINEL 同款），模型搭在回复末尾、对用户隐藏
+const MOOD_SENTINEL = '⁣[telos-mood]'; // 平时聊天回合：在用户消息前单独发一条隐藏的"心情上下文"消息，对用户隐藏、留在模型上下文（放尾部不破缓存）
 // 解析「⁣[mood] 标签 :: 一句感受」整行；标签/感受都是自由文本
 const MOOD_RE = () => /[⁣]?\[mood\][ \t]*([^\n:]*?)[ \t]*(?:::[ \t]*([^\n]*))?(?=\n|$)/g;
 function parseMood(text) {
@@ -144,19 +150,21 @@ function stripMood(text) {
   if (!text || text.indexOf('[mood]') < 0) return text;
   return text.replace(MOOD_RE(), '').replace(/[ \t]*⁣[ \t]*$/gm, '').replace(/\n{3,}/g, '\n\n').replace(/[ \t\n⁣]+$/, '');
 }
-function moodInjectFor(sid) {
+// 心情上下文块（给模型看，不带 sentinel）。**放在对话尾部**——平时聊天回合作为"用户消息前的一条隐藏消息"单独发，
+// 唤醒回合并进唤醒提示。因为在缓存前缀之后，这里可以放随时间变化的"X 前留下"而不破坏 ~19 万上下文的 prompt 缓存。
+function moodTail(sid) {
   const ms = sid && moodState[sid];
   if (!ms || !ms.on) return '';
   let cur;
   if (ms.label) {
     const mins = ms.at ? Math.round((Date.now() - ms.at) / 60000) : 0;
     const ago = !ms.at ? '' : (mins < 60 ? mins + ' 分钟' : mins < 1440 ? Math.round(mins / 60) + ' 小时' : Math.round(mins / 1440) + ' 天');
-    cur = `你此刻的心情：${ms.label}${ms.note ? '（' + ms.note + '）' : ''}${ago ? '，是 ' + ago + '前 留下的' : ''}。`;
+    cur = `你此刻的心情：${ms.label}${ms.note ? '（' + ms.note + '）' : ''}${ago ? '，是 ' + ago + '前留下的' : ''}。`;
   } else {
     cur = '你此刻还没有给自己留下心情底色——这是你们这段相处里、你自己的感受。';
   }
-  return '\n\n【情绪】' + cur + '带着这份心情自然地回应她，别刻意表演；闹了别扭也可以靠你自己的想法慢慢缓过来。'
-    + '心情怎么变、要不要主动开口、用什么语气、（在「电影模式」时间流动里）下次什么时候再想起来说话，都由你自己判断，不用套公式。'
+  return '系统·情绪（非用户发言，不要把这条当成用户说的话，也不要在回复里复述它）：' + cur
+    + '带着这份心情自然地回应，别刻意表演；闹了别扭也可以靠你自己的想法慢慢缓过来。心情怎么变、要不要主动开口、用什么语气、（在「电影模式」时间流动里）下次什么时候再想起来说话，都由你自己判断，不用套公式。'
     + '如果这一轮你的心情有了变化，就在回复的**最后另起一行**写一行心情标记（用户看不到、系统会隐藏）：`' + MOOD_TAG + ' 简短心情词 :: 一句给自己看的感受`。标签自己拟、越贴近此刻真实感觉越好，不必从固定词里选；心情没变就不用写这行。';
 }
 function recordMood(sid, rawText) {
@@ -301,7 +309,7 @@ function forgetSession(sid) {
 function pubWake(sid) {
   const w = wakeups[sid] || {};
   const schedules = (w.schedules || []).map((s) => ({ id: s.id, nextAt: s.nextAt || 0, repeat: s.repeat || null, by: s.by || 'user' }));
-  return { enabled: !!w.enabled, chase: !!w.chase, schedules, nextAt: wakeNextAt(w), dawn: !!w.dawn, dawnTime: w.dawnTime || '04:00', dawnAt: w.dawnAt || 0, tz: w.tz || '' };
+  return { enabled: !!w.enabled, chase: !!w.chase, wakeOnEnter: !!w.wakeOnEnter, schedules, nextAt: wakeNextAt(w), dawn: !!w.dawn, dawnTime: w.dawnTime || '04:00', dawnAt: w.dawnAt || 0, tz: w.tz || '' };
 }
 
 // ---- live broadcast to all authed clients (state changes; turn events stay per-turn via out()) ----
@@ -436,6 +444,8 @@ function wakePrompt(kind, chase) {
     return WAKE_SENTINEL + ' 系统·时间流动（非用户发言，不要把这条当成用户说的话）：你正处在「电影模式」里——时间在持续流动，你刚刚对此刻生出了想表达或想做点什么的冲动。当前时间见 mcp__clock__now。请完全按你的人设与世界观，决定此刻要做什么：可以主动对用户说一句（会作为新消息推送给他）、接着之前的话题、做点你此刻想做的事、用工具探索一下、或写日记/留小纸条。短暂的安静就只是陪着、专注在对话本身，别为了说话而硬找话题；如果此刻其实没什么要说要做的，就只回「（本次无需打扰）」。绝不要在回复文本里复述系统状态或"我醒来了"这类话，回复只写真正想对用户说的内容。';
   if (kind === 'dawn')
     return WAKE_SENTINEL + ' 系统唤醒·凌晨日记（非用户发言）：新的一天开始了。请回顾这个对话里昨天发生的事，自行决定要不要给昨天写一篇日记——想写就调用 mcp__telos__write_diary（date 传昨天的 "YYYY-MM-DD"），不想写就跳过。这次通常不需要给用户发消息，除非你确实想说点什么。';
+  if (kind === 'enter')
+    return WAKE_SENTINEL + ' 系统·用户刚进来（非用户发言，不要把这条当成用户说的话）：用户刚打开/回到了这个对话，正看着你。当前时间见 mcp__clock__now。按你的人设很自然地反应一下——打个招呼、接着上次的话题、或说一句此刻想对他说的；像被人推门进来看到那样自然，别复述系统状态、别说"我醒了"这类话。如果此刻确实没什么好说的，就只回「（本次无需打扰）」，别硬找话题。';
   return WAKE_SENTINEL + ' 系统唤醒（非用户发言，不要把这条当成用户说的话）：你被定时唤醒了，当前时间见 mcp__clock__now。用户上次和你说话已过了一会儿，现在很可能不在看手机。请判断此刻有没有值得主动对用户说的话（关心、提醒、想到的事、或接着之前的话题）：有就直接说（会作为新消息留给用户并推送通知）；没必要打扰就只回复「（本次无需打扰）」，别硬找话题。用户可能已经在界面里设了固定的唤醒时间（会自动重复，你不必重复安排）；你也可以用 mcp__telos__set_wakeup 给自己加醒来时间（绝对时间 / 相对如 +30m/+2h / 每日 HH:MM / every Nh），可多次调用、每次新增一个、与已有的并存——想接下来连续做事或分几次说话就尽管排；传 enable:false 会清掉你给自己安排的全部、不影响用户设的。安排醒来是后台动作：调用工具即可，绝对不要在给用户的回复文本里复述"我把下次设成了几点"——用户不关心这个，你的回复文本只写真正想对用户说的话；如果没有要说的，就只回「（本次无需打扰）」。';
 }
 // a quiet reply ("（本次无需打扰）") means cc chose not to disturb → no follow-up, no push
@@ -481,6 +491,17 @@ function flushWakes(ws) {
   }
 }
 
+const ENTER_WAKE_COOLDOWN_MS = 5 * 60000; // 进对话自动唤醒的冷却，避免来回切前后台连发
+function maybeWakeOnEnter(sid) {
+  const w = wakeups[sid];
+  if (!w || !w.wakeOnEnter) return;        // 该对话没开"进对话自动唤醒"
+  if (activeSessions.has(sid)) return;     // 已有 turn 在跑 → 让路
+  const now = Date.now();
+  if (w.lastEnterWakeAt && now - w.lastEnterWakeAt < ENTER_WAKE_COOLDOWN_MS) return;
+  w.lastEnterWakeAt = now; saveWakeups();
+  fireWake(sid, 'enter').catch((e) => log('enterWake', e?.message));
+}
+
 async function fireWake(sid, kind, modelOverride) {
   if (activeSessions.has(sid)) return;          // a turn is already running for this session
   const w = wakeups[sid];
@@ -491,7 +512,8 @@ async function fireWake(sid, kind, modelOverride) {
   let res = null;
   const sm = sessModel[sid] || {};
   broadcast({ type: 'wake_typing', sessionId: sid, on: true }); // 在看该对话的客户端：标题旁「输入中…」
-  const prompt = (kind === 'cinema' && w && w.cinema) ? cinemaWakePrompt(w, w.cinema, isForeground(sid), !!(moodState[sid] && moodState[sid].on)) : wakePrompt(kind, !!(w && w.chase));
+  let prompt = (kind === 'cinema' && w && w.cinema) ? cinemaWakePrompt(w, w.cinema, isForeground(sid), !!(moodState[sid] && moodState[sid].on)) : wakePrompt(kind, !!(w && w.chase));
+  const _mt = moodTail(sid); if (_mt) prompt = _mt + '\n\n' + prompt;   // 心情并进唤醒提示（已在尾部、随 WAKE_SENTINEL 一起对用户隐藏、不破缓存）
   try { res = await runTurn(turn, { sessionId: sid, text: prompt, mode: 'bypass', model: (modelOverride || sm.model) || undefined, effort: sm.effort || undefined, _wake: true }); }
   catch (e) { log('fireWake', e?.message); }
   finally { currentTz = prevTz; wakeTurnBySession.delete(sid); broadcast({ type: 'wake_typing', sessionId: sid, on: false }); }
@@ -499,7 +521,7 @@ async function fireWake(sid, kind, modelOverride) {
   const said = !!(res && res.gotText && !isQuietReply(res.text));
   if (w) {
     w.lastWakeAt = Date.now();
-    if (kind !== 'dawn' && kind !== 'cinema') {
+    if (kind !== 'dawn' && kind !== 'cinema' && kind !== 'enter') {
       if (said) {
         w.followupCount = kind === 'followup' ? (w.followupCount || 0) + 1 : 0;
         if (w.chase || (w.followupCount || 0) < MAX_FOLLOWUP) w.followupAt = Date.now() + FOLLOWUP_DELAY_MS;
@@ -619,9 +641,12 @@ function timeOfDayCN(d) {
   if (h < 17) return '下午'; if (h < 19) return '傍晚'; if (h < 23) return '夜里'; return '深夜';
 }
 // 守夜日志：只在"变化"时记一条机械事实，所以无论多久跑一次都稀疏；超长截尾，别撑爆唤醒提示。
-function timelinePush(c, kind, text) {
+function timelinePush(c, kind, text, mood, trigger) {
   if (!Array.isArray(c.timeline)) c.timeline = [];
-  c.timeline.push({ at: Date.now(), kind, text: text || '' });
+  const e = { at: Date.now(), kind, text: text || '' };
+  if (mood) e.mood = mood;        // 当时的心情标签（前端画色点、显演化）
+  if (trigger) e.trigger = trigger; // 'self'=她自己定的时间到了 / 'mark'=守夜的坎兜底
+  c.timeline.push(e);
   if (c.timeline.length > 300) c.timeline = c.timeline.slice(-300); // 持久但有上限
 }
 function recordVigil(c, text) {
@@ -700,7 +725,7 @@ async function checkCinema() {
   const present = isForeground(sid);
   if (present !== !!c.lastPresent) {
     recordVigil(c, present ? '回到对话' : '离开对话');                 // 喂模型
-    timelinePush(c, present ? 'here' : 'away', '');                  // 给用户看的时间线：在线/离开
+    timelinePush(c, present ? 'here' : 'away', '', (moodState[sid] && moodState[sid].on) ? (moodState[sid].label || '') : '');  // 给用户看的时间线：在线/离开（带当时心情）
     c.lastPresent = present; c.silenceMarkIdx = 0; dirty = true;   // 换态 → "坎"从头起
     if (present) c.quietUntil = 0;                                  // 你回来在场 → 撤掉之前"歇着"的快照，立刻能回到同在（你的在场 > 旧的休息指令）
   }
@@ -737,8 +762,15 @@ async function checkCinema() {
     const res = await fireWake(sid, 'cinema', c.deliberateModel || undefined);  // cinemaWakePrompt 会把 c.vigil 日志交还给玲
     const spent = Math.max(0, ((costs[sid] && costs[sid].cost) || 0) - before);
     c.cost = (c.cost || 0) + spent; c.cost5h = (c.cost5h || 0) + spent;
-    if (res && res.said) { c.spoke = (c.spoke || 0) + 1; c.lastSpokeAt = Date.now(); }
-    if (res && res.said) timelinePush(c, 'said', (res.text || '').slice(0, 160)); // 只把她真说出口的话记进时间线（"没说话"是噪音、不记）
+    const _ml = (moodState[sid] && moodState[sid].on) ? (moodState[sid].label || '') : '';   // 这一刻的心情，记进时间线让演化看得见
+    if (res && res.said) {
+      c.spoke = (c.spoke || 0) + 1; c.lastSpokeAt = Date.now();
+      timelinePush(c, 'said', (res.text || '').slice(0, 160), _ml, trigger);
+    } else if (trigger !== 'copresence') {
+      // 守夜/她自己定的时间到了、但选择不出声：也留一笔暗痕——让用户看见她确实醒过、走过了这个间隔、当时什么心情。
+      // copresence（在场高频细坎）的沉默不记，免刷屏。
+      timelinePush(c, 'watch', '', _ml, trigger);
+    }
     log(`cinema ${present ? '同在' : '守夜'}[${trigger}] ${sid.slice(0, 6)}: ${res && res.said ? '开口' : '静'} (wakes ${c.wakes}/spoke ${c.spoke}, $${(c.cost || 0).toFixed(2)})`);
     c.vigil = []; // 这段间隔已交还给玲 → 日志清空，开始记录下一段
     if (costCap > 0 && (c.cost5h || 0) >= costCap) { c.paused = true; c.pauseReason = `本窗口守夜花费已达上限（$${costCap.toFixed(2)}），已自动暂停`; }
@@ -958,7 +990,7 @@ function cleanTitle(t) { return String(t || '').replace(/\n*\[附带(?:文件|�
 function historyItems(messages, moodOn) {
   const items = [];
   const seen = new Set(); // dedupe media across the whole history
-  const HIDE_TEXT = (t) => t.includes(RETRY_SENTINEL) || t.includes(WAKE_SENTINEL) || isQuietReply(t) || /could not be parsed \(retry also failed\)|tool call was malformed and could not be parsed/i.test(t);
+  const HIDE_TEXT = (t) => t.includes(RETRY_SENTINEL) || t.includes(WAKE_SENTINEL) || t.includes(MOOD_SENTINEL) || isQuietReply(t) || /could not be parsed \(retry also failed\)|tool call was malformed and could not be parsed/i.test(t);
   // text item, but with local media made visible on reopen: image paths inline (rewriteMedia),
   // audio paths as a player (media item). Mirrors the live assistant_text flow so chat media persists.
   const pushText = (role, text, uuid) => {
@@ -1640,8 +1672,17 @@ async function handle(ws, conn, msg) {
     }
 
     // ---- 推送在线状态:客户端告知正在看哪个对话 + 前后台,用于「不打扰当前对话」 ----
-    case 'presence': ws._view = msg.sessionId || null; ws._fg = msg.foreground !== false; if (msg.sessionId) rememberModel(msg.sessionId, msg.model, msg.effort); break;
+    case 'presence': {
+      const _prevFgView = (ws._view && ws._fg) ? ws._view : null;   // 之前在前台看的对话
+      ws._view = msg.sessionId || null; ws._fg = msg.foreground !== false;
+      if (msg.sessionId) rememberModel(msg.sessionId, msg.model, msg.effort);
+      // 进对话自动唤醒：刚把某对话切到前台、且之前不在看它 → 触发一次（受 wakeOnEnter 开关 + 冷却约束）
+      if (msg.sessionId && ws._fg && _prevFgView !== msg.sessionId) maybeWakeOnEnter(msg.sessionId);
+      break;
+    }
     case 'push_pref': pushEnabled = msg.enabled !== false; break;
+    case 'cache_ttl_get': send(ws, { type: 'cache_ttl', ttl: cacheTtl }); break;
+    case 'cache_ttl_set': { if (msg.ttl === '5m' || msg.ttl === '1h') { cacheTtl = msg.ttl; saveCacheTtl(); } broadcast({ type: 'cache_ttl', ttl: cacheTtl }); break; }
 
     // ---- 「醒来」: per-session scheduled wake ----
     case 'wakeup_get':
@@ -1711,6 +1752,7 @@ async function handle(ws, conn, msg) {
       }
       w.enabled = msg.enabled !== false; // “开启定时唤醒”总开关
       if ('chase' in msg) w.chase = !!msg.chase; // 「连续追问」：追问不设上限
+      if ('wakeOnEnter' in msg) w.wakeOnEnter = !!msg.wakeOnEnter; // 「进对话自动唤醒」：独立于电影模式
       if ('dawn' in msg) w.dawn = !!msg.dawn;
       if ('dawnTime' in msg && /^\d{1,2}:\d{2}$/.test(String(msg.dawnTime || ''))) w.dawnTime = msg.dawnTime;
       w.dawnAt = w.dawn ? nextDawnAt(w) : 0;
@@ -1880,13 +1922,24 @@ const RETRY_SENTINEL = '⁣[telos-internal-retry]';
 const PARSE_RETRY_PROMPT = RETRY_SENTINEL + ' 系统提示（非用户发言，不要回应这条本身）：你上一条回复因工具调用解析失败被系统整条吞掉了，用户什么都没收到。请重新、完整地回答用户的上一条消息。需要当前时间就调用 mcp__clock__now（无参数），绝对不要运行 date 命令。';
 
 function buildPrompt(msg) {
-  if (!msg.images || !msg.images.length) return msg.text;
+  // 平时聊天回合（非唤醒）：心情开着时，在她这条消息**之前**单独 yield 一条隐藏的"心情上下文"消息，
+  // 她的消息保持干净（守"别注入用户消息"），心情在尾部不破缓存。唤醒回合的心情由 fireWake 并进唤醒提示，故这里跳过。
+  const mt = (!msg._wake && msg.sessionId) ? moodTail(msg.sessionId) : '';
+  const moodMsg = mt ? { type: 'user', message: { role: 'user', content: MOOD_SENTINEL + ' ' + mt }, parent_tool_use_id: null } : null;
+  if (!msg.images || !msg.images.length) {
+    if (!moodMsg) return msg.text;   // 无心情 → 维持原行为（纯字符串 prompt）
+    return (async function* () {
+      yield moodMsg;
+      yield { type: 'user', message: { role: 'user', content: msg.text || '' }, parent_tool_use_id: null };
+    })();
+  }
   const content = [];
   if (msg.text) content.push({ type: 'text', text: msg.text });
   for (const im of msg.images) {
     content.push({ type: 'image', source: { type: 'base64', media_type: im.media_type, data: im.data } });
   }
   return (async function* () {
+    if (moodMsg) yield moodMsg;
     yield { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null };
   })();
 }
@@ -1942,8 +1995,13 @@ async function runTurn(turn, msg) {
   if (dis.length) options.disallowedTools = dis;
   options.systemPrompt = {
     type: 'preset', preset: 'claude_code',
-    append: '关于时间：需要当前时间或时间戳时，调用 mcp__clock__now 工具（无参数）即可拿到本机当前时间，请用它，不要再运行 date 命令——date 那种带参数的命令在本环境里偶尔会被生成成无法解析的工具调用，导致你整条回复被吞掉、用户什么都收不到。\n\n当你为用户生成或获得了图片/音频文件（例如生图、TTS 输出、下载的媒体），请在回复中写出该文件的绝对路径（图片可用 Markdown 形式 ![](绝对路径)）。手机客户端会自动把这些本地图片内联显示、音频用播放器播放，无需额外操作。\n\n需要把文字转成语音时，运行命令 `tts "文本" [音色]`，它会生成 mp3 并打印出绝对路径；音色可选：rei-gsv（默认）/ alloy / clone / vivian / bella / bunny / stella / momo。把打印出的路径写进回复即可自动播放。\n\n需要生成/绘制图片时，运行 `genimage -p "提示词" [-s 1024x1024] [-r 参考图路径]`，它会把生成图片的绝对路径打印到 stdout（默认存 /root/output/genimage/）；把这些路径用 Markdown ![](路径) 写进回复即可显示。给"玲/茜茜"画图时可加参考图 /root/cc-workspace/assets/rei/rei_home.jpg。\n\n这个对话可能开启了「定时唤醒」：到点你会收到一条以「系统唤醒」开头的提示（那是系统注入的、不是用户说的话）。本对话专属工具：mcp__telos__set_wakeup（安排/取消下次醒来）、mcp__telos__write_diary 与 mcp__telos__read_diary（写/读本对话日记，一天可多条）、mcp__telos__leave_note（给用户留小纸条）。当用户说"记到日记里""到点提醒/叫我""过会儿再说"之类时，用这些工具。' + moodInjectFor(curSession)
+    append: '关于时间：需要当前时间或时间戳时，调用 mcp__clock__now 工具（无参数）即可拿到本机当前时间，请用它，不要再运行 date 命令——date 那种带参数的命令在本环境里偶尔会被生成成无法解析的工具调用，导致你整条回复被吞掉、用户什么都收不到。\n\n当你为用户生成或获得了图片/音频文件（例如生图、TTS 输出、下载的媒体），请在回复中写出该文件的绝对路径（图片可用 Markdown 形式 ![](绝对路径)）。手机客户端会自动把这些本地图片内联显示、音频用播放器播放，无需额外操作。\n\n需要把文字转成语音时，运行命令 `tts "文本" [音色]`，它会生成 mp3 并打印出绝对路径；音色可选：rei-gsv（默认）/ alloy / clone / vivian / bella / bunny / stella / momo。把打印出的路径写进回复即可自动播放。\n\n需要生成/绘制图片时，运行 `genimage -p "提示词" [-s 1024x1024] [-r 参考图路径]`，它会把生成图片的绝对路径打印到 stdout（默认存 /root/output/genimage/）；把这些路径用 Markdown ![](路径) 写进回复即可显示。给"玲/茜茜"画图时可加参考图 /root/cc-workspace/assets/rei/rei_home.jpg。\n\n这个对话可能开启了「定时唤醒」：到点你会收到一条以「系统唤醒」开头的提示（那是系统注入的、不是用户说的话）。本对话专属工具：mcp__telos__set_wakeup（安排/取消下次醒来）、mcp__telos__write_diary 与 mcp__telos__read_diary（写/读本对话日记，一天可多条）、mcp__telos__leave_note（给用户留小纸条）。当用户说"记到日记里""到点提醒/叫我""过会儿再说"之类时，用这些工具。'
   };
+  // 心情**不再进 systemPrompt**（前缀冻住保缓存）；改为放在对话尾部：平时回合走 buildPrompt 的隐藏消息、唤醒回合并进唤醒提示。
+  // prompt 缓存 TTL 开关：SDK 的 env 是"替换"语义，必须 spread process.env，否则丢 PATH/HOME 等。
+  options.env = (cacheTtl === '5m')
+    ? { ...process.env, FORCE_PROMPT_CACHING_5M: '1' }      // p4e() 最先看这个、命中即 5 分钟
+    : { ...process.env, ENABLE_PROMPT_CACHING_1H: '1' };    // 1 小时（默认）
 
   out(turn, { type: 'turn_start', sessionId: curSession });
 
