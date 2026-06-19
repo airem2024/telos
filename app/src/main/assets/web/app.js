@@ -1293,7 +1293,7 @@ function openMenu() {
   // chosen working dir / globally); only hide the items that need an existing session.
   const newSess = !state.currentSession;
   // 这些都依赖一个已存在的会话；新会话时连同「对话设置」分区标题一起隐藏（菜单设置那组对新会话仍可用）
-  ['mRegen', 'mDelete', 'mMood', 'mWake', 'mCinema', 'menuSecConv'].forEach((id) => { $(id).style.display = newSess ? 'none' : ''; });
+  ['mRegen', 'mDelete', 'mMood', 'mWake', 'mCinema'].forEach((id) => { $(id).style.display = newSess ? 'none' : ''; });
   syncMoodMenu();
   clearTimeout(mp._hideT);
   mb.classList.add('show'); mp.classList.add('show');

@@ -740,8 +740,8 @@ button.model:active { opacity: .6; }
 }
 .prompt-save:active { background: var(--accent-press); }
 /* 文件管理：复制当前路径 */
-.dircopy { flex: none; border: none; background: var(--surface-2); color: var(--muted); border-radius: 9px; padding: 8px 10px; }
-.dircopy:active { background: var(--border); color: var(--text); }
+.dircopy { flex: none; border: none; background: transparent; color: var(--muted); padding: 8px 6px; }
+.dircopy:active { color: var(--text); }
 .search-empty { text-align: center; color: rgba(255,255,255,.85); margin-top: 12vh; font-size: 15px; line-height: 1.8; }
 .searchcard { background: var(--surface); border-radius: 16px; padding: 15px 17px; margin: 10px 0; box-shadow: 0 6px 20px rgba(var(--shadow),.16); }
 .searchcard:active { transform: scale(.995); }
