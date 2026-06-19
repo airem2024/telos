@@ -156,7 +156,7 @@ window.onAndroidBack = () => {
   if (anyOverlay()) { closeOverlays(); return; }
   if (state.screen === 'diaryWrite') { if (document.querySelector('.dwpicker')) { closeDwPicker(); return; } show('diary'); return; }
   if (state.screen === 'cinemaLog') { show('cinema'); return; }
-  if (state.screen === 'cinema') { show('list'); wsend({ type: 'list_sessions' }); return; }
+  if (state.screen === 'cinema') { cinemaBack(); return; }
   if (state.screen === 'diary') { diaryBack(); return; }
   if (state.screen === 'import') show(state.importReturn || 'files');
   else if (state.screen === 'files') closeFiles();
@@ -1293,7 +1293,7 @@ function openMenu() {
   // chosen working dir / globally); only hide the items that need an existing session.
   const newSess = !state.currentSession;
   // 这些都依赖一个已存在的会话；新会话时连同「对话设置」分区标题一起隐藏（菜单设置那组对新会话仍可用）
-  ['mRegen', 'mDelete', 'mMood', 'mWake', 'mCinema', 'mMemory', 'menuSecConv'].forEach((id) => { $(id).style.display = newSess ? 'none' : ''; });
+  ['mRegen', 'mDelete', 'mMood', 'mWake', 'mCinema', 'menuSecConv'].forEach((id) => { $(id).style.display = newSess ? 'none' : ''; });
   syncMoodMenu();
   clearTimeout(mp._hideT);
   mb.classList.add('show'); mp.classList.add('show');
@@ -1401,10 +1401,15 @@ function cinSlider(label, val, min, max, step, fmt, onDone) {
   row.appendChild(r); return row;
 }
 function openCinema(s) {
+  state.cinemaReturn = state.screen;   // 从哪进来的（现在只从对话内 ⋮ 进 → 返回回到对话，不退出）
   state.cinTarget = s; state.cinAdv = false;   // 每次进来高级设置默认收起
   if (!state.cin || state.cin._sid !== s.id) state.cin = null;
   show('cinema'); renderCinema();
   wsend({ type: 'cinema_get', sessionId: s.id });
+}
+function cinemaBack() {
+  if (state.cinemaReturn === 'chat' && state.currentSession) { show('chat'); }
+  else { show('list'); wsend({ type: 'list_sessions' }); }
 }
 // 时间线：电影模式里左滑进入，单独一页，看她这段时间的记录
 function openCinemaLog() {
@@ -2596,7 +2601,7 @@ function boot() {
   // in-conversation search (Enter to search; tap blank to close)
   initChatSwipe();
   // 各独立页统一右滑返回；电影模式页另加左滑进入时间线
-  initPageSwipe('cinema', { onBack: () => { show('list'); wsend({ type: 'list_sessions' }); }, onLeft: openCinemaLog, under: 'list' });
+  initPageSwipe('cinema', { onBack: () => cinemaBack(), onLeft: openCinemaLog, under: () => (state.cinemaReturn === 'chat' && state.currentSession) ? 'chat' : 'list' });
   initPageSwipe('cinemaLog', { onBack: () => show('cinema'), under: 'cinema' });
   initPageSwipe('diary', { onBack: diaryBack });   // diary 是同屏 overview/detail 双视图，返回落点会变，不垫上一级
   initPageSwipe('diaryWrite', { onBack: () => { closeDwPicker(); show('diary'); }, under: 'diary' });
@@ -2610,8 +2615,6 @@ function boot() {
   $('discDismiss').addEventListener('click', dismissDisc);
   $('discPill').addEventListener('click', expandDisc);
   $('mRegen').addEventListener('click', () => { closeMenu(); regenerate(); });
-  $('mClaude').addEventListener('click', openClaudeMd);
-  $('mMcp').addEventListener('click', openMcp);
   $('mcpEdit').addEventListener('click', () => wsend({ type: 'mcp_config_read' }));
   $('mcpCfgSave').addEventListener('click', () => wsend({ type: 'mcp_config_write', content: $('mcpCfgText').value }));
   $('pathImport').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) { toast('读取对话列表…'); wsend({ type: 'import_list', path: p }); } });
@@ -2631,12 +2634,15 @@ function boot() {
   $('mMood').addEventListener('click', toggleMood);
   $('mWake').addEventListener('click', () => { closeMenu(); if (state.currentSession) openWakeConfig(curSess()); });
   $('mCinema').addEventListener('click', () => { closeMenu(); if (state.currentSession) openCinema(curSess()); });
-  $('mMemory').addEventListener('click', openMemory);
   $('memOn').addEventListener('click', () => { const mem = state.mem; if (!mem || !mem.available || !state.currentSession) return; const on = !mem.on; state.mem = { ...mem, on }; renderMemory(); buzz(12); wsend({ type: 'memory_set', sessionId: state.currentSession, on }); toast(on ? '已纳入长期记忆' : '已移出长期记忆'); });
   // 重命名从菜单挪到「点对话标题」
   $('chatTitle').addEventListener('click', () => { if (!state.currentSession) return; openPrompt('重命名会话', state.curTitle || '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }); });
-  $('mCopyDir').addEventListener('click', () => { closeMenu(); navigator.clipboard && navigator.clipboard.writeText(state.cwd || ''); toast('已复制目录'); });
   $('mDelete').addEventListener('click', () => { closeMenu(); openPrompt('输入「删除」确认', '', (v) => { if (v === '删除') { wsend({ type: 'delete', sessionId: state.currentSession }); goList(); } else toast('已取消'); }); });
+  // 工具类下放到「＋」面板（编辑 CLAUDE.md / 记忆 / MCP 服务器）；复制目录路径并进文件管理
+  $('atMemory').addEventListener('click', () => { closePlus(); openMemory(); });
+  $('atClaude').addEventListener('click', () => { closePlus(); openClaudeMd(); });
+  $('atMcp').addEventListener('click', () => { closePlus(); openMcp(); });
+  $('dirCopy').addEventListener('click', () => { navigator.clipboard && navigator.clipboard.writeText(state.dirPath || ''); buzz(12); toast('已复制当前路径'); });
 
   $('dirChip').addEventListener('click', openDirPicker);
   $('modeChip').addEventListener('click', openModeSheet);
@@ -2650,8 +2656,6 @@ function boot() {
   $('drUsage').addEventListener('click', () => { closeDrawer(); openUsageFull(); });
   $('drDiary').addEventListener('click', () => { closeDrawer(); openDiaryOverview(); });
   // 醒来 / 小纸条 / 日记 wiring
-  $('sessWake').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openWakeConfig(s); });
-  $('sessCinema').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openCinema(s); });
   $('cinemaBack').addEventListener('click', () => { show('list'); wsend({ type: 'list_sessions' }); });
   $('cinemaLogBack').addEventListener('click', () => show('cinema'));
   $('wkEnable').addEventListener('click', () => { if (state.wk) { state.wk.enabled = !state.wk.enabled; if (!state.wk.enabled) closeWakeEditor(); renderWakeForm(); } });
@@ -2739,7 +2743,9 @@ function boot() {
   $('sessFolder').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openFolderPicker(s); });
   $('sessRename').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('重命名会话', s.title || '', (name) => { if (name) wsend({ type: 'rename', sessionId: s.id, title: name }); }); });
   $('sessDelete').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('输入「删除」确认删除', '', (v) => { if (v === '删除') wsend({ type: 'delete', sessionId: s.id }); else toast('已取消'); }); });
-  $('promptOk').addEventListener('click', () => { const v = $('promptInput').value.trim(); const cb = state.promptCb; closeScrim('promptScrim'); state.promptCb = null; if (cb) cb(v); });
+  function savePrompt() { const v = $('promptInput').value.trim(); const cb = state.promptCb; closeScrim('promptScrim'); state.promptCb = null; if (cb) cb(v); }
+  $('promptOk').addEventListener('click', savePrompt);
+  $('promptInput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); savePrompt(); } });
   // generic ✕ / cancel buttons inside sheets
   document.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', () => { const sc = b.closest('.scrim'); if (sc) closeScrim(sc.id); }));
   document.querySelectorAll('[data-deny]').forEach((b) => b.addEventListener('click', () => closePerm(true)));

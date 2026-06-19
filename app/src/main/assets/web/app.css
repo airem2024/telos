@@ -722,6 +722,26 @@ button.model:active { opacity: .6; }
   box-shadow: 0 10px 30px rgba(var(--shadow),.18), 0 2px 6px rgba(var(--shadow),.08);
 }
 .search-box::placeholder { color: var(--muted); }
+/* 重命名/输入悬浮框：仿搜索框浮在顶部、无框线、点空白返回，只一个保存键 */
+.prompt-bar-top { position: absolute; top: 0; left: 0; right: 0; z-index: 2; padding: calc(var(--safe-top) + 16px) 16px 0; pointer-events: none; }
+.prompt-label { font-size: 13px; color: rgba(255,255,255,.92); margin: 0 6px 9px; pointer-events: none; text-shadow: 0 1px 6px rgba(0,0,0,.35); }
+.prompt-row { display: flex; align-items: flex-end; gap: 10px; }
+.prompt-box {
+  flex: 1; border: none; background: var(--surface); color: var(--text);
+  border-radius: 22px; padding: 14px 18px; font-size: 17px; outline: none; pointer-events: auto;
+  font-family: var(--ui); line-height: 1.4; resize: none; max-height: 120px;
+  box-shadow: 0 10px 30px rgba(var(--shadow),.18), 0 2px 6px rgba(var(--shadow),.08);
+}
+.prompt-box::placeholder { color: var(--muted); }
+.prompt-save {
+  pointer-events: auto; flex: none; border: none; background: var(--accent); color: #fff;
+  border-radius: 22px; padding: 0 20px; height: 50px; font-size: 16px; font-weight: 600;
+  box-shadow: 0 8px 22px rgba(var(--shadow),.18);
+}
+.prompt-save:active { background: var(--accent-press); }
+/* 文件管理：复制当前路径 */
+.dircopy { flex: none; border: none; background: var(--surface-2); color: var(--muted); border-radius: 9px; padding: 8px 10px; }
+.dircopy:active { background: var(--border); color: var(--text); }
 .search-empty { text-align: center; color: rgba(255,255,255,.85); margin-top: 12vh; font-size: 15px; line-height: 1.8; }
 .searchcard { background: var(--surface); border-radius: 16px; padding: 15px 17px; margin: 10px 0; box-shadow: 0 6px 20px rgba(var(--shadow),.16); }
 .searchcard:active { transform: scale(.995); }
