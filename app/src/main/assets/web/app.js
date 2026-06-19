@@ -87,7 +87,7 @@ function overlayUp() {
 // close path (animated, swiped, future additions) converges without per-call-site bookkeeping.
 function syncAtRoot() { try { window.Android && Android.setAtRoot((state.screen === 'list' || state.screen === 'setup') && !overlayUp()); } catch (e) {} }
 setInterval(syncAtRoot, 300);
-const SCRIMS = ['permScrim', 'modelScrim', 'promptScrim', 'toolsScrim', 'modeScrim', 'sessScrim', 'folderScrim', 'claudeScrim', 'folderActScrim', 'pathActScrim', 'mcpScrim', 'mcpCfgScrim', 'connScrim', 'wakeScrim', 'stickyScrim', 'compactScrim'];
+const SCRIMS = ['permScrim', 'modelScrim', 'promptScrim', 'toolsScrim', 'modeScrim', 'sessScrim', 'folderScrim', 'claudeScrim', 'folderActScrim', 'pathActScrim', 'mcpScrim', 'mcpCfgScrim', 'memScrim', 'connScrim', 'wakeScrim', 'stickyScrim', 'compactScrim'];
 const DRAG_SCRIMS = ['modelScrim', 'toolsScrim', 'modeScrim', 'claudeScrim', 'mcpCfgScrim', 'compactScrim'];
 function anyOverlay() { return SCRIMS.some((s) => $(s).classList.contains('show')) || $('menuPop').classList.contains('show'); }
 function openScrim(id) {
@@ -425,6 +425,7 @@ function handle(m) {
     case 'wakeup_state': onWakeState(m); break;
     case 'cinema_state': onCinemaState(m); break;
     case 'mood': if (m.sessionId === state.currentSession) { state.mood = m.mood || null; updateHeader(); syncMoodMenu(); } break;
+    case 'memory': onMemory(m); break;
     case 'cinema_log':
       if (state.screen === 'cinemaLog' && state.cinTarget && m.sessionId === state.cinTarget.id) renderCinemaLog(m);
       break;
@@ -1291,7 +1292,8 @@ function openMenu() {
   // CLAUDE.md / model / MCP / copy-dir work for a brand-new session too (they act on the
   // chosen working dir / globally); only hide the items that need an existing session.
   const newSess = !state.currentSession;
-  ['mRegen', 'mRename', 'mDelete', 'mMood'].forEach((id) => { $(id).style.display = newSess ? 'none' : ''; });
+  // 这些都依赖一个已存在的会话；新会话时连同「对话设置」分区标题一起隐藏（菜单设置那组对新会话仍可用）
+  ['mRegen', 'mDelete', 'mMood', 'mWake', 'mCinema', 'mMemory', 'menuSecConv'].forEach((id) => { $(id).style.display = newSess ? 'none' : ''; });
   syncMoodMenu();
   clearTimeout(mp._hideT);
   mb.classList.add('show'); mp.classList.add('show');
@@ -1320,6 +1322,45 @@ function closeMenu() {
 }
 
 function buzz(ms) { if (!P('haptics')) return; try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} }
+
+/* ============ 记忆（Mnemosyne 长期记忆）============ */
+// 当前对话对象：定时唤醒/电影模式两个现成页面都吃一个 session 对象（要 id/title，唤醒还看 wakeAt）。
+// 在对话里没有列表项时兜一个最小对象，wakeAt 仅作初值、随后 wakeup_get 会带回权威状态。
+function curSess() {
+  return (state.sessions || []).find((x) => x.id === state.currentSession)
+    || { id: state.currentSession, title: state.curTitle || '', wakeAt: 0 };
+}
+function openMemory() {
+  closeMenu();
+  if (!state.currentSession) return;
+  $('memSub').textContent = state.curTitle || '';
+  state.mem = null; renderMemory();          // 加载态
+  openScrim('memScrim');
+  wsend({ type: 'memory_get', sessionId: state.currentSession });
+}
+function onMemory(m) {
+  if (m.sessionId && m.sessionId !== state.currentSession) return;
+  state.mem = { available: !!m.available, on: !!m.on, stats: m.stats || null };
+  renderMemory();
+}
+function renderMemory() {
+  const sw = $('memOn'), note = $('memNote'), box = $('memStats'); if (!sw) return;
+  const mem = state.mem;
+  if (!mem) { sw.classList.remove('on'); box.innerHTML = '<div class="memstat"><div class="mslab">读取中…</div></div>'; box.classList.add('off'); return; }
+  if (!mem.available) {
+    sw.classList.remove('on'); sw.disabled = true; sw.style.opacity = '.4';
+    note.textContent = '这台服务器还没装长期记忆模块（Mnemosyne），暂时开不了。';
+    box.innerHTML = ''; box.classList.add('off'); return;
+  }
+  sw.disabled = false; sw.style.opacity = '';
+  note.textContent = '开启后，这个对话会自动归档进茜茜的长期记忆，压缩后也能用记忆接回状态。关掉只是不再自动归档／恢复，记忆工具本身一直都在。';
+  sw.classList.toggle('on', mem.on);
+  const s = mem.stats || {}; let mems = 0; if (s.memories) for (const k in s.memories) mems += (s.memories[k].count || 0);
+  const turns = s.dialog_turns || 0;
+  box.innerHTML = '<div class="memstat"><div class="msnum">' + mems + '</div><div class="mslab">精炼记忆</div></div>'
+    + '<div class="memstat"><div class="msnum">' + turns + '</div><div class="mslab">归档对话（轮）</div></div>';
+  box.classList.toggle('off', !mem.on);
+}
 
 /* ============ 醒来 / 小纸条 / 日记 ============ */
 function pad2(n) { return String(n).padStart(2, '0'); }
@@ -2588,7 +2629,12 @@ function boot() {
   $('compactSave').addEventListener('click', () => { setPref('compactPrompt', $('compactText').value); closeScrim('compactScrim'); toast('压缩提示词已保存'); });
   $('mModel').addEventListener('click', () => { state.modelCtx = null; state.modelFam = ''; openModelSheet(); });
   $('mMood').addEventListener('click', toggleMood);
-  $('mRename').addEventListener('click', () => { closeMenu(); openPrompt('重命名会话', state.curTitle || '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }); });
+  $('mWake').addEventListener('click', () => { closeMenu(); if (state.currentSession) openWakeConfig(curSess()); });
+  $('mCinema').addEventListener('click', () => { closeMenu(); if (state.currentSession) openCinema(curSess()); });
+  $('mMemory').addEventListener('click', openMemory);
+  $('memOn').addEventListener('click', () => { const mem = state.mem; if (!mem || !mem.available || !state.currentSession) return; const on = !mem.on; state.mem = { ...mem, on }; renderMemory(); buzz(12); wsend({ type: 'memory_set', sessionId: state.currentSession, on }); toast(on ? '已纳入长期记忆' : '已移出长期记忆'); });
+  // 重命名从菜单挪到「点对话标题」
+  $('chatTitle').addEventListener('click', () => { if (!state.currentSession) return; openPrompt('重命名会话', state.curTitle || '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }); });
   $('mCopyDir').addEventListener('click', () => { closeMenu(); navigator.clipboard && navigator.clipboard.writeText(state.cwd || ''); toast('已复制目录'); });
   $('mDelete').addEventListener('click', () => { closeMenu(); openPrompt('输入「删除」确认', '', (v) => { if (v === '删除') { wsend({ type: 'delete', sessionId: state.currentSession }); goList(); } else toast('已取消'); }); });
 

@@ -200,14 +200,18 @@
   <!-- chat ⋮ dropdown menu -->
   <div class="menuback" id="menuback"></div>
   <div class="menupop" id="menuPop">
+    <div class="menusec">菜单设置</div>
     <button class="mitem" id="mRegen">重新生成回复 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
     <button class="mitem" id="mModel">更换模型 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg></button>
     <button class="mitem" id="mClaude">编辑 CLAUDE.md <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg></button>
     <button class="mitem" id="mMcp">MCP 服务器 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></button>
-    <button class="mitem" id="mMood">情绪 <span class="mooddot" id="mMoodDot"></span></button>
-    <button class="mitem" id="mRename">重命名 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button>
     <button class="mitem" id="mCopyDir">复制目录路径 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
-    <button class="mitem danger" id="mDelete">删除 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+    <div class="menusec" id="menuSecConv">对话设置</div>
+    <button class="mitem" id="mMood">情绪 <span class="mooddot" id="mMoodDot"></span></button>
+    <button class="mitem" id="mWake">定时唤醒 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg></button>
+    <button class="mitem" id="mCinema">电影模式 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="16" rx="2"/><line x1="8" y1="4" x2="8" y2="20"/><line x1="16" y1="4" x2="16" y2="20"/><line x1="2.5" y1="12" x2="21.5" y2="12"/></svg></button>
+    <button class="mitem" id="mMemory">记忆 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></button>
+    <button class="mitem danger menusep" id="mDelete">删除 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
   </div>
 
   <!-- tools sheet (two levels) -->
@@ -296,6 +300,18 @@
       <div class="sheetbody">
         <div id="mcpList"></div>
         <button class="btn btn-ghost" id="mcpEdit" style="margin-top:10px;">编辑本地 MCP 配置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 长期记忆（Mnemosyne）：本对话开关 + 统计 -->
+  <div class="scrim" id="memScrim">
+    <div class="sheet">
+      <div class="sheethdr nodrag"><div class="ptitle">记忆</div><div class="psub" id="memSub"></div></div>
+      <div class="sheetbody">
+        <div class="wkrow"><span>本对话纳入长期记忆</span><button class="switch" id="memOn"><span class="knob"></span></button></div>
+        <div class="memnote" id="memNote">开启后，这个对话会自动归档进茜茜的长期记忆，压缩后也能用记忆接回状态。关掉只是不再自动归档／恢复，记忆工具本身一直都在。</div>
+        <div class="memstats" id="memStats"></div>
       </div>
     </div>
   </div>
