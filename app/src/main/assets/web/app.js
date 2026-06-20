@@ -1205,14 +1205,16 @@ function managerUpload(fileList) {
 }
 
 /* ============ prompt sheet ============ */
+function syncPromptGo() { const inp = $('promptInput'); $('promptOk').classList.toggle('show', !!inp.value.trim() || state.promptAllowEmpty); }   // 有字（或允许空）才显 →
 function openPrompt(title, value, cb, placeholder, opts) {
   opts = opts || {};
   const danger = opts.danger !== undefined ? opts.danger : /删除/.test(title || '');   // 删除类 → 红色 → 键、要真打「删除」
   const inp = $('promptInput'), btn = $('promptOk');
   inp.value = value || '';
   inp.placeholder = placeholder || (danger ? '输入“删除”确认删除' : title) || '';   // 提示放进框里
-  btn.classList.toggle('danger', danger);   // → 键：危险红 / 普通强调色，常驻在框内右侧
-  state.promptCb = cb;
+  btn.classList.toggle('danger', danger);   // → 键：危险红 / 普通强调色（仅箭头、无底纹）
+  state.promptCb = cb; state.promptAllowEmpty = !!opts.allowEmpty;
+  syncPromptGo();
   openScrim('promptScrim');
   setTimeout(() => { inp.focus(); inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, window.innerHeight * 0.38) + 'px'; }, 100);
 }
@@ -1232,24 +1234,22 @@ function doCompact(extra) {
 function togglePlus() { if (state.plusOpen) closePlus(); else openPlus(); }
 function openPlus() {
   $('composer').blur();
-  const dock = $('dock'), panel = $('plusPanel'), pb = $('plusBack');
+  const panel = $('plusPanel'), pb = $('plusBack');
   clearTimeout(pb._hideT); pb.classList.add('show'); requestAnimationFrame(() => pb.classList.add('in'));
+  // 面板是悬浮的（绝对定位浮在输入框上方）：只淡入面板，不动 dock，所以不顶记录、不抬输入框
   panel.style.display = 'block';
-  const h = panel.offsetHeight + 8;                 // tools height + the margin gap
-  state.plusH = h; state.plusOpen = true;
-  dock.style.transition = 'none'; dock.style.transform = 'translateY(' + h + 'px)';  // start with tools off-screen, input at the bottom
-  requestAnimationFrame(() => { dock.style.transition = 'transform .27s cubic-bezier(.32,.72,0,1)'; dock.style.transform = 'translateY(0)'; });
+  state.plusOpen = true;
+  requestAnimationFrame(() => panel.classList.add('in'));
   $('plusBtn').classList.add('open');
 }
 function closePlus() {
   if (!state.plusOpen) return;
-  const dock = $('dock'), panel = $('plusPanel'), pb = $('plusBack');
+  const panel = $('plusPanel'), pb = $('plusBack');
   pb.classList.remove('in'); pb._hideT = setTimeout(() => pb.classList.remove('show'), 240);
   state.plusOpen = false;
-  dock.style.transition = 'transform .27s cubic-bezier(.32,.72,0,1)';
-  dock.style.transform = 'translateY(' + (state.plusH || 0) + 'px)';
+  panel.classList.remove('in');
   $('plusBtn').classList.remove('open');
-  setTimeout(() => { if (!state.plusOpen) { panel.style.display = 'none'; dock.style.transition = 'none'; dock.style.transform = ''; } }, 290);
+  setTimeout(() => { if (!state.plusOpen) panel.style.display = 'none'; }, 260);
 }
 
 /* ============ expand button visibility ============ */
@@ -1482,7 +1482,7 @@ function cinToggle(label, on, onClick) {
 }
 // 披露式设置行：平时只显「标签 + 当前值」，点一下露出**数字输入框**单独调这一项（一次只展开一个）
 // dec=true 收小数（如花费 $0.5）；min/max 夹紧；回车或失焦提交。
-function cinSet(key, label, valText, min, max, dec, fmt, onDone, inputVal, unit) {
+function cinSet(key, label, valText, min, max, step, fmt, onDone, inputVal) {
   const open = state.cinOpen === key;
   const wrap = el('div', 'cin-set' + (open ? ' open' : ''));
   const row = el('div', 'setitem cin-setrow');
@@ -1493,15 +1493,18 @@ function cinSet(key, label, valText, min, max, dec, fmt, onDone, inputVal, unit)
   row.addEventListener('click', () => { state.cinOpen = open ? null : key; renderCinema(); });
   wrap.appendChild(row);
   if (open) {
-    // 底纹滑动条：满宽、底纹色、无框，值显示在里面，左右滑动改值（range 透明覆盖在上、负责拖动）
+    // 底纹滑动条：底纹填充从左往右长（=进度），数字钉在填充最右边、跟着一起移动；range 透明覆盖在上负责拖动
+    const dec = step < 1;
     const sw = el('div', 'cin-slidewrap');
+    const fill = el('div', 'cin-slidefill');
+    const v = el('span', 'cin-slideval'); fill.appendChild(v);
     const r = document.createElement('input');
-    r.type = 'range'; r.className = 'cin-slide';
-    r.min = min; r.max = max; r.step = dec ? 0.5 : 1; r.value = inputVal;
-    const v = el('span', 'cin-slideval'); v.textContent = fmt(dec ? parseFloat(inputVal) : parseInt(inputVal, 10));
-    r.addEventListener('input', () => { const val = dec ? parseFloat(r.value) : parseInt(r.value, 10); v.textContent = fmt(val); sv.textContent = fmt(val); });
+    r.type = 'range'; r.className = 'cin-slide'; r.min = min; r.max = max; r.step = step; r.value = inputVal;
+    const paint = (val) => { fill.style.width = (max > min ? (val - min) / (max - min) * 100 : 0) + '%'; v.textContent = fmt(val); };
+    paint(dec ? parseFloat(inputVal) : parseInt(inputVal, 10));
+    r.addEventListener('input', () => { const val = dec ? parseFloat(r.value) : parseInt(r.value, 10); paint(val); sv.textContent = fmt(val); });
     r.addEventListener('change', () => { onDone(dec ? parseFloat(r.value) : parseInt(r.value, 10)); });
-    sw.appendChild(r); sw.appendChild(v);
+    sw.appendChild(fill); sw.appendChild(r);
     wrap.appendChild(sw);
   }
   return wrap;
@@ -1602,14 +1605,14 @@ function renderCinema() {
   if (state.cinAdv) {
     const cap = (typeof c.maxCostPer5h === 'number') ? c.maxCostPer5h : 1.5; // 0=关熔断（不限）
     body.appendChild(cinGroup('节奏',
-      cinSet('fg', '最短间隔（你在看时）', fmtDur(c.fgIntervalSec || 180), 30, 1800, false, fmtDur, (v) => cinSend({ fgIntervalSec: v }), c.fgIntervalSec || 180, '秒'),
-      cinSet('bg', '离开后最短间隔', fmtDur(c.bgIntervalSec || 600), 60, 3600, false, fmtDur, (v) => cinSend({ bgIntervalSec: v }), c.bgIntervalSec || 600, '秒'),
+      cinSet('fg', '最短间隔（你在看时）', fmtDur(c.fgIntervalSec || 180), 30, 1800, 30, fmtDur, (v) => cinSend({ fgIntervalSec: v }), c.fgIntervalSec || 180),
+      cinSet('bg', '离开后最短间隔', fmtDur(c.bgIntervalSec || 600), 60, 3600, 30, fmtDur, (v) => cinSend({ bgIntervalSec: v }), c.bgIntervalSec || 600),
       cinToggle('离开后放慢节奏', !!c.diffRate, () => cinSend({ diffRate: !c.diffRate }))));
     body.appendChild(cinGroup('用量与刹车',
-      cinSet('cost', '花费上限（每 5 小时）', cap > 0 ? '$' + cap.toFixed(1) : '不限', 0, 50, true,
-        (v) => v > 0 ? '$' + (+v).toFixed(1) : '不限', (v) => cinSend({ maxCostPer5h: v }), cap, '美元 · 0=不限'),
-      cinSet('wakes', '每 5 小时最多醒几次', (c.maxWakesPer5h || 30) + ' 次', 5, 120, false, (v) => v + ' 次', (v) => cinSend({ maxWakesPer5h: v }), c.maxWakesPer5h || 30, '次'),
-      cinSet('pause', '额度到多少 % 自动停', (c.autoPauseUtil || 85) + ' %', 50, 100, false, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v }), c.autoPauseUtil || 85, '%')));
+      cinSet('cost', '花费上限（每 5 小时）', cap > 0 ? '$' + cap.toFixed(1) : '不限', 0, 50, 0.5,
+        (v) => v > 0 ? '$' + (+v).toFixed(1) : '不限', (v) => cinSend({ maxCostPer5h: v }), cap),
+      cinSet('wakes', '每 5 小时最多醒几次', (c.maxWakesPer5h || 30) + ' 次', 5, 120, 5, (v) => v + ' 次', (v) => cinSend({ maxWakesPer5h: v }), c.maxWakesPer5h || 30),
+      cinSet('pause', '额度到多少 % 自动停', (c.autoPauseUtil || 85) + ' %', 50, 100, 1, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v }), c.autoPauseUtil || 85)));
     body.appendChild(cinGroup('模型', cinModelRow(c)));
   }
   renderCinReceipt();
@@ -2740,11 +2743,11 @@ function boot() {
   $('pathImport').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) { toast('读取对话列表…'); wsend({ type: 'import_list', path: p }); } });
   $('pathDownload').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) fmDownload(p); });
   $('pathAttach').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) fmAttach(p); });
-  $('pathRename').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) openPrompt('重命名', p.split('/').pop(), (name) => { if (name) wsend({ type: 'rename_path', old: p, name, dir: state.dirPath }); }); });
+  $('pathRename').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) openPrompt('重命名', '', (name) => { if (name) wsend({ type: 'rename_path', old: p, name, dir: state.dirPath }); }, p.split('/').pop()); });
   $('pathDelete').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) openPrompt('输入「删除」确认删除「' + p.split('/').pop() + '」（不可恢复）', '', (v) => { if (v === '删除') wsend({ type: 'delete_path', path: p, dir: state.dirPath }); else toast('已取消'); }); });
   $('folderLeft').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) wsend({ type: 'move_folder', name: f, dir: 'left' }); });
   $('folderRight').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) wsend({ type: 'move_folder', name: f, dir: 'right' }); });
-  $('folderRename').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) openPrompt('重命名文件夹', f, (name) => { if (name && name !== f) wsend({ type: 'rename_folder', old: f, name }); }); });
+  $('folderRename').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) openPrompt('重命名文件夹', '', (name) => { if (name && name !== f) wsend({ type: 'rename_folder', old: f, name }); }, f); });
   $('folderDelete').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) openPrompt('输入「删除」确认删除文件夹（里面的会话保留、只移出）', '', (v) => { if (v === '删除') wsend({ type: 'delete_folder', name: f }); else toast('已取消'); }); });
   $('folderDeleteAll').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) openPrompt('输入「删除」连同「' + f + '」里的所有对话一起删除（不可恢复）', '', (v) => { if (v === '删除') wsend({ type: 'delete_folder', name: f, withSessions: true }); else toast('已取消'); }); });
   $('claudeSave').addEventListener('click', saveClaudeMd);
@@ -2768,7 +2771,7 @@ function boot() {
   $('memRecoverBtn').addEventListener('click', () => { if (!state.currentSession) return; buzz(12); wsend({ type: 'memory_recover', sessionId: state.currentSession }); });
   $('memMgrOpen').addEventListener('click', () => { closeScrim('memScrim'); openMemMgr(); });
   // 重命名从菜单挪到「点对话标题」
-  $('chatTitle').addEventListener('click', () => { if (!state.currentSession) return; openPrompt('重命名会话', state.curTitle || '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }); });
+  $('chatTitle').addEventListener('click', () => { if (!state.currentSession) return; openPrompt('重命名会话', '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }, state.curTitle || ''); });
   $('chatSub').addEventListener('click', () => { const cs = $('chatSub'); if (cs.classList.contains('mood')) cs.classList.toggle('expanded'); });   // 点心情展开/收起看全
   $('mDelete').addEventListener('click', () => { closeMenu(); openPrompt('输入「删除」确认', '', (v) => { if (v === '删除') { wsend({ type: 'delete', sessionId: state.currentSession }); goList(); } else toast('已取消'); }); });
   // 工具类下放到「＋」面板（编辑 CLAUDE.md / 记忆 / MCP 服务器）；复制目录路径并进文件管理
@@ -2874,16 +2877,17 @@ function boot() {
   $('selDelete').addEventListener('click', deleteSelected);
   $('sessPin').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) togglePin(s); });
   $('sessFolder').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openFolderPicker(s); });
-  $('sessRename').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('重命名会话', s.title || '', (name) => { if (name) wsend({ type: 'rename', sessionId: s.id, title: name }); }); });
+  $('sessRename').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('重命名会话', '', (name) => { if (name) wsend({ type: 'rename', sessionId: s.id, title: name }); }, s.title || ''); });
   $('sessDelete').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('输入「删除」确认删除', '', (v) => { if (v === '删除') wsend({ type: 'delete', sessionId: s.id }); else toast('已取消'); }); });
   function savePrompt() {
     const inp = $('promptInput'); const raw = inp.value.trim();
+    if (!raw && !state.promptAllowEmpty) return;     // 空内容不提交（→ 本就藏着）
     const cb = state.promptCb;
     closeScrim('promptScrim'); state.promptCb = null;
     if (cb) cb(raw);                       // 回传输入值；删除类由各 cb 自行校验 === '删除'
   }
   $('promptOk').addEventListener('click', savePrompt);
-  $('promptInput').addEventListener('input', () => { const inp = $('promptInput'); inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, window.innerHeight * 0.38) + 'px'; });
+  $('promptInput').addEventListener('input', () => { const inp = $('promptInput'); syncPromptGo(); inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, window.innerHeight * 0.38) + 'px'; });
   $('promptInput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); savePrompt(); } });
   // generic ✕ / cancel buttons inside sheets
   document.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', () => { const sc = b.closest('.scrim'); if (sc) closeScrim(sc.id); }));
