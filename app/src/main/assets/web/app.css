@@ -747,6 +747,15 @@ button.model:active { opacity: .6; }
   box-shadow: 0 10px 30px rgba(var(--shadow),.18), 0 2px 6px rgba(var(--shadow),.08);
 }
 .search-box::placeholder { color: var(--muted); }
+.search-row { display: flex; align-items: center; gap: 8px; pointer-events: auto; }
+.search-row .search-box { flex: 1; width: auto; }
+.searchmode { flex: none; font-size: 12.5px; padding: 8px 13px; border-radius: 16px; background: var(--surface); color: var(--muted); white-space: nowrap; pointer-events: auto; box-shadow: 0 6px 18px rgba(var(--shadow),.14); }
+.searchmode.sem { background: var(--accent); color: #fff; }
+/* 全文搜索结果：成对 U/A */
+.dlgcard .dlg-turn { display: flex; gap: 8px; font-size: 13.5px; line-height: 1.45; padding: 3px 0; color: var(--muted); }
+.dlgcard .dlg-turn.hit { color: var(--text); }
+.dlgcard .dlg-who { flex: none; color: var(--muted); font-size: 12px; min-width: 2.8em; }
+.dlgcard .dlg-text { flex: 1; min-width: 0; word-break: break-word; }
 /* 重命名/输入悬浮框：仿搜索框浮在顶部、无框线、点空白返回，只一个保存键 */
 /* 重命名 / 确认删除：对齐对话输入框的方圆框；操作键在框下方、只有框里有字才出现 */
 .prompt-float { position: absolute; top: calc(var(--safe-top) + 56px); left: 14px; right: 14px; z-index: 2;
@@ -895,8 +904,7 @@ body.sysfont {
 .cin-numrow { display: flex; align-items: center; gap: 10px; }
 .cin-numrow .cin-setlab { font-size: 16px; flex: 1; }
 .cin-numval { font-size: 14px; color: var(--muted); white-space: nowrap; }
-.cin-numinp { border: none; background: transparent; color: var(--accent); font: inherit; text-align: right; padding: 0 1px; outline: none; }
-.cin-numinp:focus { border-bottom: 1.5px solid var(--accent); }
+.cin-numinp { border: none; background: transparent; color: var(--muted); font: inherit; text-align: right; padding: 0 1px; outline: none; }
 .cin-numunit { color: var(--muted); }
 /* 时间线页（中性、简洁） */
 .cl-day { text-align: center; color: var(--muted); font-size: 12px; margin: 20px 0 8px; letter-spacing: .5px; }

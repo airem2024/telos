@@ -440,6 +440,7 @@ function handle(m) {
     case 'memory': onMemory(m); break;
     case 'memory_recover_armed': if (m.sessionId === state.currentSession) { closeScrim('memScrim'); toast('记忆已就位 · 下条消息会带回'); } break;
     case 'memory_list': onMemoryList(m); break;
+    case 'dialog_search': onDialogSearch(m); break;
     case 'cinema_log':
       if (state.screen === 'cinemaLog' && state.cinTarget && m.sessionId === state.cinTarget.id) renderCinemaLog(m);
       break;
@@ -877,6 +878,28 @@ function maybeAutoOpen() {
   const s = (state.sessions || []).find((x) => x.id === sid);
   if (s) openSession(s);
 }
+/* ---- 本地历史缓存（IndexedDB）：大对话秒开 + 离线翻看；任一环出错都当没缓存、退回全量 ---- */
+let _idbP = null;
+function idbDB() {
+  if (_idbP) return _idbP;
+  _idbP = new Promise((res) => {
+    try {
+      const rq = indexedDB.open('telos', 1);
+      rq.onupgradeneeded = () => { try { rq.result.createObjectStore('hist'); } catch (e) {} };
+      rq.onsuccess = () => res(rq.result); rq.onerror = () => res(null);
+    } catch (e) { res(null); }
+  });
+  return _idbP;
+}
+function idbGet(key) {
+  return idbDB().then((db) => db && new Promise((res) => {
+    try { const r = db.transaction('hist', 'readonly').objectStore('hist').get(key); r.onsuccess = () => res(r.result || null); r.onerror = () => res(null); }
+    catch (e) { res(null); }
+  })).catch(() => null);
+}
+function idbPut(key, val) {
+  return idbDB().then((db) => { if (db) try { db.transaction('hist', 'readwrite').objectStore('hist').put(val, key); } catch (e) {} }).catch(() => {});
+}
 function openSession(s) {
   LS.lastSid = s.id; // 客户端缓存「上一个打开的对话」，供「进入应用自动进入上个对话」用（服务端按最新回复会乱，故存本地）
   // re-entering the session whose turn is still running → keep the live view (message +
@@ -888,8 +911,16 @@ function openSession(s) {
   // [1m] 这类运行时变体也存在 pref 里，重开对话不会掉回 200K 底座被自动 compact。
   state.model = LS.model; state.effort = LS.effort; state.modelMine = false; state.mode = LS.mode; applyMode();
   clearThread(); updateHeader(); show('chat'); removeSuggestions();
+  // 本地缓存优先：先秒显缓存（若有），再带版本号去同步；文件没变→服务端回 unchanged、不重渲也不解析 36MB。
   // if not authed yet (slow/just-reconnecting), the send is dropped — remember to retry on auth_ok
-  state.pendingHistory = wsend({ type: 'get_history', sessionId: s.id }) ? null : s.id;
+  state._histVer = null;
+  idbGet('h:' + s.id).then((cached) => {
+    if (state.currentSession !== s.id) return;
+    if (cached && cached.items) { try { renderHistory({ ...cached, sessionId: s.id, _cache: true }); } catch (e) {} state._histVer = cached.ver || null; }
+  }).catch(() => {}).then(() => {
+    if (state.currentSession !== s.id) return;
+    state.pendingHistory = wsend({ type: 'get_history', sessionId: s.id, knownVer: state._histVer }) ? null : s.id;
+  });
   wsend({ type: 'cinema_get', sessionId: s.id }); // 知道这个对话在不在守夜（列表行「时间流动中」+ 标题旁「输入中」）
   state.stickyPopupFor = s.id;
   state.pendingSticky = wsend({ type: 'sticky_get', sessionId: s.id }) ? null : s.id; // show 小纸条 popup if any unread
@@ -902,6 +933,7 @@ function newSession() {
 }
 function goList() { if (P('interruptOnLeave') && state.busy) wsend({ type: 'interrupt' }); show('list'); wsend({ type: 'list_sessions' }); }
 function renderHistory(m) {
+  if (m.unchanged) { if (m.sessionId === state.currentSession) { scrollThread(); tryPendingJump(); } return; }   // 文件没变：缓存即最新、已渲染，不重渲
   clearThread(); removeSuggestions();
   if (m.cwd) { state.cwd = m.cwd; } if (m.title) state.curTitle = m.title; updateHeader();
   // 切到这个对话记住的模型/effort（没记过就是 ''=默认）；用户手快已经先选了的话（modelMine）不抢
@@ -938,6 +970,9 @@ function renderHistory(m) {
     } else if (it.kind === 'tool_result') { if (group) { const t = group.tools.find((x) => x.id === it.id); if (t) { t.isError = it.isError; t.content = it.content; } } }
   });
   scrollThread();
+  tryPendingJump();   // 搜索结果点进来的 → 滚到命中那条
+  // bridge 全量历史 → 存本地缓存供下次秒开（缓存自身渲染时 _cache=true，跳过避免回写）
+  if (!m._cache && m.sessionId && m.items) idbPut('h:' + m.sessionId, { ver: m.ver, items: m.items, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
 }
 
 /* ============ suggestions ============ */
@@ -1493,7 +1528,7 @@ function cinSet(key, label, unit, dispVal, min, max, dec, onCommit) {
   const inp = document.createElement('input');
   inp.className = 'cin-numinp'; inp.type = 'text'; inp.inputMode = dec ? 'decimal' : 'numeric'; inp.setAttribute('enterkeyhint', 'done');
   const fmtNum = (v) => dec ? String(+(+v).toFixed(1)).replace(/\.0$/, '') : String(v | 0);   // 整数不显小数点
-  const size = () => { inp.style.width = Math.max(1, inp.value.length) + 'ch'; };
+  const size = () => { inp.style.width = (Math.max(1, inp.value.length) + 0.6) + 'ch'; };   // +0.6ch 余量，单字符「0」不会被截掉右半
   inp.value = fmtNum(dispVal); size();
   const u = el('span', 'cin-numunit'); u.textContent = ' ' + unit;
   inp.addEventListener('input', size);
@@ -2289,6 +2324,8 @@ function openSearch() {
   ov.style.pointerEvents = 'auto';
   requestAnimationFrame(() => setSearchProgress(1, true));
   state.searchActive = true;
+  const chip = $('searchMode');   // 模式徽标只在全库搜索(list)显示；对话内搜不显
+  if (chip) { const isList = state.searchScope === 'list'; chip.style.display = isList ? '' : 'none'; chip.textContent = state.searchMode === 'sem' ? '语义' : '普通'; chip.classList.toggle('sem', state.searchMode === 'sem'); }
   syncAtRoot();
   $('usageStrip').classList.remove('open'); // collapse the session detail each open
   renderUsageStrip(); reqUsage(); // refresh the usage strip every time search opens
@@ -2325,20 +2362,15 @@ function runSearch(raw) {
   const q = (raw || '').trim();
   const results = $('searchResults'); results.innerHTML = '';
   if (!q) return;
-  const ql = q.toLowerCase(); let n = 0;
   if (state.searchScope === 'list') {
-    // search the session list (title + preview); tap a result to open it
-    (state.sessions || []).forEach((s) => {
-      const hay = ((s.title || '') + '　' + (s.preview || '')).trim();
-      if (!hay.toLowerCase().includes(ql)) return;
-      n++;
-      const card = el('div', 'searchcard');
-      const title = el('div', 'sc-title'); title.textContent = s.title || '未命名会话'; card.appendChild(title);
-      const snip = el('div', 'sc-snippet'); snip.appendChild(hlSnippet(hay, q)); card.appendChild(snip);
-      card.addEventListener('click', () => { closeSearch(); setTimeout(() => openSession(s), 220); });
-      results.appendChild(card);
-    });
-  } else {
+    // 全文对话搜索：默认普通(关键词 LIKE)，双击搜索栏切语义；结果成对 U/A、点击跳本地对话
+    state._searchQ = q;
+    results.innerHTML = '<div class="search-empty">搜索中…</div>';
+    wsend({ type: 'dialog_search', q, mode: state.searchMode || 'kw' });
+    return;
+  }
+  const ql = q.toLowerCase(); let n = 0;
+  {
     [...$('thread').querySelectorAll('.msg')].forEach((msg) => {
       const text = (msg.textContent || '').replace(/\s+/g, ' ').trim();
       if (!text || !text.toLowerCase().includes(ql)) return;
@@ -2356,7 +2388,52 @@ function runSearch(raw) {
   }
   if (!n) results.innerHTML = '<div class="search-empty">没有找到「' + q.replace(/</g, '&lt;') + '」</div>';
 }
-function openListSearch() { state.searchScope = 'list'; openSearch(); }
+function openListSearch() { state.searchScope = 'list'; state.searchMode = 'kw'; openSearch(); }
+function setSearchMode(m) {
+  state.searchMode = m === 'sem' ? 'sem' : 'kw';
+  const chip = $('searchMode'); if (chip) { chip.textContent = state.searchMode === 'sem' ? '语义' : '普通'; chip.classList.toggle('sem', state.searchMode === 'sem'); }
+  const q = $('searchInput').value.trim(); if (q) runSearch(q);
+}
+function onDialogSearch(m) {
+  if (!searchOpen() || state.searchScope !== 'list') return;
+  if ((m.q || '') !== (state._searchQ || '')) return;   // 旧请求回包，丢弃
+  renderDialogResults(m.hits || [], m.q || '');
+}
+function renderDialogResults(hits, q) {
+  const results = $('searchResults'); if (!results) return; results.innerHTML = '';
+  if (!hits.length) { results.innerHTML = '<div class="search-empty">没有找到「' + esc(q) + '」</div>'; return; }
+  for (const h of hits) {
+    const card = el('div', 'searchcard dlgcard');
+    if (h.session_title) { const tt = el('div', 'sc-title'); tt.textContent = h.session_title; card.appendChild(tt); }
+    for (const t of (h.context || [])) {
+      const isHit = t.turn_index === h.hit_index;
+      const row = el('div', 'dlg-turn' + (isHit ? ' hit' : ''));
+      const who = el('span', 'dlg-who'); who.textContent = (t.role === 'user' ? '用户' : '茜茜') + (t.kind && t.kind !== 'chat' ? '·' + t.kind : '');
+      const body = el('span', 'dlg-text'); const txt = (t.content || '').replace(/\s+/g, ' ').trim();
+      if (isHit && q) body.appendChild(hlSnippet(txt, q)); else body.textContent = txt.slice(0, 140);
+      row.appendChild(who); row.appendChild(body); card.appendChild(row);
+    }
+    const sid = h.cc_session_id;
+    const hitText = ((h.context || []).find((t) => t.turn_index === h.hit_index) || {}).content || '';
+    if (sid) card.addEventListener('click', () => jumpToDialog(sid, hitText));
+    results.appendChild(card);
+  }
+}
+function jumpToDialog(sid, hitText) {
+  closeSearch();
+  state.pendingJump = (hitText || '').replace(/\s+/g, ' ').trim().slice(0, 24);
+  const s = (state.sessions || []).find((x) => x.id === sid) || { id: sid };
+  setTimeout(() => openSession(s), 240);
+}
+function tryPendingJump() {
+  if (!state.pendingJump) return;
+  const needle = state.pendingJump.slice(0, 14); state.pendingJump = null;
+  if (!needle) return;
+  setTimeout(() => {
+    const hit = [...$('thread').querySelectorAll('.msg')].find((m) => (m.textContent || '').replace(/\s+/g, ' ').includes(needle));
+    if (hit) jumpToMessage(hit);
+  }, 140);
+}
 
 /* ============ import: pick which conversations ============ */
 function openImportScreen(path, items) {
@@ -2734,6 +2811,10 @@ function boot() {
   initPageSwipe('settings', { onBack: () => show('list'), under: 'list' });
   initPageSwipe('setSub', { onBack: () => show('settings'), under: 'settings' });
   $('searchInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('searchInput').blur(); runSearch(e.target.value); } });
+  let _searchDeb;
+  $('searchInput').addEventListener('input', (e) => { clearTimeout(_searchDeb); const v = e.target.value; _searchDeb = setTimeout(() => runSearch(v), 320); });   // 防抖实时搜
+  $('searchMode').addEventListener('click', () => setSearchMode(state.searchMode === 'sem' ? 'kw' : 'sem'));   // 点徽标切换
+  $('searchBarTop').addEventListener('dblclick', () => { if (state.searchScope === 'list') setSearchMode(state.searchMode === 'sem' ? 'kw' : 'sem'); });   // 双击搜索栏切语义
   $('searchOverlay').addEventListener('click', (e) => { if (e.target === $('searchOverlay') || e.target === $('searchResults')) closeSearch(); });
   $('plusBack').addEventListener('click', closePlus);
   $('discDismiss').addEventListener('click', dismissDisc);
