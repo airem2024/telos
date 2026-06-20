@@ -1036,26 +1036,38 @@ function renderInitWindow(m, isFind) {
   appendWindow(m.items || []);
   if (!isFind) scrollThread();   // find：不滚到底，交给 tryPendingJump 滚到命中那条
 }
+const PRELOAD_ROUNDS = 60;      // 历史全文每段补这么多「轮」（一来一回）
+const RT_ITEM_CAP = 400;        // 长独白段（茜茜守夜/电影连说很多条）兜底：一段最多这么多条，免一次拉爆
+function roundStartBefore(items, anchor, n) { // 本地模式上滑：往回数 n 轮的起点（用户消息为一轮之首）
+  let users = 0; const floor = Math.max(0, anchor - RT_ITEM_CAP);
+  for (let i = anchor - 1; i >= floor; i--) { const it = items[i]; if (it && it.kind === 'text' && it.role === 'user') { if (++users >= n) return i; } }
+  return floor;
+}
+function roundEndAfter(items, anchor, n) {
+  let users = 0; const cap = Math.min(items.length, anchor + RT_ITEM_CAP);
+  for (let i = anchor; i < cap; i++) { const it = items[i]; if (it && it.kind === 'text' && it.role === 'user') { if (++users > n) return i; } }
+  return cap;
+}
 function loadMoreUp() {
   const h = state.hist; if (!h || h.atTop || h.loading) return;
-  if (h.local) { // 已存全量到本地 → 直接切片，秒滑、可离线
-    const start = Math.max(0, h.top - 60); if (start >= h.top) return;
+  if (h.local) { // 已存全量到本地 → 直接按轮切片，秒滑、可离线
+    const start = roundStartBefore(h.local, h.top, PRELOAD_ROUNDS); if (start >= h.top) { h.atTop = true; return; }
     const slice = h.local.slice(start, h.top); h.top = start; h.atTop = start === 0;
-    prependWindow(slice); return;
+    prependWindow(slice); refreshHistInd(); return;
   }
   h.loading = true;
-  if (!wsend({ type: 'history_window', sessionId: h.sid, dir: 'up', anchor: h.top, limit: 60 })) h.loading = false;
+  if (!wsend({ type: 'history_window', sessionId: h.sid, dir: 'up', anchor: h.top, rounds: PRELOAD_ROUNDS })) h.loading = false;
 }
 function loadMoreDown() {
   const h = state.hist; if (!h || h.atBottom || h.loading) return;
   if (h.downGuard && Date.now() < h.downGuard) return; // find 跳转后短暂抑制：免 scrollIntoView 沉降把命中点到结尾一次性全拉下来
   if (h.local) {
-    const end = Math.min(h.local.length, h.bottom + 60); if (end <= h.bottom) return;
+    const end = roundEndAfter(h.local, h.bottom, PRELOAD_ROUNDS); if (end <= h.bottom) { h.atBottom = true; return; }
     const slice = h.local.slice(h.bottom, end); h.bottom = end; h.atBottom = end >= h.local.length;
     appendWindow(slice); return;
   }
   h.loading = true;
-  if (!wsend({ type: 'history_window', sessionId: h.sid, dir: 'down', anchor: h.bottom, limit: 60 })) h.loading = false;
+  if (!wsend({ type: 'history_window', sessionId: h.sid, dir: 'down', anchor: h.bottom, rounds: PRELOAD_ROUNDS })) h.loading = false;
 }
 function onHistoryWindow(m) {
   if (m.prefetch) { // 后台预缓存末尾窗（不渲染）
@@ -1097,12 +1109,12 @@ function onHistoryFull(m) {
   toast('已存全量 · ' + (m.total || m.items.length) + ' 条');
   refreshHistInd();
 }
-// 缓存状态：回答「这条对话本地存了多少」
+// 缓存状态：回答「这条对话本地存了多少」（按「轮」）
+function countRounds(items) { let n = 0; for (const it of (items || [])) if (it && it.kind === 'text' && it.role === 'user') n++; return n; }
 function histArchInfo() {
   const h = state.hist; if (!h) return null;
-  if (h.local) return { full: true, label: '已存全量 · ' + h.total + ' 条' };
-  const loaded = h.total ? (h.total - h.top) : 0;
-  return { full: false, label: '已存最近 ' + loaded + '/' + (h.total || '?') + ' 条 · 点此存全量' };
+  if (h.local) return { full: true, label: '已存全量 · ' + countRounds(h.local) + ' 轮' };
+  return { full: false, label: '点此存全量到本地' };
 }
 function refreshHistInd() { const strip = $('usageStrip'); if (strip && strip.classList.contains('open')) renderUsageStrip(); }
 
@@ -2941,8 +2953,8 @@ function boot() {
   $('thread').addEventListener('scroll', () => {
     const t = $('thread'); state.threadStick = t.scrollTop + t.clientHeight >= t.scrollHeight - 40;
     if (state.screen === 'chat' && state.hist && state.hist.sid === state.currentSession) {
-      if (t.scrollTop < 1000) loadMoreUp();                                                  // 距顶 <2 屏 → 提前补旧段（含压缩前）
-      else if (!state.hist.atBottom && t.scrollHeight - t.scrollTop - t.clientHeight < 1000) loadMoreDown(); // 搜索跳到中段后下滑 → 补新段
+      if (t.scrollTop < 1500) loadMoreUp();                                                  // 距顶 <~3 屏就提前补旧段（每段 60 轮，含压缩前）
+      else if (!state.hist.atBottom && t.scrollHeight - t.scrollTop - t.clientHeight < 1500) loadMoreDown(); // 搜索跳到中段后下滑 → 补新段
     }
   }, { passive: true });
   initPageSwipe('cinemaLog', { onBack: () => show('cinema'), under: 'cinema' });
