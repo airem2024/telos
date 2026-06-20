@@ -322,7 +322,7 @@ function genId() { return Date.now().toString(36) + Math.random().toString(36).s
 // presence → bridge: which conversation I'm viewing + foreground (so wake push skips the one I'm looking at)
 // model/effort 只在确属本对话的选择时带上（modelMine）——刚进对话、还没读回它记住的模型前不带，
 // 免得用别的对话/全局默认把服务端的 per-session 记忆盖掉（唤醒就是按那份记忆选模型的）
-function sendPresence() { wsend({ type: 'presence', sessionId: state.screen === 'chat' ? state.currentSession : null, foreground: document.visibilityState === 'visible', model: state.modelMine ? state.model : undefined, effort: state.modelMine ? state.effort : undefined }); }
+function sendPresence() { wsend({ type: 'presence', sessionId: state.screen === 'chat' ? state.currentSession : null, foreground: document.visibilityState === 'visible', model: (state.modelMine && state.model) ? state.model : undefined, effort: (state.modelMine && state.effort) ? state.effort : undefined }); }
 function sendPushPref() { wsend({ type: 'push_pref', enabled: P('wakePush') }); }
 // hand creds to the native background service + start/stop it per the 后台唤醒通知 toggle
 function applyNativeNotify() {
@@ -919,8 +919,8 @@ function prefetchKick() {
   let id; while ((id = q.shift())) { if (id !== state.currentSession) break; }  // 跳过正打开的（openSession 自己会取）
   if (!id) return;
   state.pfBusy = true;
-  idbGet('win:' + id).then((c) => {
-    if (!wsend({ type: 'history_window', sessionId: id, limit: 60, prefetch: true, knownVer: (c && c.ver) || null })) { state.pfBusy = false; q.unshift(id); } // 没连上：放回队首，等回连/可见再续
+  idbGet('win2:' + id).then((c) => {
+    if (!wsend({ type: 'history_window', sessionId: id, prefetch: true, knownVer: (c && c.ver) || null })) { state.pfBusy = false; q.unshift(id); } // 没连上：放回队首，等回连/可见再续
   }).catch(() => { state.pfBusy = false; });
 }
 function onPrefetchHistory(m) {
@@ -946,11 +946,11 @@ function openSession(s) {
   if (findReq) { // 搜索定位：直接拉命中那段窗（不读末尾缓存，免先闪到底再跳）
     state.pendingHistory = wsend({ type: 'history_find', sessionId: s.id, needle: findReq.needle, limit: 80 }) ? null : s.id;
   } else {
-    idbGet('win:' + s.id).then((cached) => {
+    idbGet('win2:' + s.id).then((cached) => {
       if (state.currentSession !== s.id) return;
       if (cached && cached.items) {
         state.hist = { sid: s.id, top: cached.top || 0, bottom: (cached.top || 0) + cached.items.length, total: cached.total || cached.items.length, atTop: !!cached.atTop, atBottom: true, ver: cached.ver || null, loading: false, local: null };
-        try { renderInitWindow({ ...cached, sessionId: s.id }, false); refreshHistInd(); } catch (e) {}
+        try { renderInitWindow({ ...cached, sessionId: s.id }, false, true); refreshHistInd(); } catch (e) {} // tentative：模型先临时套缓存值、等服务端权威覆盖
       }
     }).catch(() => {}).then(() => {
       if (state.currentSession !== s.id) return;
@@ -1018,10 +1018,12 @@ function renderItems(items) {
 }
 // 全量存档·分段窗口引擎：openSession 用 history_window 取末尾窗渲染，上滑到顶/下滑到底分块补。
 // state.hist = { sid, top, total, atTop, atBottom, ver, loading, local(全量缓存数组|null) }
-function applyHistMeta(m) {
+function applyHistMeta(m, tentative) {
   if (m.sessionId !== state.currentSession) return;
   if (m.cwd) state.cwd = m.cwd; if (m.title) state.curTitle = m.title;
-  if (!state.modelMine) { const p = m.pref || {}; state.model = p.model || ''; state.effort = p.effort || ''; state.modelMine = true; }
+  // 模型/effort pref：缓存渲染先临时套上当显示、但**不锁 modelMine**；服务端响应(权威)才锁，
+  // 这样过期缓存里的旧模型会被服务端的当前 pref 覆盖 → 修「重进对话模型变回普通」(1M 丢失)。
+  if (!state.modelMine) { const p = m.pref || {}; state.model = p.model || ''; state.effort = p.effort || ''; if (!tentative) state.modelMine = true; }
   state.lastModel = m.lastModel || ''; state.mood = m.mood || null; syncModelSub(); updateHeader();
 }
 function prependWindow(items) {
@@ -1030,9 +1032,9 @@ function prependWindow(items) {
   const prevH = t.scrollHeight; t.insertBefore(frag, t.firstChild); t.scrollTop += t.scrollHeight - prevH; // 锚住位置，不跳
 }
 function appendWindow(items) { renderItems(items); } // 落点默认 thread
-function renderInitWindow(m, isFind) {
+function renderInitWindow(m, isFind, tentative) {
   clearThread(); removeSuggestions();
-  applyHistMeta(m);
+  applyHistMeta(m, tentative);
   appendWindow(m.items || []);
   if (!isFind) scrollThread();   // find：不滚到底，交给 tryPendingJump 滚到命中那条
 }
@@ -1071,13 +1073,14 @@ function loadMoreDown() {
 }
 function onHistoryWindow(m) {
   if (m.prefetch) { // 后台预缓存末尾窗（不渲染）
-    if (!m.unchanged && m.sessionId && m.items) idbPut('win:' + m.sessionId, { ver: m.ver, items: m.items, top: m.start, total: m.total, atTop: m.atTop, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
+    if (!m.unchanged && m.sessionId && m.items) idbPut('win2:' + m.sessionId, { ver: m.ver, items: m.items, top: m.start, total: m.total, atTop: m.atTop, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
     state.pfBusy = false; setTimeout(prefetchKick, 200); return;
   }
   if (m.sessionId !== state.currentSession) return;
   const h = state.hist;
-  if (m.unchanged) { // 末尾窗没变：缓存即最新、已渲染
+  if (m.unchanged) { // 末尾窗没变：缓存即最新、已渲染；但仍套一遍服务端权威 meta（模型 pref 等），覆盖过期缓存值
     if (h) { h.total = m.total; }
+    applyHistMeta(m, false);
     scrollThread(); tryPendingJump(); return;
   }
   if (m.dir === 'up') { if (!h) return; h.loading = false; h.top = m.start; h.atTop = m.atTop; prependWindow(m.items || []); refreshHistInd(); return; }
@@ -1086,8 +1089,8 @@ function onHistoryWindow(m) {
   const isFind = m.dir === 'find';
   state.hist = { sid: m.sessionId, top: m.start, bottom: m.end, total: m.total, atTop: m.atTop, atBottom: m.atBottom, ver: m.ver, loading: false, local: null };
   if (isFind) state.hist.downGuard = Date.now() + 1000; // 跳转沉降期间不自动往下补
-  renderInitWindow(m, isFind);
-  if (!isFind) idbPut('win:' + m.sessionId, { ver: m.ver, items: m.items, top: m.start, total: m.total, atTop: m.atTop, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood }); // 只缓存末尾窗，find 的中段窗不当首屏缓存
+  renderInitWindow(m, isFind, false);   // 服务端权威 → 套准模型 pref（非 tentative）
+  if (!isFind) idbPut('win2:' + m.sessionId, { ver: m.ver, items: m.items, top: m.start, total: m.total, atTop: m.atTop, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood }); // 只缓存末尾窗，find 的中段窗不当首屏缓存
   tryPendingJump();   // find：滚到含 needle 那条；普通开会话 pendingJump 为空、无副作用
   // 进对话后若本地已存全量且 ver 一致 → 切到本地模式（上下滑秒切、离线可翻）
   idbGet('arc:' + m.sessionId).then((arc) => {
