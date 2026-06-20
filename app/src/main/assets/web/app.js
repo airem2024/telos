@@ -1205,17 +1205,14 @@ function managerUpload(fileList) {
 }
 
 /* ============ prompt sheet ============ */
-function syncPromptGo() { const inp = $('promptInput'), btn = $('promptOk'); btn.classList.toggle('show', !!inp.value.trim() || state.promptAllowEmpty); }
 function openPrompt(title, value, cb, placeholder, opts) {
   opts = opts || {};
-  const danger = opts.danger !== undefined ? opts.danger : /删除/.test(title || '');   // 删除类 → 红键、打字即解锁
+  const danger = opts.danger !== undefined ? opts.danger : /删除/.test(title || '');   // 删除类 → 红色 → 键、要真打「删除」
   const inp = $('promptInput'), btn = $('promptOk');
   inp.value = value || '';
-  inp.placeholder = placeholder || (danger ? '确认删除' : title) || '';   // 文字放进框里当 placeholder
-  btn.textContent = opts.btn || (danger ? '确认删除' : '保存');
-  btn.classList.toggle('danger', danger);
-  state.promptCb = cb; state.promptDanger = danger; state.promptAllowEmpty = !!opts.allowEmpty;
-  syncPromptGo();
+  inp.placeholder = placeholder || (danger ? '输入“删除”确认删除' : title) || '';   // 提示放进框里
+  btn.classList.toggle('danger', danger);   // → 键：危险红 / 普通强调色，常驻在框内右侧
+  state.promptCb = cb;
   openScrim('promptScrim');
   setTimeout(() => { inp.focus(); inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, window.innerHeight * 0.38) + 'px'; }, 100);
 }
@@ -1496,21 +1493,16 @@ function cinSet(key, label, valText, min, max, dec, fmt, onDone, inputVal, unit)
   row.addEventListener('click', () => { state.cinOpen = open ? null : key; renderCinema(); });
   wrap.appendChild(row);
   if (open) {
-    const box = el('div', 'cin-setedit');
-    const inp = document.createElement('input');
-    inp.type = 'text'; inp.inputMode = dec ? 'decimal' : 'numeric';
-    inp.className = 'cin-setinp'; inp.value = inputVal; inp.setAttribute('enterkeyhint', 'done');
-    const commit = () => {
-      let v = dec ? parseFloat(inp.value) : parseInt(inp.value, 10);
-      if (isNaN(v)) { inp.value = inputVal; return; }   // 乱输还原
-      v = Math.max(min, Math.min(max, v));               // 夹到范围内
-      inp.value = v; sv.textContent = fmt(v); onDone(v);
-    };
-    inp.addEventListener('change', commit);
-    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
-    box.appendChild(inp);
-    if (unit) { const u = el('span', 'cin-setunit'); u.textContent = unit; box.appendChild(u); }
-    wrap.appendChild(box);
+    // 底纹滑动条：满宽、底纹色、无框，值显示在里面，左右滑动改值（range 透明覆盖在上、负责拖动）
+    const sw = el('div', 'cin-slidewrap');
+    const r = document.createElement('input');
+    r.type = 'range'; r.className = 'cin-slide';
+    r.min = min; r.max = max; r.step = dec ? 0.5 : 1; r.value = inputVal;
+    const v = el('span', 'cin-slideval'); v.textContent = fmt(dec ? parseFloat(inputVal) : parseInt(inputVal, 10));
+    r.addEventListener('input', () => { const val = dec ? parseFloat(r.value) : parseInt(r.value, 10); v.textContent = fmt(val); sv.textContent = fmt(val); });
+    r.addEventListener('change', () => { onDone(dec ? parseFloat(r.value) : parseInt(r.value, 10)); });
+    sw.appendChild(r); sw.appendChild(v);
+    wrap.appendChild(sw);
   }
   return wrap;
 }
@@ -2721,9 +2713,15 @@ function boot() {
   // 键盘整页被顶修复：edge-to-edge 下 adjustResize 不缩 WebView，改用 visualViewport 把 .screen 钉到可见视口
   if (window.visualViewport) {
     const vv = window.visualViewport;
-    const fitVV = () => { document.documentElement.style.setProperty('--vvh', vv.height + 'px'); document.documentElement.style.setProperty('--vvtop', vv.offsetTop + 'px'); };
+    const fitVV = () => {
+      document.documentElement.style.setProperty('--vvh', vv.height + 'px');
+      document.documentElement.style.setProperty('--vvtop', vv.offsetTop + 'px');
+      // 键盘开合改变可见视口时，若本来贴着底就重新贴底，免得「拉到底再展开输入」把记录顶上去
+      if (state.screen === 'chat' && state.threadStick !== false) { const t = $('thread'); if (t) requestAnimationFrame(() => { t.scrollTop = t.scrollHeight; }); }
+    };
     vv.addEventListener('resize', fitVV); vv.addEventListener('scroll', fitVV); fitVV();
   }
+  $('thread').addEventListener('scroll', () => { const t = $('thread'); state.threadStick = t.scrollTop + t.clientHeight >= t.scrollHeight - 40; }, { passive: true });
   initPageSwipe('cinemaLog', { onBack: () => show('cinema'), under: 'cinema' });
   initPageSwipe('diary', { onBack: diaryBack });   // diary 是同屏 overview/detail 双视图，返回落点会变，不垫上一级
   initPageSwipe('diaryWrite', { onBack: () => { closeDwPicker(); show('diary'); }, under: 'diary' });
@@ -2880,13 +2878,12 @@ function boot() {
   $('sessDelete').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('输入「删除」确认删除', '', (v) => { if (v === '删除') wsend({ type: 'delete', sessionId: s.id }); else toast('已取消'); }); });
   function savePrompt() {
     const inp = $('promptInput'); const raw = inp.value.trim();
-    if (!raw && !state.promptAllowEmpty) return;           // 没内容不提交（按钮本就藏着）
-    const cb = state.promptCb; const danger = state.promptDanger;
+    const cb = state.promptCb;
     closeScrim('promptScrim'); state.promptCb = null;
-    if (cb) cb(danger ? '删除' : raw);                      // 删除：点红键即确认（自动补确认词）；其余回传输入值
+    if (cb) cb(raw);                       // 回传输入值；删除类由各 cb 自行校验 === '删除'
   }
   $('promptOk').addEventListener('click', savePrompt);
-  $('promptInput').addEventListener('input', () => { const inp = $('promptInput'); syncPromptGo(); inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, window.innerHeight * 0.38) + 'px'; });
+  $('promptInput').addEventListener('input', () => { const inp = $('promptInput'); inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, window.innerHeight * 0.38) + 'px'; });
   $('promptInput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); savePrompt(); } });
   // generic ✕ / cancel buttons inside sheets
   document.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', () => { const sc = b.closest('.scrim'); if (sc) closeScrim(sc.id); }));
