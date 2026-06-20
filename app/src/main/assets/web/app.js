@@ -1485,31 +1485,29 @@ function cinToggle(label, on, onClick) {
 }
 // 披露式设置行：平时只显「标签 + 当前值」，点一下露出**数字输入框**单独调这一项（一次只展开一个）
 // dec=true 收小数（如花费 $0.5）；min/max 夹紧；回车或失焦提交。
-function cinSet(key, label, valText, min, max, step, fmt, onDone, inputVal) {
-  const open = state.cinOpen === key;
-  const wrap = el('div', 'cin-set' + (open ? ' open' : ''));
-  const row = el('div', 'setitem cin-setrow');
+// 行内可编辑数值：点数字直接在原地改（不冒输入框、不动字体字号），单位保留为静态文字
+function cinSet(key, label, unit, dispVal, min, max, dec, onCommit) {
+  const row = el('div', 'setitem cin-numrow');
   const lab = el('span', 'cin-setlab'); lab.textContent = label;
-  const sv = el('span', 'cin-setval'); sv.textContent = valText;
-  const cv = el('span', 'cin-setchev'); cv.textContent = '›';
-  row.appendChild(lab); row.appendChild(sv); row.appendChild(cv);
-  row.addEventListener('click', () => { state.cinOpen = open ? null : key; renderCinema(); });
-  wrap.appendChild(row);
-  if (open) {
-    // 只一条底纹填充进度（无轨道底纹、条上也无数字）；数值实时显示在上面那行 sv（位置稳定、不跳）
-    const dec = step < 1;
-    const sw = el('div', 'cin-slidewrap');
-    const fill = el('div', 'cin-slidefill');
-    const r = document.createElement('input');
-    r.type = 'range'; r.className = 'cin-slide'; r.min = min; r.max = max; r.step = step; r.value = inputVal;
-    const paint = (val) => { fill.style.width = (max > min ? (val - min) / (max - min) * 100 : 0) + '%'; sv.textContent = fmt(val); };
-    paint(dec ? parseFloat(inputVal) : parseInt(inputVal, 10));
-    r.addEventListener('input', () => paint(dec ? parseFloat(r.value) : parseInt(r.value, 10)));
-    r.addEventListener('change', () => onDone(dec ? parseFloat(r.value) : parseInt(r.value, 10)));
-    sw.appendChild(fill); sw.appendChild(r);
-    wrap.appendChild(sw);
-  }
-  return wrap;
+  const valw = el('span', 'cin-numval');
+  const inp = document.createElement('input');
+  inp.className = 'cin-numinp'; inp.type = 'text'; inp.inputMode = dec ? 'decimal' : 'numeric'; inp.setAttribute('enterkeyhint', 'done');
+  const fmtNum = (v) => dec ? String(+(+v).toFixed(1)).replace(/\.0$/, '') : String(v | 0);   // 整数不显小数点
+  const size = () => { inp.style.width = Math.max(1, inp.value.length) + 'ch'; };
+  inp.value = fmtNum(dispVal); size();
+  const u = el('span', 'cin-numunit'); u.textContent = ' ' + unit;
+  inp.addEventListener('input', size);
+  const commit = () => {
+    let v = dec ? parseFloat(inp.value) : parseInt(inp.value, 10);
+    if (isNaN(v)) { inp.value = fmtNum(dispVal); size(); return; }   // 乱输还原
+    v = Math.max(min, Math.min(max, v));                              // 夹到范围
+    inp.value = fmtNum(v); size(); onCommit(v);
+  };
+  inp.addEventListener('change', commit);
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
+  valw.appendChild(inp); valw.appendChild(u);
+  row.appendChild(lab); row.appendChild(valw);
+  return row;
 }
 function openCinema(s) {
   state.cinemaReturn = state.screen;   // 从哪进来的（现在只从对话内 ⋮ 进 → 返回回到对话，不退出）
@@ -1607,14 +1605,13 @@ function renderCinema() {
   if (state.cinAdv) {
     const cap = (typeof c.maxCostPer5h === 'number') ? c.maxCostPer5h : 1.5; // 0=关熔断（不限）
     body.appendChild(cinGroup('节奏',
-      cinSet('fg', '最短间隔（你在看时）', fmtDur(c.fgIntervalSec || 180), 30, 1800, 30, fmtDur, (v) => cinSend({ fgIntervalSec: v }), c.fgIntervalSec || 180),
-      cinSet('bg', '离开后最短间隔', fmtDur(c.bgIntervalSec || 600), 60, 3600, 30, fmtDur, (v) => cinSend({ bgIntervalSec: v }), c.bgIntervalSec || 600),
+      cinSet('fg', '最短间隔（你在看时）', '分钟', (c.fgIntervalSec || 180) / 60, 0.5, 30, true, (v) => cinSend({ fgIntervalSec: Math.round(v * 60) })),
+      cinSet('bg', '离开后最短间隔', '分钟', (c.bgIntervalSec || 600) / 60, 1, 60, true, (v) => cinSend({ bgIntervalSec: Math.round(v * 60) })),
       cinToggle('离开后放慢节奏', !!c.diffRate, () => cinSend({ diffRate: !c.diffRate }))));
     body.appendChild(cinGroup('用量与刹车',
-      cinSet('cost', '花费上限（每 5 小时）', cap > 0 ? '$' + cap.toFixed(1) : '不限', 0, 50, 0.5,
-        (v) => v > 0 ? '$' + (+v).toFixed(1) : '不限', (v) => cinSend({ maxCostPer5h: v }), cap),
-      cinSet('wakes', '每 5 小时最多醒几次', (c.maxWakesPer5h || 30) + ' 次', 5, 120, 5, (v) => v + ' 次', (v) => cinSend({ maxWakesPer5h: v }), c.maxWakesPer5h || 30),
-      cinSet('pause', '额度到多少 % 自动停', (c.autoPauseUtil || 85) + ' %', 50, 100, 1, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v }), c.autoPauseUtil || 85)));
+      cinSet('cost', '花费上限（每 5 小时，0=不限）', '美元', cap, 0, 50, true, (v) => cinSend({ maxCostPer5h: v })),
+      cinSet('wakes', '每 5 小时最多醒几次', '次', c.maxWakesPer5h || 30, 5, 120, false, (v) => cinSend({ maxWakesPer5h: v })),
+      cinSet('pause', '额度到多少 % 自动停', '%', c.autoPauseUtil || 85, 50, 100, false, (v) => cinSend({ autoPauseUtil: v }))));
     body.appendChild(cinGroup('模型', cinModelRow(c)));
   }
   renderCinReceipt();
