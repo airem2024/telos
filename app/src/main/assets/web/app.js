@@ -364,7 +364,7 @@ function handle(m) {
       sendPushPref(); sendPresence(); applyNativeNotify();
       if (P('autoCleanup') && !state._cleaned) { state._cleaned = true; wsend({ type: 'cleanup_stale' }); }  // once per launch
       // re-fetch history/sticky that got dropped because we tapped into the chat before auth landed
-      if (state.pendingHistory) { wsend({ type: 'get_history', sessionId: state.pendingHistory }); state.pendingHistory = null; }
+      if (state.pendingHistory) { wsend({ type: 'history_window', sessionId: state.pendingHistory, limit: 60 }); state.pendingHistory = null; }
       if (state.pendingSticky) { wsend({ type: 'sticky_get', sessionId: state.pendingSticky }); state.pendingSticky = null; }
       // resume an in-flight turn after a reconnect
       if (state.activeTurn && !state.activeTurn.done) { startStatus(); wsend({ type: 'attach', turnId: state.activeTurn.id, after: state.activeTurn.lastI || 0 }); }
@@ -389,6 +389,8 @@ function handle(m) {
       renderSessions(); break;
     case 'assigned': wsend({ type: 'list_sessions' }); break;
     case 'history': if (m.prefetch) onPrefetchHistory(m); else renderHistory(m); break;
+    case 'history_window': onHistoryWindow(m); break;
+    case 'history_full': onHistoryFull(m); break;
     case 'dirs': renderDirs(m); break;
     case 'turn_start': state.busy = true; state.turnTools = []; state.toolRow = null; startStatus(); updateSend(); break;
     case 'session_init':
@@ -426,7 +428,7 @@ function handle(m) {
       const orig = m.origSession || state.forkFrom;
       if (orig) {                       // a regenerate / edit-resend died: drop the dead branch, restore the original
         state.forkFrom = null; toast('重新生成失败，已保留原对话');
-        state.currentSession = orig; wsend({ type: 'get_history', sessionId: orig });
+        state.currentSession = orig; wsend({ type: 'history_window', sessionId: orig, limit: 60 });
       } else addError(m.message);
       wsend({ type: 'list_sessions' });
       break;
@@ -637,8 +639,11 @@ function openFolderPicker(s) {
 }
 
 /* ============ chat rendering ============ */
+// 渲染落点：默认写进 #thread；prepend 旧消息时临时切到一个 fragment（见 prependWindow），所以渲染函数用 rt() 取落点。
+let RT = null;
+function rt() { return RT || $('thread'); }
 function clearThread() { if (searchOpen()) closeSearch(); stopStatus(); $('thread').innerHTML = ''; state.live = null; state.turnTools = []; state.toolRow = null; }
-function scrollThread() { const t = $('thread'); t.scrollTop = t.scrollHeight; }
+function scrollThread() { if (RT) return; const t = $('thread'); t.scrollTop = t.scrollHeight; } // prepend 期间(RT 非空)不滚
 function scrollThreadAuto() { if (P('autoScroll')) scrollThread(); }
 function addUser(text, uuid, images) {
   const m = el('div', 'msg user'); const b = el('div', 'bubble');
@@ -654,7 +659,7 @@ function addUser(text, uuid, images) {
   if (text) { const tx = el('div'); tx.textContent = text; b.appendChild(tx); }
   m.appendChild(b);
   if (uuid) { b.classList.add('editable'); b.addEventListener('click', () => editMessage(uuid, text)); }
-  $('thread').appendChild(m); scrollThread();
+  rt().appendChild(m); scrollThread();
   return b;
 }
 function editMessage(uuid, current) {
@@ -679,8 +684,8 @@ function ensureLive() { if (state.live) return state.live; const m = el('div', '
 function appendDelta(text) { const t = ensureLive(); t.textContent += text; scrollThreadAuto(); }
 function finalizeText(full) { const t = ensureLive(); t.classList.remove('cursor', 'text'); t.classList.add('md'); t.innerHTML = md(full); state.live = null; scrollThreadAuto(); }
 function finalizeLive() { if (state.live) { state.live.classList.remove('cursor'); state.live = null; } }
-function addAssistantText(full) { const m = el('div', 'msg assistant'); const t = el('div', 'md'); t.innerHTML = md(full); m.appendChild(t); $('thread').appendChild(m); }
-function addThinking(text) { finalizeLive(); const d = el('div', 'thinking'); const inner = el('div', 'md'); inner.innerHTML = md(text); d.appendChild(inner); d.addEventListener('click', () => d.classList.toggle('collapsed')); $('thread').appendChild(d); scrollThreadAuto(); }
+function addAssistantText(full) { const m = el('div', 'msg assistant'); const t = el('div', 'md'); t.innerHTML = md(full); m.appendChild(t); rt().appendChild(m); }
+function addThinking(text) { finalizeLive(); const d = el('div', 'thinking'); const inner = el('div', 'md'); inner.innerHTML = md(text); d.appendChild(inner); d.addEventListener('click', () => d.classList.toggle('collapsed')); rt().appendChild(d); scrollThreadAuto(); }
 
 /* ---- animated "thinking" status line, Claude Code style ---- */
 const SL_FRAMES = ['·', '✢', '✳', '∗', '✻', '✽', '✻', '∗', '✳', '✢'];
@@ -730,7 +735,7 @@ function addMedia(kind, url) {
     img.addEventListener('click', () => openLightbox(src));
     m.appendChild(img);
   }
-  $('thread').appendChild(m); scrollThreadAuto();
+  rt().appendChild(m); scrollThreadAuto();
 }
 function closeLightbox() { document.querySelectorAll('.lightbox').forEach((l) => l.remove()); syncAtRoot(); }
 function openLightbox(src) {
@@ -782,7 +787,7 @@ function endTurn(m) {
   }
   scrollThreadAuto();
   wsend({ type: 'list_sessions' });
-  if (state.expectFork) { state.expectFork = false; wsend({ type: 'get_history', sessionId: state.currentSession }); }
+  if (state.expectFork) { state.expectFork = false; wsend({ type: 'history_window', sessionId: state.currentSession, limit: 60 }); }
 }
 
 function toolArgSummary(name, input) {
@@ -914,8 +919,8 @@ function prefetchKick() {
   let id; while ((id = q.shift())) { if (id !== state.currentSession) break; }  // 跳过正打开的（openSession 自己会取）
   if (!id) return;
   state.pfBusy = true;
-  idbGet('h:' + id).then((c) => {
-    if (!wsend({ type: 'get_history', sessionId: id, knownVer: (c && c.ver) || null, prefetch: true })) { state.pfBusy = false; q.unshift(id); } // 没连上：放回队首，等回连/可见再续
+  idbGet('win:' + id).then((c) => {
+    if (!wsend({ type: 'history_window', sessionId: id, limit: 60, prefetch: true, knownVer: (c && c.ver) || null })) { state.pfBusy = false; q.unshift(id); } // 没连上：放回队首，等回连/可见再续
   }).catch(() => { state.pfBusy = false; });
 }
 function onPrefetchHistory(m) {
@@ -934,16 +939,25 @@ function openSession(s) {
   // [1m] 这类运行时变体也存在 pref 里，重开对话不会掉回 200K 底座被自动 compact。
   state.model = LS.model; state.effort = LS.effort; state.modelMine = false; state.mode = LS.mode; applyMode();
   clearThread(); updateHeader(); show('chat'); removeSuggestions();
-  // 本地缓存优先：先秒显缓存（若有），再带版本号去同步；文件没变→服务端回 unchanged、不重渲也不解析 36MB。
-  // if not authed yet (slow/just-reconnecting), the send is dropped — remember to retry on auth_ok
-  state._histVer = null;
-  idbGet('h:' + s.id).then((cached) => {
-    if (state.currentSession !== s.id) return;
-    if (cached && cached.items) { try { renderHistory({ ...cached, sessionId: s.id, _cache: true }); } catch (e) {} state._histVer = cached.ver || null; }
-  }).catch(() => {}).then(() => {
-    if (state.currentSession !== s.id) return;
-    state.pendingHistory = wsend({ type: 'get_history', sessionId: s.id, knownVer: state._histVer }) ? null : s.id;
-  });
+  // 历史走「全量存档·分段窗口」：先秒显缓存的末尾窗，再带 ver 同步（没变→unchanged 秒回）。上滑到顶自动补旧段（含压缩前）。
+  state.hist = null;
+  const findReq = (state.pendingFind && state.pendingFind.sid === s.id) ? state.pendingFind : null;
+  state.pendingFind = null;
+  if (findReq) { // 搜索定位：直接拉命中那段窗（不读末尾缓存，免先闪到底再跳）
+    state.pendingHistory = wsend({ type: 'history_find', sessionId: s.id, needle: findReq.needle, limit: 80 }) ? null : s.id;
+  } else {
+    idbGet('win:' + s.id).then((cached) => {
+      if (state.currentSession !== s.id) return;
+      if (cached && cached.items) {
+        state.hist = { sid: s.id, top: cached.top || 0, bottom: (cached.top || 0) + cached.items.length, total: cached.total || cached.items.length, atTop: !!cached.atTop, atBottom: true, ver: cached.ver || null, loading: false, local: null };
+        try { renderInitWindow({ ...cached, sessionId: s.id }, false); refreshHistInd(); } catch (e) {}
+      }
+    }).catch(() => {}).then(() => {
+      if (state.currentSession !== s.id) return;
+      const kv = (state.hist && state.hist.ver) || null;
+      state.pendingHistory = wsend({ type: 'history_window', sessionId: s.id, limit: 60, knownVer: kv }) ? null : s.id;
+    });
+  }
   wsend({ type: 'cinema_get', sessionId: s.id }); // 知道这个对话在不在守夜（列表行「时间流动中」+ 标题旁「输入中」）
   state.stickyPopupFor = s.id;
   state.pendingSticky = wsend({ type: 'sticky_get', sessionId: s.id }) ? null : s.id; // show 小纸条 popup if any unread
@@ -965,8 +979,17 @@ function renderHistory(m) {
     state.model = p.model || ''; state.effort = p.effort || ''; state.modelMine = true;
   }
   if (m.sessionId === state.currentSession) { state.lastModel = m.lastModel || ''; syncModelSub(); state.mood = m.mood || null; updateHeader(); }
+  renderItems(m.items);
+  scrollThread();
+  tryPendingJump();   // 搜索结果点进来的 → 滚到命中那条
+  // bridge 全量历史 → 存本地缓存供下次秒开（缓存自身渲染时 _cache=true，跳过避免回写）
+  if (!m._cache && m.sessionId && m.items) idbPut('h:' + m.sessionId, { ver: m.ver, items: m.items, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
+}
+// 把一批 items 渲染进当前落点 rt()（默认 #thread；prepend 时是 fragment）。含压缩分隔线。
+function renderItems(items) {
   let group = null, userB = null; // userB: 最近的用户气泡——它的附图回填成气泡内缩略图，而不是 cc 侧大图
-  (m.items || []).forEach((it) => {
+  (items || []).forEach((it) => {
+    if (it.kind === 'compact') { group = null; userB = null; const d = el('div', 'hist-compact'); d.innerHTML = '<span>压缩</span>'; rt().appendChild(d); return; }
     if (it.kind === 'text') { group = null; if (it.role === 'user') userB = addUser(it.text, it.uuid); else { userB = null; addAssistantText(it.text); } }
     else if (it.kind === 'media') {
       group = null;
@@ -986,17 +1009,102 @@ function renderHistory(m) {
         const g = { tools: [], row: el('div', 'toolrow') };
         g.row.innerHTML = '<span class="tr-text"></span><span class="chev3">›</span>';
         g.row.addEventListener('click', () => openToolsSheet(g.tools)); // capture stable const
-        $('thread').appendChild(g.row); group = g;
+        rt().appendChild(g.row); group = g;
       }
       group.tools.push({ id: it.id, name: it.name, input: it.input, isError: false });
       group.row.querySelector('.tr-text').textContent = `Used ${group.tools.length} tools, ran ${group.tools.filter((t) => t.name === 'Bash').length} commands`;
     } else if (it.kind === 'tool_result') { if (group) { const t = group.tools.find((x) => x.id === it.id); if (t) { t.isError = it.isError; t.content = it.content; } } }
   });
-  scrollThread();
-  tryPendingJump();   // 搜索结果点进来的 → 滚到命中那条
-  // bridge 全量历史 → 存本地缓存供下次秒开（缓存自身渲染时 _cache=true，跳过避免回写）
-  if (!m._cache && m.sessionId && m.items) idbPut('h:' + m.sessionId, { ver: m.ver, items: m.items, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
 }
+// 全量存档·分段窗口引擎：openSession 用 history_window 取末尾窗渲染，上滑到顶/下滑到底分块补。
+// state.hist = { sid, top, total, atTop, atBottom, ver, loading, local(全量缓存数组|null) }
+function applyHistMeta(m) {
+  if (m.sessionId !== state.currentSession) return;
+  if (m.cwd) state.cwd = m.cwd; if (m.title) state.curTitle = m.title;
+  if (!state.modelMine) { const p = m.pref || {}; state.model = p.model || ''; state.effort = p.effort || ''; state.modelMine = true; }
+  state.lastModel = m.lastModel || ''; state.mood = m.mood || null; syncModelSub(); updateHeader();
+}
+function prependWindow(items) {
+  const t = $('thread'); const frag = document.createDocumentFragment();
+  RT = frag; try { renderItems(items); } finally { RT = null; }
+  const prevH = t.scrollHeight; t.insertBefore(frag, t.firstChild); t.scrollTop += t.scrollHeight - prevH; // 锚住位置，不跳
+}
+function appendWindow(items) { renderItems(items); } // 落点默认 thread
+function renderInitWindow(m, isFind) {
+  clearThread(); removeSuggestions();
+  applyHistMeta(m);
+  appendWindow(m.items || []);
+  if (!isFind) scrollThread();   // find：不滚到底，交给 tryPendingJump 滚到命中那条
+}
+function loadMoreUp() {
+  const h = state.hist; if (!h || h.atTop || h.loading) return;
+  if (h.local) { // 已存全量到本地 → 直接切片，秒滑、可离线
+    const start = Math.max(0, h.top - 60); if (start >= h.top) return;
+    const slice = h.local.slice(start, h.top); h.top = start; h.atTop = start === 0;
+    prependWindow(slice); return;
+  }
+  h.loading = true;
+  if (!wsend({ type: 'history_window', sessionId: h.sid, dir: 'up', anchor: h.top, limit: 60 })) h.loading = false;
+}
+function loadMoreDown() {
+  const h = state.hist; if (!h || h.atBottom || h.loading) return;
+  if (h.downGuard && Date.now() < h.downGuard) return; // find 跳转后短暂抑制：免 scrollIntoView 沉降把命中点到结尾一次性全拉下来
+  if (h.local) {
+    const end = Math.min(h.local.length, h.bottom + 60); if (end <= h.bottom) return;
+    const slice = h.local.slice(h.bottom, end); h.bottom = end; h.atBottom = end >= h.local.length;
+    appendWindow(slice); return;
+  }
+  h.loading = true;
+  if (!wsend({ type: 'history_window', sessionId: h.sid, dir: 'down', anchor: h.bottom, limit: 60 })) h.loading = false;
+}
+function onHistoryWindow(m) {
+  if (m.prefetch) { // 后台预缓存末尾窗（不渲染）
+    if (!m.unchanged && m.sessionId && m.items) idbPut('win:' + m.sessionId, { ver: m.ver, items: m.items, top: m.start, total: m.total, atTop: m.atTop, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
+    state.pfBusy = false; setTimeout(prefetchKick, 200); return;
+  }
+  if (m.sessionId !== state.currentSession) return;
+  const h = state.hist;
+  if (m.unchanged) { // 末尾窗没变：缓存即最新、已渲染
+    if (h) { h.total = m.total; }
+    scrollThread(); tryPendingJump(); return;
+  }
+  if (m.dir === 'up') { if (!h) return; h.loading = false; h.top = m.start; h.atTop = m.atTop; prependWindow(m.items || []); refreshHistInd(); return; }
+  if (m.dir === 'down') { if (!h) return; h.loading = false; h.bottom = m.end; h.atBottom = m.atBottom; appendWindow(m.items || []); refreshHistInd(); return; }
+  // init / find：整窗渲染
+  const isFind = m.dir === 'find';
+  state.hist = { sid: m.sessionId, top: m.start, bottom: m.end, total: m.total, atTop: m.atTop, atBottom: m.atBottom, ver: m.ver, loading: false, local: null };
+  if (isFind) state.hist.downGuard = Date.now() + 1000; // 跳转沉降期间不自动往下补
+  renderInitWindow(m, isFind);
+  if (!isFind) idbPut('win:' + m.sessionId, { ver: m.ver, items: m.items, top: m.start, total: m.total, atTop: m.atTop, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood }); // 只缓存末尾窗，find 的中段窗不当首屏缓存
+  tryPendingJump();   // find：滚到含 needle 那条；普通开会话 pendingJump 为空、无副作用
+  // 进对话后若本地已存全量且 ver 一致 → 切到本地模式（上下滑秒切、离线可翻）
+  idbGet('arc:' + m.sessionId).then((arc) => {
+    if (arc && arc.ver === m.ver && state.hist && state.hist.sid === m.sessionId) { state.hist.local = arc.items; state.hist.total = arc.items.length; }
+    refreshHistInd();
+  });
+  refreshHistInd();
+}
+// 「存全量到本地」：把整条全量转录拉下来缓存，之后上下滑走本地、可离线翻
+function storeFullArchive() {
+  const h = state.hist; if (!h || h.local || h.archiving) return;
+  h.archiving = true; toast('正在存全量到本地…');
+  if (!wsend({ type: 'history_full', sessionId: h.sid })) { h.archiving = false; toast('未连接'); }
+}
+function onHistoryFull(m) {
+  if (!m.items) return;
+  idbPut('arc:' + m.sessionId, { ver: m.ver, items: m.items });
+  if (state.hist && state.hist.sid === m.sessionId) { state.hist.local = m.items; state.hist.total = m.items.length; state.hist.archiving = false; }
+  toast('已存全量 · ' + (m.total || m.items.length) + ' 条');
+  refreshHistInd();
+}
+// 缓存状态：回答「这条对话本地存了多少」
+function histArchInfo() {
+  const h = state.hist; if (!h) return null;
+  if (h.local) return { full: true, label: '已存全量 · ' + h.total + ' 条' };
+  const loaded = h.total ? (h.total - h.top) : 0;
+  return { full: false, label: '已存最近 ' + loaded + '/' + (h.total || '?') + ' 条 · 点此存全量' };
+}
+function refreshHistInd() { const strip = $('usageStrip'); if (strip && strip.classList.contains('open')) renderUsageStrip(); }
 
 /* ============ suggestions ============ */
 const SUGGESTIONS = [
@@ -2444,7 +2552,9 @@ function renderDialogResults(hits, q) {
 }
 function jumpToDialog(sid, hitText) {
   closeSearch();
-  state.pendingJump = (hitText || '').replace(/\s+/g, ' ').trim().slice(0, 24);
+  const needle = (hitText || '').replace(/\s+/g, ' ').trim().slice(0, 24);
+  state.pendingJump = needle;
+  state.pendingFind = { sid, needle };   // openSession 据此走 history_find，直接拉命中那段窗（含压缩前）
   const s = (state.sessions || []).find((x) => x.id === sid) || { id: sid };
   setTimeout(() => openSession(s), 240);
 }
@@ -2670,6 +2780,7 @@ function renderUsageStrip() {
        : `<span>累计 <b>$${(t.cost || 0).toFixed(2)}</b></span>`) +
     `<span class="us-caret">▾</span>`;
   let inner = '';
+  const ai = (state.screen === 'chat') ? histArchInfo() : null;   // 本地存档状态（回答「有没有缓存」）
   if (s) {
     inner += rcRow('ITEM', '数量', 'rc-head');
     inner += rcRow('输入 token', rcNum(s.in)) + rcRow('输出 token', rcNum(s.out)) + rcRow('缓存 token', rcNum(s.cache)) + rcRow('轮次', rcNum(s.turns));
@@ -2677,9 +2788,11 @@ function renderUsageStrip() {
   } else {
     inner += rcRow('累计花费', '$' + (t.cost || 0).toFixed(2), 'rc-total') + rcRow('合计会话', rcNum(t.sessions));
   }
+  if (ai) inner += RC_RULE + rcRow('本地存档', ai.label, 'us-arc' + (ai.full ? ' on' : ''));
   inner += RC_RULE + rcRow('今日花费', '$' + (u.today || 0).toFixed(2)) + rcRow('活跃天数', (u.activeDays || 0) + ' 天');
   if (f && f.resets_at) inner += rcRow('5h 恢复', fmtReset(f.resets_at), 'rc-dim');
   $('usDetail').innerHTML = '<div class="receipt mini">' + inner + '<div class="rc-barcode"></div></div>';
+  if (ai && !ai.full) { const ar = $('usDetail').querySelector('.us-arc'); if (ar) ar.addEventListener('click', storeFullArchive); }
 }
 function renderUsageFull() {
   const box = $('usageRcpt'); if (!box) return;
@@ -2825,7 +2938,13 @@ function boot() {
     };
     vv.addEventListener('resize', fitVV); vv.addEventListener('scroll', fitVV); fitVV();
   }
-  $('thread').addEventListener('scroll', () => { const t = $('thread'); state.threadStick = t.scrollTop + t.clientHeight >= t.scrollHeight - 40; }, { passive: true });
+  $('thread').addEventListener('scroll', () => {
+    const t = $('thread'); state.threadStick = t.scrollTop + t.clientHeight >= t.scrollHeight - 40;
+    if (state.screen === 'chat' && state.hist && state.hist.sid === state.currentSession) {
+      if (t.scrollTop < 1000) loadMoreUp();                                                  // 距顶 <2 屏 → 提前补旧段（含压缩前）
+      else if (!state.hist.atBottom && t.scrollHeight - t.scrollTop - t.clientHeight < 1000) loadMoreDown(); // 搜索跳到中段后下滑 → 补新段
+    }
+  }, { passive: true });
   initPageSwipe('cinemaLog', { onBack: () => show('cinema'), under: 'cinema' });
   initPageSwipe('diary', { onBack: diaryBack });   // diary 是同屏 overview/detail 双视图，返回落点会变，不垫上一级
   initPageSwipe('diaryWrite', { onBack: () => { closeDwPicker(); show('diary'); }, under: 'diary' });
