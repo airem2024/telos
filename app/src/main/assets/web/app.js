@@ -1234,22 +1234,25 @@ function doCompact(extra) {
 function togglePlus() { if (state.plusOpen) closePlus(); else openPlus(); }
 function openPlus() {
   $('composer').blur();
-  const panel = $('plusPanel'), pb = $('plusBack');
+  const dock = $('dock'), panel = $('plusPanel'), pb = $('plusBack');
   clearTimeout(pb._hideT); pb.classList.add('show'); requestAnimationFrame(() => pb.classList.add('in'));
-  // 面板是悬浮的（绝对定位浮在输入框上方）：只淡入面板，不动 dock，所以不顶记录、不抬输入框
   panel.style.display = 'block';
-  state.plusOpen = true;
-  requestAnimationFrame(() => panel.classList.add('in'));
+  const h = panel.offsetHeight + 8;                 // 面板（含间隙）高度
+  state.plusH = h; state.plusOpen = true;
+  // 面板还在底部、像原来那样滑出；但 syncDockPad 会把面板高度排除掉 → 对话记录原地不动
+  dock.style.transition = 'none'; dock.style.transform = 'translateY(' + h + 'px)';
+  requestAnimationFrame(() => { dock.style.transition = 'transform .27s cubic-bezier(.32,.72,0,1)'; dock.style.transform = 'translateY(0)'; syncDockPad(); });
   $('plusBtn').classList.add('open');
 }
 function closePlus() {
   if (!state.plusOpen) return;
-  const panel = $('plusPanel'), pb = $('plusBack');
+  const dock = $('dock'), panel = $('plusPanel'), pb = $('plusBack');
   pb.classList.remove('in'); pb._hideT = setTimeout(() => pb.classList.remove('show'), 240);
   state.plusOpen = false;
-  panel.classList.remove('in');
+  dock.style.transition = 'transform .27s cubic-bezier(.32,.72,0,1)';
+  dock.style.transform = 'translateY(' + (state.plusH || 0) + 'px)';
   $('plusBtn').classList.remove('open');
-  setTimeout(() => { if (!state.plusOpen) panel.style.display = 'none'; }, 260);
+  setTimeout(() => { if (!state.plusOpen) { panel.style.display = 'none'; dock.style.transition = 'none'; dock.style.transform = ''; syncDockPad(); } }, 290);
 }
 
 /* ============ expand button visibility ============ */
@@ -1493,17 +1496,16 @@ function cinSet(key, label, valText, min, max, step, fmt, onDone, inputVal) {
   row.addEventListener('click', () => { state.cinOpen = open ? null : key; renderCinema(); });
   wrap.appendChild(row);
   if (open) {
-    // 底纹滑动条：底纹填充从左往右长（=进度），数字钉在填充最右边、跟着一起移动；range 透明覆盖在上负责拖动
+    // 只一条底纹填充进度（无轨道底纹、条上也无数字）；数值实时显示在上面那行 sv（位置稳定、不跳）
     const dec = step < 1;
     const sw = el('div', 'cin-slidewrap');
     const fill = el('div', 'cin-slidefill');
-    const v = el('span', 'cin-slideval'); fill.appendChild(v);
     const r = document.createElement('input');
     r.type = 'range'; r.className = 'cin-slide'; r.min = min; r.max = max; r.step = step; r.value = inputVal;
-    const paint = (val) => { fill.style.width = (max > min ? (val - min) / (max - min) * 100 : 0) + '%'; v.textContent = fmt(val); };
+    const paint = (val) => { fill.style.width = (max > min ? (val - min) / (max - min) * 100 : 0) + '%'; sv.textContent = fmt(val); };
     paint(dec ? parseFloat(inputVal) : parseInt(inputVal, 10));
-    r.addEventListener('input', () => { const val = dec ? parseFloat(r.value) : parseInt(r.value, 10); paint(val); sv.textContent = fmt(val); });
-    r.addEventListener('change', () => { onDone(dec ? parseFloat(r.value) : parseInt(r.value, 10)); });
+    r.addEventListener('input', () => paint(dec ? parseFloat(r.value) : parseInt(r.value, 10)));
+    r.addEventListener('change', () => onDone(dec ? parseFloat(r.value) : parseInt(r.value, 10)));
     sw.appendChild(fill); sw.appendChild(r);
     wrap.appendChild(sw);
   }
@@ -2614,7 +2616,9 @@ function syncDockPad() {
   const dock = $('dock'), thread = $('thread');
   if (!dock || !thread) return;
   const atBottom = thread.scrollTop + thread.clientHeight >= thread.scrollHeight - 4;
-  thread.style.paddingBottom = (dock.offsetHeight + 22) + 'px';
+  const panel = $('plusPanel');
+  const panelH = (state.plusOpen && panel) ? panel.offsetHeight + 8 : 0;   // + 面板覆盖在底部、不把记录顶上去
+  thread.style.paddingBottom = Math.max(0, dock.offsetHeight - panelH + 22) + 'px';
   if (atBottom) thread.scrollTop = thread.scrollHeight;
 }
 function resizeComposer() { const c = $('composer'); c.style.height = 'auto'; c.style.height = Math.min(c.scrollHeight, 140) + 'px'; syncDockPad(); }

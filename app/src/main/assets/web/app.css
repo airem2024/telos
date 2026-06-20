@@ -642,16 +642,13 @@ button.model:active { opacity: .6; }
 .plusback { position: absolute; inset: 0; z-index: 5; background: rgba(20,18,14,.32); opacity: 0; display: none; transition: opacity .22s ease; }
 .plusback.show { display: block; }
 .plusback.in { opacity: 1; }
-.inputstack { position: relative; }
 .pluspanel {
-  display: none; position: absolute; left: 0; right: 0; bottom: calc(100% + 8px); z-index: 6;
-  transform: translateY(10px); opacity: 0; transition: transform .26s cubic-bezier(.32,.72,0,1), opacity .2s ease;
+  display: none; margin-top: 8px;
   background: color-mix(in srgb, var(--surface) 70%, transparent);
   -webkit-backdrop-filter: blur(20px) saturate(1.5); backdrop-filter: blur(20px) saturate(1.5);
   border: 1px solid color-mix(in srgb, var(--border) 55%, transparent); border-radius: 24px;
   box-shadow: 0 10px 32px rgba(var(--shadow),.16), 0 2px 6px rgba(var(--shadow),.06);
 }
-.pluspanel.in { transform: translateY(0); opacity: 1; }
 .plusinner { padding: 8px; }
 .roundbtn svg { transition: transform .2s ease; }
 .roundbtn.open svg { transform: rotate(45deg); }
@@ -886,14 +883,13 @@ body.sysfont {
 /* 披露式设置行：平时只一行（标签+当前值），点开才露滑块 */
 .cin-setrow { display: flex; align-items: center; gap: 10px; cursor: pointer; }
 .cin-setrow .cin-setlab { font-size: 16px; flex: 1; }
-.cin-setrow .cin-setval { color: var(--muted); font-size: 14px; text-align: right; }
+.cin-setrow .cin-setval { color: var(--muted); font-size: 14px; text-align: right; min-width: 5.5em; font-variant-numeric: tabular-nums; }   /* 固定宽+等宽数字：多出 .5 一位也不挤动布局 */
 .cin-setrow .cin-setchev { color: var(--muted); font-size: 18px; flex: none; transition: transform .2s ease; }
 .cin-set.open .cin-setchev { transform: rotate(90deg); }
 .cin-set.open .cin-setrow .cin-setval { color: var(--accent); }
-/* 底纹滑动条：底纹填充从左往右长（=进度），数字钉在填充最右缘随之移动；无框线 */
-.cin-slidewrap { position: relative; height: 46px; margin: 2px 2px 12px; border-radius: 13px; background: color-mix(in srgb, var(--surface-2) 45%, transparent); overflow: hidden; }
-.cin-slidefill { position: absolute; left: 0; top: 0; bottom: 0; min-width: 46px; background: var(--surface-2); border-radius: 13px; display: flex; align-items: center; justify-content: flex-end; padding-right: 13px; }
-.cin-slideval { font-family: var(--mono); font-size: 15px; color: var(--text); white-space: nowrap; pointer-events: none; }
+/* 滑动条：只一条底纹填充进度（无轨道底纹、条上无数字）；数值显示在上面那行 */
+.cin-slidewrap { position: relative; height: 40px; margin: 2px 2px 12px; border-radius: 11px; overflow: hidden; }
+.cin-slidefill { position: absolute; left: 0; top: 0; bottom: 0; min-width: 6px; background: var(--surface-2); border-radius: 11px; }
 .cin-slide { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; -webkit-appearance: none; appearance: none; cursor: ew-resize; }
 /* 时间线页（中性、简洁） */
 .cl-day { text-align: center; color: var(--muted); font-size: 12px; margin: 20px 0 8px; letter-spacing: .5px; }
