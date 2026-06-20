@@ -910,7 +910,7 @@ const PREFETCH_RECENT = 24;   // 后台预缓存最近这么多个对话；更�
 function prefetchSeed(sessions) {
   if (!Array.isArray(sessions) || !sessions.length) return;
   state.pfQueue = sessions.slice(0, PREFETCH_RECENT).map((s) => s.id).filter(Boolean); // 列表已按最近活跃排序
-  prefetchKick();
+  clearTimeout(state.pfStart); state.pfStart = setTimeout(prefetchKick, 3000); // 延后起跑：先让你打开对话，别让后台预缓存抢着把 bridge 卡住
 }
 function prefetchKick() {
   if (state.pfBusy) return;
@@ -1074,7 +1074,7 @@ function loadMoreDown() {
 function onHistoryWindow(m) {
   if (m.prefetch) { // 后台预缓存末尾窗（不渲染）
     if (!m.unchanged && m.sessionId && m.items) idbPut('win2:' + m.sessionId, { ver: m.ver, items: m.items, top: m.start, total: m.total, atTop: m.atTop, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
-    state.pfBusy = false; setTimeout(prefetchKick, 200); return;
+    state.pfBusy = false; setTimeout(prefetchKick, 600); return; // 慢一点，给你的开会话让路
   }
   if (m.sessionId !== state.currentSession) return;
   const h = state.hist;
@@ -1087,6 +1087,19 @@ function onHistoryWindow(m) {
   if (m.dir === 'down') { if (!h) return; h.loading = false; h.bottom = m.end; h.atBottom = m.atBottom; appendWindow(m.items || []); refreshHistInd(); return; }
   // init / find：整窗渲染
   const isFind = m.dir === 'find';
+  // 平滑增量：开会话时缓存已渲染同一段、只是尾部多了几条新消息 → **只追加新尾，不清屏重渲整段**
+  //（修「先显示本地旧对话、卡一两秒再整段重刷」——本地秒显，新消息直接接到底部）。
+  if (!isFind && h && h.sid === m.sessionId && m.start === h.top && m.total >= h.total && !h.local) {
+    const rendered = Math.max(0, h.bottom - h.top);
+    const tail = (m.items || []).slice(rendered);
+    const t = $('thread'); const atBot = t.scrollTop + t.clientHeight >= t.scrollHeight - 60;
+    if (tail.length) { appendWindow(tail); if (atBot) scrollThread(); }
+    h.total = m.total; h.bottom = m.end; h.atTop = m.atTop; h.atBottom = m.atBottom; h.ver = m.ver;
+    applyHistMeta(m, false);
+    idbPut('win2:' + m.sessionId, { ver: m.ver, items: m.items, top: m.start, total: m.total, atTop: m.atTop, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
+    idbGet('arc:' + m.sessionId).then((arc) => { if (arc && arc.ver === m.ver && state.hist && state.hist.sid === m.sessionId) { state.hist.local = arc.items; state.hist.total = arc.items.length; } refreshHistInd(); });
+    refreshHistInd(); return;
+  }
   state.hist = { sid: m.sessionId, top: m.start, bottom: m.end, total: m.total, atTop: m.atTop, atBottom: m.atBottom, ver: m.ver, loading: false, local: null };
   if (isFind) state.hist.downGuard = Date.now() + 1000; // 跳转沉降期间不自动往下补
   renderInitWindow(m, isFind, false);   // 服务端权威 → 套准模型 pref（非 tentative）
