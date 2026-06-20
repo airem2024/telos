@@ -380,7 +380,7 @@ function handle(m) {
       if (state.everAuthed) connbar('重连中…', true);
       else { connbar('鉴权失败：token 不对', true); toast('Token 不正确'); show('settings'); }
       break;
-    case 'sessions': state.sessions = m.sessions || []; if (m.folders) state.folders = m.folders; renderSessions(); maybeAutoOpen(); break;
+    case 'sessions': state.sessions = m.sessions || []; if (m.folders) state.folders = m.folders; renderSessions(); maybeAutoOpen(); prefetchSeed(state.sessions); break;
     case 'usage': state.usage = m; renderUsageStrip(); if ($('usageFull').classList.contains('show')) renderUsageFull(); break;
     case 'app_update': onAppUpdate(m); break;
     case 'folders':
@@ -388,7 +388,7 @@ function handle(m) {
       if (state.activeFolder && !state.folders.includes(state.activeFolder)) state.activeFolder = null;
       renderSessions(); break;
     case 'assigned': wsend({ type: 'list_sessions' }); break;
-    case 'history': renderHistory(m); break;
+    case 'history': if (m.prefetch) onPrefetchHistory(m); else renderHistory(m); break;
     case 'dirs': renderDirs(m); break;
     case 'turn_start': state.busy = true; state.turnTools = []; state.toolRow = null; startStatus(); updateSend(); break;
     case 'session_init':
@@ -899,6 +899,29 @@ function idbGet(key) {
 }
 function idbPut(key, val) {
   return idbDB().then((db) => { if (db) try { db.transaction('hist', 'readwrite').objectStore('hist').put(val, key); } catch (e) {} }).catch(() => {});
+}
+// ---- 全量历史本地化（近期+按需）：后台悄悄把最近一批对话预缓存到本地，其余打开时缓存；都永久留存、可离线翻、版本号增量更新 ----
+const PREFETCH_RECENT = 24;   // 后台预缓存最近这么多个对话；更旧的等你打开时再缓存
+function prefetchSeed(sessions) {
+  if (!Array.isArray(sessions) || !sessions.length) return;
+  state.pfQueue = sessions.slice(0, PREFETCH_RECENT).map((s) => s.id).filter(Boolean); // 列表已按最近活跃排序
+  prefetchKick();
+}
+function prefetchKick() {
+  if (state.pfBusy) return;
+  if (document.visibilityState !== 'visible') return;   // 后台/冻结就暂停，回前台再续
+  const q = state.pfQueue || [];
+  let id; while ((id = q.shift())) { if (id !== state.currentSession) break; }  // 跳过正打开的（openSession 自己会取）
+  if (!id) return;
+  state.pfBusy = true;
+  idbGet('h:' + id).then((c) => {
+    if (!wsend({ type: 'get_history', sessionId: id, knownVer: (c && c.ver) || null, prefetch: true })) { state.pfBusy = false; q.unshift(id); } // 没连上：放回队首，等回连/可见再续
+  }).catch(() => { state.pfBusy = false; });
+}
+function onPrefetchHistory(m) {
+  state.pfBusy = false;
+  if (!m.unchanged && m.sessionId && m.items) idbPut('h:' + m.sessionId, { ver: m.ver, items: m.items, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
+  setTimeout(prefetchKick, 200);   // 串行 + 间隔，别一次性把带宽/服务器打满
 }
 function openSession(s) {
   LS.lastSid = s.id; // 客户端缓存「上一个打开的对话」，供「进入应用自动进入上个对话」用（服务端按最新回复会乱，故存本地）
@@ -2997,8 +3020,11 @@ function boot() {
     ensureConnected(); // back to foreground → reconnect now, don't wait out a background-throttled timer
     state.lastRx = Date.now(); // reset liveness clock so the watchdog doesn't insta-trip after a frozen background
     sendPresence(); // foreground/background changed → update wake-push 不打扰
+    prefetchKick();  // 回前台 → 续上后台预缓存
     if (!state.discActive && P('discFx')) { clearTimeout(state.discShowTimer); if (!state.connected) state.discShowTimer = setTimeout(showDisc, 3000); }
   });
+  // 在场心跳：看着对话时每 15s 报一次在场，电影模式据此判断"还在不在"；锁屏/切后台心跳自动停，服务端 ~40s 内翻成守夜
+  setInterval(() => { if (document.visibilityState === 'visible' && state.screen === 'chat' && state.currentSession) sendPresence(); }, 15000);
 
   // tap the dimmed backdrop (outside the sheet) to dismiss
   SCRIMS.forEach((id) => {
