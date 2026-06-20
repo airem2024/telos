@@ -485,6 +485,17 @@ button.model:active { opacity: .6; }
 .memcard-del { flex: none; border: none; background: var(--surface-2); color: var(--muted); border-radius: 10px; padding: 6px 12px; font-size: 13px; }
 .memcard-del.danger { color: #d0492f; }
 .memcard-text { font-size: 14.5px; color: var(--text); line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.memcard.tappable:active { background: var(--surface-2); }
+/* 编辑记忆页（仿日记 .dwlist/.dwitem 风格）*/
+#memEditList .dwitem + .dwitem { border-top: 1px solid var(--border); }
+#memEditList .me-right { margin-left: auto; }
+#memEditList .cin-numinp { border: none; background: transparent; color: var(--text); font: inherit; text-align: right; padding: 0 1px; outline: none; }
+.dwitem.medel { color: #d0492f; }
+.dwitem.medel .dwlbl { color: #d0492f; }
+.dwitem.medel:active { background: var(--surface-2); }
+.mepicker { position: fixed; left: 20px; bottom: calc(var(--safe-bottom) + 20px); background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 8px; display: flex; flex-wrap: wrap; gap: 4px; max-width: 86vw; box-shadow: 0 8px 28px rgba(0,0,0,.18); z-index: 60; }
+.mepicker button { font-size: 15px; padding: 9px 16px; border-radius: 10px; background: none; border: none; color: var(--text); }
+.mepicker button:active { background: var(--surface-2); }
 .mood-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; vertical-align: middle; margin-right: 4px; }
 .mood-lab { color: var(--muted); }
 .mood-sep { margin: 0 5px; color: var(--border); }

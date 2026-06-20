@@ -66,7 +66,7 @@ const EFFORTS = [
 ];
 
 /* ============ navigation ============ */
-const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryWrite', 'cinema', 'cinemaLog', 'memMgr'];
+const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryWrite', 'cinema', 'cinemaLog', 'memMgr', 'memEdit'];
 function show(name) {
   SCREENS.forEach((s) => $(s).classList.toggle('active', s === name));
   state.screen = name;
@@ -168,6 +168,7 @@ window.onAndroidBack = () => {
   if (state.screen === 'diaryWrite') { if (document.querySelector('.dwpicker')) { closeDwPicker(); return; } show('diary'); return; }
   if (state.screen === 'cinemaLog') { show('cinema'); return; }
   if (state.screen === 'cinema') { cinemaBack(); return; }
+  if (state.screen === 'memEdit') { if (document.querySelector('.mepicker')) { closeMemTypePicker(); return; } show('memMgr'); return; }
   if (state.screen === 'memMgr') { show(state.currentSession ? 'chat' : 'list'); return; }
   if (state.screen === 'diary') { diaryBack(); return; }
   if (state.screen === 'import') show(state.importReturn || 'files');
@@ -442,6 +443,8 @@ function handle(m) {
     case 'memory': onMemory(m); break;
     case 'memory_recover_armed': if (m.sessionId === state.currentSession) { closeScrim('memScrim'); toast('记忆已就位 · 下条消息会带回'); } break;
     case 'memory_list': onMemoryList(m); break;
+    case 'memory_edited': if (m.ok === false) toast('保存失败'); break;
+    case 'memory_deleted': if (m.ok === false) toast('删除失败'); break;
     case 'dialog_search': onDialogSearch(m); break;
     case 'cinema_log':
       if (state.screen === 'cinemaLog' && state.cinTarget && m.sessionId === state.cinTarget.id) renderCinemaLog(m);
@@ -1649,7 +1652,8 @@ function renderMemMgr() {
     meta.textContent = (MEM_TYPE[it.memory_type] || it.memory_type || '?') + ' · 重要度 ' + (it.importance != null ? it.importance : '?')
       + (it.pinned ? ' · 钉' : '') + (it.resolved === 0 ? ' · 未了结' : '') + (it.domain ? ' · ' + it.domain : '');
     const del = el('button', 'memcard-del' + (archView ? '' : ' danger')); del.textContent = archView ? '取消归档' : '归档';
-    del.addEventListener('click', () => {
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();   // 别触发卡片的编辑
       buzz(12);
       wsend({ type: 'memory_archive', id: it.id, archived: !archView });
       state.memMgr.items = state.memMgr.items.filter((x) => x.id !== it.id);   // 乐观移出当前视图
@@ -1657,9 +1661,101 @@ function renderMemMgr() {
       toast(archView ? '已取消归档' : '已归档');
     });
     top.appendChild(meta); top.appendChild(del); card.appendChild(top);
-    const text = el('div', 'memcard-text'); text.textContent = it.summary || it.content || '(无摘要)'; card.appendChild(text);
+    // 正文(content)才是记忆实体；summary 只是标题、且 Ombre 正文已内嵌【标题】，不重复显示
+    const text = el('div', 'memcard-text'); text.textContent = it.content || it.summary || '(空)'; card.appendChild(text);
+    if (!archView) { card.classList.add('tappable'); card.addEventListener('click', () => openMemEdit(it)); }
     box.appendChild(card);
   }
+}
+
+/* ---- 编辑单条精炼记忆（独立一页·仿日记） ---- */
+const ME_ICON = {
+  type: '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
+  imp: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+  pin: '<path d="M9 4h6l-1 7 3 3v2H7v-2l3-3z"/><line x1="12" y1="16" x2="12" y2="21"/>',
+  pending: '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/>',
+  del: '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+};
+function openMemEdit(it) {
+  state.memEdit = { id: it.id, domain: it.domain || '', type: it.memory_type || 'experience',
+    importance: it.importance != null ? it.importance : 5, pinned: !!it.pinned, resolved: it.resolved !== 0 };
+  state._memDelArm = null;
+  $('memEditText').value = it.content || it.summary || '';
+  $('memEditSub').textContent = 'id ' + it.id + (it.domain ? ' · ' + it.domain : '');
+  closeMemTypePicker(); renderMemEditList();
+  show('memEdit');
+}
+// 仿日记 .dwitem 行：图标 + 标签 + 右侧值/控件
+function meRow(icon, label, valNode, onClick, danger) {
+  const r = el(onClick ? 'button' : 'div', 'dwitem' + (danger ? ' medel' : ''));
+  r.innerHTML = _sv(icon, 20);
+  const l = el('span', 'dwlbl'); l.textContent = label; r.appendChild(l);
+  if (valNode != null) { if (typeof valNode === 'string') { const v = el('span', 'dwval'); v.textContent = valNode; r.appendChild(v); } else { valNode.classList.add('me-right'); r.appendChild(valNode); } }
+  if (onClick) r.addEventListener('click', onClick);
+  return r;
+}
+function meSwitch(on, onToggle) {
+  const sw = el('button', 'switch' + (on ? ' on' : '')); sw.innerHTML = '<span class="knob"></span>';
+  sw.addEventListener('click', () => { const nv = !sw.classList.contains('on'); sw.classList.toggle('on', nv); buzz(12); onToggle(nv); });
+  return sw;
+}
+function renderMemEditList() {
+  const box = $('memEditList'); if (!box) return; box.innerHTML = '';
+  const e = state.memEdit;
+  // 类型
+  box.appendChild(meRow(ME_ICON.type, '类型', MEM_TYPE[e.type] || e.type, () => toggleMemTypePicker()));
+  // 重要度：电影模式那种行内可编辑数字（1–10）
+  const valw = el('span', 'dwval'); const inp = document.createElement('input');
+  inp.className = 'cin-numinp'; inp.type = 'text'; inp.inputMode = 'numeric'; inp.setAttribute('enterkeyhint', 'done');
+  const size = () => { inp.style.width = (Math.max(1, inp.value.length) + 0.6) + 'ch'; };
+  inp.value = String(e.importance | 0); size();
+  inp.addEventListener('input', size);
+  const commit = () => { let v = parseInt(inp.value, 10); if (isNaN(v)) { inp.value = String(e.importance | 0); size(); return; } v = Math.max(1, Math.min(10, v)); inp.value = String(v); size(); e.importance = v; };
+  inp.addEventListener('change', commit);
+  inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') inp.blur(); });
+  valw.appendChild(inp);
+  box.appendChild(meRow(ME_ICON.imp, '重要度', valw));
+  // 钉选 / 未了结
+  box.appendChild(meRow(ME_ICON.pin, '钉选 · 核心准则不衰减', meSwitch(e.pinned, (v) => { e.pinned = v; })));
+  box.appendChild(meRow(ME_ICON.pending, '未了结 · 压缩后优先浮现', meSwitch(!e.resolved, (v) => { e.resolved = !v; })));
+  // 删除（两步确认）
+  box.appendChild(meRow(ME_ICON.del, state._memDelArm === e.id ? '确认删除？不可恢复' : '删除这条记忆', null, deleteMemEdit, true));
+}
+const ME_TYPES = [['experience', '经历'], ['persona', '自我'], ['emotion', '情感'], ['knowledge', '知识'], ['secret', '秘密']];
+function closeMemTypePicker() { const p = document.querySelector('.mepicker'); if (p) p.remove(); }
+function toggleMemTypePicker() {
+  if (document.querySelector('.mepicker')) { closeMemTypePicker(); return; }
+  const p = el('div', 'mepicker');
+  ME_TYPES.forEach(([k, lab]) => {
+    const b = el('button'); b.textContent = lab; if (k === state.memEdit.type) b.style.background = 'var(--surface-2)';
+    b.addEventListener('click', () => { state.memEdit.type = k; closeMemTypePicker(); renderMemEditList(); buzz(8); });
+    p.appendChild(b);
+  });
+  $('memEdit').appendChild(p);
+}
+function saveMemEdit() {
+  const e = state.memEdit; if (!e) return;
+  const content = $('memEditText').value.trim();
+  if (!content) { toast('正文不能为空'); return; }
+  wsend({ type: 'memory_edit', id: e.id, content, memory_type: e.type, importance: e.importance, pinned: e.pinned, resolved: e.resolved });
+  const it = (state.memMgr.items || []).find((x) => x.id === e.id);
+  if (it) { it.content = content; it.memory_type = e.type; it.importance = e.importance; it.pinned = e.pinned ? 1 : 0; it.resolved = e.resolved ? 1 : 0; }
+  renderMemMgr();
+  closeMemTypePicker(); show('memMgr'); buzz(12); toast('已保存');
+}
+function deleteMemEdit() {
+  const e = state.memEdit; if (!e) return;
+  if (state._memDelArm !== e.id) {
+    state._memDelArm = e.id; renderMemEditList();
+    setTimeout(() => { if (state._memDelArm === e.id) { state._memDelArm = null; if (state.screen === 'memEdit') renderMemEditList(); } }, 3000);
+    return;
+  }
+  state._memDelArm = null;
+  wsend({ type: 'memory_delete', id: e.id });
+  state.memMgr.items = (state.memMgr.items || []).filter((x) => x.id !== e.id);
+  state.memMgr.total = Math.max(0, (state.memMgr.total || 1) - 1);
+  renderMemMgr();
+  closeMemTypePicker(); show('memMgr'); buzz(20); toast('已删除');
 }
 
 /* ============ 醒来 / 小纸条 / 日记 ============ */
@@ -3035,6 +3131,9 @@ function boot() {
   });
   $('memRecoverBtn').addEventListener('click', () => { if (!state.currentSession) return; buzz(12); wsend({ type: 'memory_recover', sessionId: state.currentSession }); });
   $('memMgrOpen').addEventListener('click', () => { closeScrim('memScrim'); openMemMgr(); });
+  $('memEditSave').addEventListener('click', saveMemEdit);
+  $('memEditBack').addEventListener('click', () => { closeMemTypePicker(); show('memMgr'); });
+  initPageSwipe('memEdit', { onBack: () => { closeMemTypePicker(); show('memMgr'); }, under: 'memMgr' });
   // 重命名从菜单挪到「点对话标题」
   $('chatTitle').addEventListener('click', () => { if (!state.currentSession) return; openPrompt('重命名会话', '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }, state.curTitle || ''); });
   $('chatSub').addEventListener('click', () => { const cs = $('chatSub'); if (cs.classList.contains('mood')) cs.classList.toggle('expanded'); });   // 点心情展开/收起看全
