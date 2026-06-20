@@ -949,13 +949,14 @@ function openSession(s) {
     idbGet('win2:' + s.id).then((cached) => {
       if (state.currentSession !== s.id) return;
       if (cached && cached.items) {
-        state.hist = { sid: s.id, top: cached.top || 0, bottom: (cached.top || 0) + cached.items.length, total: cached.total || cached.items.length, atTop: !!cached.atTop, atBottom: true, ver: cached.ver || null, loading: false, local: null };
+        state.hist = { sid: s.id, top: cached.top || 0, bottom: (cached.top || 0) + cached.items.length, total: cached.total || cached.items.length, atTop: !!cached.atTop, atBottom: true, ver: cached.ver || null, loading: false, local: null, items: cached.items.slice() };
         try { renderInitWindow({ ...cached, sessionId: s.id }, false, true); refreshHistInd(); } catch (e) {} // tentative：模型先临时套缓存值、等服务端权威覆盖
       }
     }).catch(() => {}).then(() => {
       if (state.currentSession !== s.id) return;
-      const kv = (state.hist && state.hist.ver) || null;
-      state.pendingHistory = wsend({ type: 'history_window', sessionId: s.id, limit: 60, knownVer: kv }) ? null : s.id;
+      const h = state.hist;
+      // 带上缓存的 ver + 段总数/段起点：服务端据此只回新增那几条（小 payload），不重传整段
+      state.pendingHistory = wsend({ type: 'history_window', sessionId: s.id, knownVer: (h && h.ver) || null, knownTotal: h ? h.total : undefined, knownTop: h ? h.top : undefined }) ? null : s.id;
     });
   }
   wsend({ type: 'cinema_get', sessionId: s.id }); // 知道这个对话在不在守夜（列表行「时间流动中」+ 标题旁「输入中」）
@@ -1083,6 +1084,18 @@ function onHistoryWindow(m) {
     applyHistMeta(m, false);
     scrollThread(); tryPendingJump(); return;
   }
+  if (m.dir === 'append') { // 服务端只回了「缓存之后新增的那几条」(小 payload) → 直接追加到底部，不重渲整段
+    if (h && h.sid === m.sessionId && h.items) {
+      const t = $('thread'); const atBot = t.scrollTop + t.clientHeight >= t.scrollHeight - 60;
+      if (m.items && m.items.length) { appendWindow(m.items); if (atBot) scrollThread(); }
+      h.items = h.items.concat(m.items || []); h.total = m.total; h.bottom = h.top + h.items.length; h.atBottom = true; h.ver = m.ver;
+      applyHistMeta(m, false);
+      idbPut('win2:' + m.sessionId, { ver: m.ver, items: h.items, top: h.top, total: m.total, atTop: h.atTop, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
+      idbGet('arc:' + m.sessionId).then((arc) => { if (arc && arc.ver === m.ver && state.hist && state.hist.sid === m.sessionId) { state.hist.local = arc.items; state.hist.total = arc.items.length; } refreshHistInd(); });
+      refreshHistInd();
+    }
+    return;
+  }
   if (m.dir === 'up') { if (!h) return; h.loading = false; h.top = m.start; h.atTop = m.atTop; prependWindow(m.items || []); refreshHistInd(); return; }
   if (m.dir === 'down') { if (!h) return; h.loading = false; h.bottom = m.end; h.atBottom = m.atBottom; appendWindow(m.items || []); refreshHistInd(); return; }
   // init / find：整窗渲染
@@ -1094,13 +1107,13 @@ function onHistoryWindow(m) {
     const tail = (m.items || []).slice(rendered);
     const t = $('thread'); const atBot = t.scrollTop + t.clientHeight >= t.scrollHeight - 60;
     if (tail.length) { appendWindow(tail); if (atBot) scrollThread(); }
-    h.total = m.total; h.bottom = m.end; h.atTop = m.atTop; h.atBottom = m.atBottom; h.ver = m.ver;
+    h.total = m.total; h.bottom = m.end; h.atTop = m.atTop; h.atBottom = m.atBottom; h.ver = m.ver; h.items = (m.items || []).slice();
     applyHistMeta(m, false);
     idbPut('win2:' + m.sessionId, { ver: m.ver, items: m.items, top: m.start, total: m.total, atTop: m.atTop, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
     idbGet('arc:' + m.sessionId).then((arc) => { if (arc && arc.ver === m.ver && state.hist && state.hist.sid === m.sessionId) { state.hist.local = arc.items; state.hist.total = arc.items.length; } refreshHistInd(); });
     refreshHistInd(); return;
   }
-  state.hist = { sid: m.sessionId, top: m.start, bottom: m.end, total: m.total, atTop: m.atTop, atBottom: m.atBottom, ver: m.ver, loading: false, local: null };
+  state.hist = { sid: m.sessionId, top: m.start, bottom: m.end, total: m.total, atTop: m.atTop, atBottom: m.atBottom, ver: m.ver, loading: false, local: null, items: isFind ? null : (m.items || []).slice() };
   if (isFind) state.hist.downGuard = Date.now() + 1000; // 跳转沉降期间不自动往下补
   renderInitWindow(m, isFind, false);   // 服务端权威 → 套准模型 pref（非 tentative）
   if (!isFind) idbPut('win2:' + m.sessionId, { ver: m.ver, items: m.items, top: m.start, total: m.total, atTop: m.atTop, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood }); // 只缓存末尾窗，find 的中段窗不当首屏缓存
