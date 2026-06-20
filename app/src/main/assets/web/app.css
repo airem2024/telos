@@ -69,7 +69,8 @@ html, body {
 }
 body { -webkit-user-select: none; user-select: none; }
 
-.screen { position: fixed; inset: 0; display: none; flex-direction: column; background: var(--bg); }
+/* 高度钉到「可见视口」(visualViewport)：键盘弹出时只压缩中间消息区，标题栏+输入框始终可见、不被整页顶走 */
+.screen { position: fixed; left: 0; right: 0; top: var(--vvtop, 0px); height: var(--vvh, 100%); display: none; flex-direction: column; background: var(--bg); }
 .screen.active { display: flex; }
 .hidden { display: none !important; }
 
@@ -420,6 +421,8 @@ button.model:active { opacity: .6; }
 .chattitle { flex: 1; text-align: center; min-width: 0; }
 .ctitle { font-family: var(--ui); font-size: 15.5px; font-weight: 400; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 62%; margin: 0 auto; }
 .csub { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.csub.mood { cursor: pointer; }                                                                 /* 有心情：默认仍单行省略，点一下才展开 */
+.csub.mood.expanded { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.35; }   /* 展开后换行显全、不截断 */
 
 /* ===== ⋮ dropdown menu ===== */
 .menuback { position: fixed; inset: 0; z-index: 90; display: none; background: rgba(20,18,14,.10); opacity: 0; transition: opacity .2s ease; }
@@ -460,6 +463,28 @@ button.model:active { opacity: .6; }
 .memstat .msnum { font-family: var(--mono); font-size: 22px; font-weight: 600; color: var(--text); }
 .memstat .mslab { font-size: 12px; color: var(--muted); margin-top: 3px; }
 .memstats.off { opacity: .45; }
+/* 记忆恢复设置：输入框 + 立即恢复 + 管理入口 */
+.memreco { margin-top: 18px; }
+.memreco-hd { font-size: 12px; color: var(--muted); letter-spacing: .5px; margin: 0 2px 8px; }
+.memreco-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 2px; font-size: 15px; }
+.numin { width: 96px; font-size: 16px; font-family: var(--mono); color: var(--text); text-align: right;
+  background: var(--surface-2); border: none; border-radius: 9px; padding: 9px 12px; }
+.numin:focus { outline: 1.5px solid var(--accent); }
+.memact { width: 100%; border: none; border-radius: 14px; padding: 13px; margin-top: 12px;
+  font-size: 15px; font-weight: 600; background: var(--accent); color: #fff; }
+.memact:active { background: var(--accent-press); }
+.memact.ghost { background: var(--surface-2); color: var(--text); font-weight: 500; }
+.memreco-hint { color: var(--muted); font-size: 12px; line-height: 1.55; margin: 8px 2px 0; }
+/* 记忆管理页 */
+.memmgr-filters { display: flex; gap: 8px; padding: 6px 16px 8px; overflow-x: auto; }
+.memf { flex: none; border: none; background: var(--surface-2); color: var(--muted); border-radius: 16px; padding: 7px 15px; font-size: 13px; }
+.memf.on { background: var(--accent); color: #fff; }
+.memcard { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; margin: 0 14px 10px; }
+.memcard-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.memcard-meta { font-size: 12px; color: var(--muted); }
+.memcard-del { flex: none; border: none; background: var(--surface-2); color: var(--muted); border-radius: 10px; padding: 6px 12px; font-size: 13px; }
+.memcard-del.danger { color: #d0492f; }
+.memcard-text { font-size: 14.5px; color: var(--text); line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .mood-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; vertical-align: middle; margin-right: 4px; }
 .mood-lab { color: var(--muted); }
 .mood-sep { margin: 0 5px; color: var(--border); }
@@ -723,22 +748,21 @@ button.model:active { opacity: .6; }
 }
 .search-box::placeholder { color: var(--muted); }
 /* 重命名/输入悬浮框：仿搜索框浮在顶部、无框线、点空白返回，只一个保存键 */
-.prompt-bar-top { position: absolute; top: 0; left: 0; right: 0; z-index: 2; padding: calc(var(--safe-top) + 16px) 16px 0; pointer-events: none; }
-.prompt-label { font-size: 13px; color: rgba(255,255,255,.92); margin: 0 6px 9px; pointer-events: none; text-shadow: 0 1px 6px rgba(0,0,0,.35); }
-.prompt-row { display: flex; align-items: flex-end; gap: 10px; }
-.prompt-box {
-  flex: 1; border: none; background: var(--surface); color: var(--text);
-  border-radius: 22px; padding: 14px 18px; font-size: 17px; outline: none; pointer-events: auto;
-  font-family: var(--ui); line-height: 1.4; resize: none; max-height: 120px;
-  box-shadow: 0 10px 30px rgba(var(--shadow),.18), 0 2px 6px rgba(var(--shadow),.08);
-}
-.prompt-box::placeholder { color: var(--muted); }
-.prompt-save {
-  pointer-events: auto; flex: none; border: none; background: var(--accent); color: #fff;
-  border-radius: 22px; padding: 0 20px; height: 50px; font-size: 16px; font-weight: 600;
-  box-shadow: 0 8px 22px rgba(var(--shadow),.18);
-}
-.prompt-save:active { background: var(--accent-press); }
+/* 重命名 / 确认删除：对齐对话输入框的方圆框；操作键在框下方、只有框里有字才出现 */
+.prompt-float { position: absolute; top: calc(var(--safe-top) + 56px); left: 14px; right: 14px; z-index: 2;
+  display: flex; flex-direction: column; gap: 12px; pointer-events: none; }
+.prompt-float > * { pointer-events: auto; }
+.prompt-inbox { background: var(--surface); border-radius: 24px; padding: 14px 18px;
+  box-shadow: 0 12px 34px rgba(var(--shadow),.18), 0 2px 8px rgba(var(--shadow),.08); }
+.prompt-inbox textarea { width: 100%; border: none; background: transparent; color: var(--text);
+  font-size: 17px; font-family: var(--ui); line-height: 1.4; outline: none; resize: none; max-height: 38vh; }
+.prompt-inbox textarea::placeholder { color: var(--muted); }
+.prompt-go { border: none; border-radius: 18px; padding: 14px; font-size: 16px; font-weight: 700;
+  background: var(--accent); color: #fff; box-shadow: 0 8px 22px rgba(var(--shadow),.18); display: none; }
+.prompt-go.show { display: block; }
+.prompt-go:active { background: var(--accent-press); }
+.prompt-go.danger { background: #d0492f; }
+.prompt-go.danger:active { background: #b03a23; }
 /* 文件管理：复制当前路径 */
 .dircopy { flex: none; border: none; background: transparent; color: var(--muted); padding: 8px 6px; }
 .dircopy:active { color: var(--text); }
@@ -857,6 +881,18 @@ body.sysfont {
 .cin-modelrow .seg-label { font-size: 16px; flex: 1; }
 .cin-modelrow .cin-modelval { color: var(--muted); font-size: 14px; text-align: right; }
 .cin-modelrow .cin-modelchev { color: var(--muted); font-size: 18px; flex: none; }
+/* 披露式设置行：平时只一行（标签+当前值），点开才露滑块 */
+.cin-setrow { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.cin-setrow .cin-setlab { font-size: 16px; flex: 1; }
+.cin-setrow .cin-setval { color: var(--muted); font-size: 14px; text-align: right; }
+.cin-setrow .cin-setchev { color: var(--muted); font-size: 18px; flex: none; transition: transform .2s ease; }
+.cin-set.open .cin-setchev { transform: rotate(90deg); }
+.cin-set.open .cin-setrow .cin-setval { color: var(--accent); }
+.cin-setedit { display: flex; align-items: center; gap: 8px; padding: 2px 2px 10px; }
+.cin-setinp { flex: none; width: 110px; font-size: 16px; font-family: var(--mono); color: var(--text);
+  background: var(--surface-2); border: none; border-radius: 9px; padding: 9px 12px; text-align: right; }
+.cin-setinp:focus { outline: 1.5px solid var(--accent); }
+.cin-setunit { color: var(--muted); font-size: 13px; }
 /* 时间线页（中性、简洁） */
 .cl-day { text-align: center; color: var(--muted); font-size: 12px; margin: 20px 0 8px; letter-spacing: .5px; }
 .cl-row { display: flex; gap: 12px; padding: 5px 6px; font-size: 14px; line-height: 1.6; }

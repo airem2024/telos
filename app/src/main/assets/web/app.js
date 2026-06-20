@@ -66,7 +66,7 @@ const EFFORTS = [
 ];
 
 /* ============ navigation ============ */
-const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryWrite', 'cinema', 'cinemaLog'];
+const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryWrite', 'cinema', 'cinemaLog', 'memMgr'];
 function show(name) {
   SCREENS.forEach((s) => $(s).classList.toggle('active', s === name));
   state.screen = name;
@@ -103,7 +103,17 @@ function closeOverlays() { SCRIMS.forEach(closeScrim); closeMenu(); }
 function setupDrag(id) {
   const scrim = $(id); const sheet = scrim.querySelector('.sheet.drag'); if (!sheet) return;
   const body = sheet.querySelector('.sheetbody');
-  let H = 0, halfY = 0, startY = 0, startT = 0, t = 0, lastY = 0, lastTime = 0, vel = 0, dragging = false, mode = null, startOnHeader = false, startOnField = false;
+  let H = 0, halfY = 0, startY = 0, startT = 0, t = 0, lastY = 0, lastTime = 0, vel = 0, dragging = false, mode = null, startOnHeader = false, startOnField = false, scroller = body;
+  // 找触点下「真正在滚的」元素：预览/编辑区(.edita 等)自带 overflow 滚动、不是 .sheetbody 在滚——
+  // 否则在预览里下滑会被当成「拉动关闭」（body.scrollTop 恒为 0、永远判成在顶部）。
+  const scrollerFor = (target) => {
+    let n = target;
+    while (n && n !== sheet) {
+      if (n.scrollHeight > n.clientHeight + 1) { const oy = getComputedStyle(n).overflowY; if (oy === 'auto' || oy === 'scroll') return n; }
+      n = n.parentElement;
+    }
+    return body;
+  };
   const EASE = 'transform .26s cubic-bezier(.32,.72,0,1)';
   const setT = (y) => { t = y; sheet.style.transform = `translateY(${y}px)`; };
   const detents = () => { H = window.innerHeight; halfY = H * 0.30; };
@@ -121,14 +131,15 @@ function setupDrag(id) {
     startY = lastY = e.touches[0].clientY; lastTime = Date.now(); startT = t; vel = 0; mode = null; dragging = true;
     startOnHeader = !!(e.target.closest && e.target.closest('.sheethdr'));
     startOnField = !!(e.target.closest && e.target.closest('textarea, input'));  // editor textareas scroll themselves
+    scroller = scrollerFor(e.target);                                            // 预览/长内容自带滚动容器：下滑先滚它、到顶才关
   }, { passive: true });
   sheet.addEventListener('touchmove', (e) => {
     if (!dragging) return;
     const y = e.touches[0].clientY, dy = y - startY;
     if (mode === null) {
       const atFull = t <= 1;
-      const atTop = body.scrollTop <= 0;
-      const atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 1;
+      const atTop = scroller.scrollTop <= 0;
+      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
       if (startOnHeader) mode = 'sheet';                       // grip/header always drags
       else if (startOnField) mode = 'scroll';                  // textarea/input scrolls itself; drag the sheet from the grip
       else if (dy > 0 && atTop) mode = 'sheet';                // pull down at top -> collapse/close
@@ -157,6 +168,7 @@ window.onAndroidBack = () => {
   if (state.screen === 'diaryWrite') { if (document.querySelector('.dwpicker')) { closeDwPicker(); return; } show('diary'); return; }
   if (state.screen === 'cinemaLog') { show('cinema'); return; }
   if (state.screen === 'cinema') { cinemaBack(); return; }
+  if (state.screen === 'memMgr') { show(state.currentSession ? 'chat' : 'list'); return; }
   if (state.screen === 'diary') { diaryBack(); return; }
   if (state.screen === 'import') show(state.importReturn || 'files');
   else if (state.screen === 'files') closeFiles();
@@ -426,6 +438,8 @@ function handle(m) {
     case 'cinema_state': onCinemaState(m); break;
     case 'mood': if (m.sessionId === state.currentSession) { state.mood = m.mood || null; updateHeader(); syncMoodMenu(); } break;
     case 'memory': onMemory(m); break;
+    case 'memory_recover_armed': if (m.sessionId === state.currentSession) { closeScrim('memScrim'); toast('记忆已就位 · 下条消息会带回'); } break;
+    case 'memory_list': onMemoryList(m); break;
     case 'cinema_log':
       if (state.screen === 'cinemaLog' && state.cinTarget && m.sessionId === state.cinTarget.id) renderCinemaLog(m);
       break;
@@ -832,9 +846,14 @@ function updateHeader() {
   $('chatTitle').textContent = state.currentSession ? (state.curTitle || 'Claude Code') : '新会话';
   const md = state.mood, hasMood = !!(md && md.on && md.label);
   if (state.currentSession && (P('showModel') || hasMood)) {
-    let html = P('showModel') ? esc(state.sessionModel || 'Claude') : '';
-    if (hasMood) html += (html ? '<span class="mood-sep">·</span>' : '') + '<span class="mood-dot" style="background:' + moodHue(md.label) + '"></span><span class="mood-lab">' + esc(md.label) + '</span>';
-    $('chatSub').innerHTML = html; $('chatSub').style.display = 'block';
+    // 有心情就让它独占这行：隐藏模型名腾出全宽 + 允许换行，省得长情绪被省略号截断；没心情才显模型名
+    const html = hasMood
+      ? '<span class="mood-dot" style="background:' + moodHue(md.label) + '"></span><span class="mood-lab">' + esc(md.label) + '</span>'
+      : esc(state.sessionModel || 'Claude');
+    $('chatSub').innerHTML = html;
+    $('chatSub').classList.toggle('mood', hasMood);
+    $('chatSub').classList.remove('expanded');   // 每次刷新先收起，点一下才展开看全
+    $('chatSub').style.display = 'block';
   } else $('chatSub').style.display = 'none';
   // dir chip only matters for a brand-new session (where you can still choose the dir)
   $('dirChip').style.display = state.currentSession ? 'none' : 'inline-flex';
@@ -1186,7 +1205,20 @@ function managerUpload(fileList) {
 }
 
 /* ============ prompt sheet ============ */
-function openPrompt(title, value, cb, placeholder) { $('promptTitle').textContent = title; $('promptInput').value = value || ''; $('promptInput').placeholder = placeholder || ''; state.promptCb = cb; openScrim('promptScrim'); setTimeout(() => $('promptInput').focus(), 100); }
+function syncPromptGo() { const inp = $('promptInput'), btn = $('promptOk'); btn.classList.toggle('show', !!inp.value.trim() || state.promptAllowEmpty); }
+function openPrompt(title, value, cb, placeholder, opts) {
+  opts = opts || {};
+  const danger = opts.danger !== undefined ? opts.danger : /删除/.test(title || '');   // 删除类 → 红键、打字即解锁
+  const inp = $('promptInput'), btn = $('promptOk');
+  inp.value = value || '';
+  inp.placeholder = placeholder || (danger ? '确认删除' : title) || '';   // 文字放进框里当 placeholder
+  btn.textContent = opts.btn || (danger ? '确认删除' : '保存');
+  btn.classList.toggle('danger', danger);
+  state.promptCb = cb; state.promptDanger = danger; state.promptAllowEmpty = !!opts.allowEmpty;
+  syncPromptGo();
+  openScrim('promptScrim');
+  setTimeout(() => { inp.focus(); inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, window.innerHeight * 0.38) + 'px'; }, 100);
+}
 
 /* ============ compact history ============ */
 function openCompactPrompt() { $('compactText').value = P('compactPrompt') || ''; openScrim('compactScrim'); }
@@ -1340,17 +1372,18 @@ function openMemory() {
 }
 function onMemory(m) {
   if (m.sessionId && m.sessionId !== state.currentSession) return;
-  state.mem = { available: !!m.available, on: !!m.on, stats: m.stats || null };
+  state.mem = { available: !!m.available, on: !!m.on, stats: m.stats || null, recentN: m.recentN, maxTok: m.maxTok };
   renderMemory();
 }
 function renderMemory() {
   const sw = $('memOn'), note = $('memNote'), box = $('memStats'); if (!sw) return;
   const mem = state.mem;
-  if (!mem) { sw.classList.remove('on'); box.innerHTML = '<div class="memstat"><div class="mslab">读取中…</div></div>'; box.classList.add('off'); return; }
+  const reco = $('memReco');
+  if (!mem) { sw.classList.remove('on'); box.innerHTML = '<div class="memstat"><div class="mslab">读取中…</div></div>'; box.classList.add('off'); if (reco) reco.style.display = 'none'; return; }
   if (!mem.available) {
     sw.classList.remove('on'); sw.disabled = true; sw.style.opacity = '.4';
     note.textContent = '这台服务器还没装长期记忆模块（Mnemosyne），暂时开不了。';
-    box.innerHTML = ''; box.classList.add('off'); return;
+    box.innerHTML = ''; box.classList.add('off'); if (reco) reco.style.display = 'none'; return;
   }
   sw.disabled = false; sw.style.opacity = '';
   note.textContent = '开启后，这个对话会自动归档进茜茜的长期记忆，压缩后也能用记忆接回状态。关掉只是不再自动归档／恢复，记忆工具本身一直都在。';
@@ -1360,6 +1393,66 @@ function renderMemory() {
   box.innerHTML = '<div class="memstat"><div class="msnum">' + mems + '</div><div class="mslab">精炼记忆</div></div>'
     + '<div class="memstat"><div class="msnum">' + turns + '</div><div class="mslab">归档对话（轮）</div></div>';
   box.classList.toggle('off', !mem.on);
+  if (reco) {
+    reco.style.display = '';
+    if (document.activeElement !== $('memRecentN')) $('memRecentN').value = (mem.recentN != null ? mem.recentN : 8);
+    if (document.activeElement !== $('memMaxTok')) $('memMaxTok').value = (mem.maxTok != null ? mem.maxTok : 3000);
+  }
+}
+
+/* ---- 记忆管理页（翻看 / 归档精炼记忆）---- */
+const MEM_FILTERS = [['', '全部'], ['pinned', '钉选'], ['pending', '未了结'], ['archived', '已归档']];
+const MEM_TYPE = { experience: '经历', persona: '自我', emotion: '情感', knowledge: '知识', secret: '秘密' };
+function openMemMgr() {
+  state.memMgr = { filter: '', items: [], offset: 0, total: 0 };
+  show('memMgr'); renderMemMgrFilters();
+  $('memMgrBody').innerHTML = '<div class="cl-empty">读取中…</div>';
+  wsend({ type: 'memory_list', filter: '', offset: 0 });
+}
+function loadMemMgr(filter) {
+  state.memMgr.filter = filter; state.memMgr.offset = 0;
+  renderMemMgrFilters();
+  $('memMgrBody').innerHTML = '<div class="cl-empty">读取中…</div>';
+  wsend({ type: 'memory_list', filter, offset: 0 });
+}
+function renderMemMgrFilters() {
+  const wrap = $('memMgrFilters'); if (!wrap) return; wrap.innerHTML = '';
+  for (const [f, lab] of MEM_FILTERS) {
+    const chip = el('button', 'memf' + (state.memMgr.filter === f ? ' on' : '')); chip.textContent = lab;
+    chip.addEventListener('click', () => loadMemMgr(f));
+    wrap.appendChild(chip);
+  }
+}
+function onMemoryList(m) {
+  if (state.screen !== 'memMgr' || !state.memMgr) return;
+  if ((m.filter || '') !== state.memMgr.filter) return;   // 旧请求回包，丢弃
+  state.memMgr.items = m.items || []; state.memMgr.total = m.total || 0;
+  renderMemMgr();
+}
+function renderMemMgr() {
+  const box = $('memMgrBody'); if (!box) return;
+  const items = (state.memMgr && state.memMgr.items) || [];
+  if (!items.length) { box.innerHTML = '<div class="cl-empty">这里还没有记忆。</div>'; return; }
+  box.innerHTML = '';
+  const archView = state.memMgr.filter === 'archived';
+  for (const it of items) {
+    const card = el('div', 'memcard');
+    const top = el('div', 'memcard-top');
+    const meta = el('span', 'memcard-meta');
+    meta.textContent = (MEM_TYPE[it.memory_type] || it.memory_type || '?') + ' · 重要度 ' + (it.importance != null ? it.importance : '?')
+      + (it.pinned ? ' · 钉' : '') + (it.resolved === 0 ? ' · 未了结' : '') + (it.domain ? ' · ' + it.domain : '');
+    const del = el('button', 'memcard-del' + (archView ? '' : ' danger')); del.textContent = archView ? '取消归档' : '归档';
+    del.addEventListener('click', () => {
+      buzz(12);
+      wsend({ type: 'memory_archive', id: it.id, archived: !archView });
+      state.memMgr.items = state.memMgr.items.filter((x) => x.id !== it.id);   // 乐观移出当前视图
+      renderMemMgr();
+      toast(archView ? '已取消归档' : '已归档');
+    });
+    top.appendChild(meta); top.appendChild(del); card.appendChild(top);
+    const text = el('div', 'memcard-text'); text.textContent = it.summary || it.content || '(无摘要)'; card.appendChild(text);
+    box.appendChild(card);
+  }
 }
 
 /* ============ 醒来 / 小纸条 / 日记 ============ */
@@ -1390,19 +1483,40 @@ function cinToggle(label, on, onClick) {
   sw.addEventListener('click', () => { sw.classList.toggle('on'); buzz(12); onClick(); });
   row.appendChild(lab); row.appendChild(sw); return row;
 }
-function cinSlider(label, val, min, max, step, fmt, onDone) {
-  const pr = (x) => step < 1 ? parseFloat(x) : parseInt(x);   // 小数步进（如花费上限 $0.5）要 parseFloat
-  const row = el('div', 'setitem sliderrow');
-  const top = el('div', 'sl-top'); const lab = el('span'); lab.textContent = label; const sv = el('span', 'sl-val'); sv.textContent = fmt(val);
-  top.appendChild(lab); top.appendChild(sv); row.appendChild(top);
-  const r = document.createElement('input'); r.type = 'range'; r.className = 'slider'; r.min = min; r.max = max; r.step = step; r.value = val;
-  r.addEventListener('input', () => { sv.textContent = fmt(pr(r.value)); });
-  r.addEventListener('change', () => onDone(pr(r.value)));
-  row.appendChild(r); return row;
+// 披露式设置行：平时只显「标签 + 当前值」，点一下露出**数字输入框**单独调这一项（一次只展开一个）
+// dec=true 收小数（如花费 $0.5）；min/max 夹紧；回车或失焦提交。
+function cinSet(key, label, valText, min, max, dec, fmt, onDone, inputVal, unit) {
+  const open = state.cinOpen === key;
+  const wrap = el('div', 'cin-set' + (open ? ' open' : ''));
+  const row = el('div', 'setitem cin-setrow');
+  const lab = el('span', 'cin-setlab'); lab.textContent = label;
+  const sv = el('span', 'cin-setval'); sv.textContent = valText;
+  const cv = el('span', 'cin-setchev'); cv.textContent = '›';
+  row.appendChild(lab); row.appendChild(sv); row.appendChild(cv);
+  row.addEventListener('click', () => { state.cinOpen = open ? null : key; renderCinema(); });
+  wrap.appendChild(row);
+  if (open) {
+    const box = el('div', 'cin-setedit');
+    const inp = document.createElement('input');
+    inp.type = 'text'; inp.inputMode = dec ? 'decimal' : 'numeric';
+    inp.className = 'cin-setinp'; inp.value = inputVal; inp.setAttribute('enterkeyhint', 'done');
+    const commit = () => {
+      let v = dec ? parseFloat(inp.value) : parseInt(inp.value, 10);
+      if (isNaN(v)) { inp.value = inputVal; return; }   // 乱输还原
+      v = Math.max(min, Math.min(max, v));               // 夹到范围内
+      inp.value = v; sv.textContent = fmt(v); onDone(v);
+    };
+    inp.addEventListener('change', commit);
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
+    box.appendChild(inp);
+    if (unit) { const u = el('span', 'cin-setunit'); u.textContent = unit; box.appendChild(u); }
+    wrap.appendChild(box);
+  }
+  return wrap;
 }
 function openCinema(s) {
   state.cinemaReturn = state.screen;   // 从哪进来的（现在只从对话内 ⋮ 进 → 返回回到对话，不退出）
-  state.cinTarget = s; state.cinAdv = false;   // 每次进来高级设置默认收起
+  state.cinTarget = s; state.cinAdv = false; state.cinOpen = null;   // 每次进来高级设置默认收起、各项也收起
   if (!state.cin || state.cin._sid !== s.id) state.cin = null;
   show('cinema'); renderCinema();
   wsend({ type: 'cinema_get', sessionId: s.id });
@@ -1494,16 +1608,16 @@ function renderCinema() {
   ah.addEventListener('click', () => { state.cinAdv = !state.cinAdv; renderCinema(); });
   adv.appendChild(ah); body.appendChild(adv);
   if (state.cinAdv) {
-    const cap = (typeof c.maxCostPer5h === 'number') ? c.maxCostPer5h : 1.5; // 0=关熔断；滑到最右存 0
+    const cap = (typeof c.maxCostPer5h === 'number') ? c.maxCostPer5h : 1.5; // 0=关熔断（不限）
     body.appendChild(cinGroup('节奏',
-      cinSlider('最短间隔（你在看时）', c.fgIntervalSec || 180, 30, 1800, 30, fmtDur, (v) => cinSend({ fgIntervalSec: v })),
-      cinSlider('离开后最短间隔', c.bgIntervalSec || 600, 60, 3600, 60, fmtDur, (v) => cinSend({ bgIntervalSec: v })),
+      cinSet('fg', '最短间隔（你在看时）', fmtDur(c.fgIntervalSec || 180), 30, 1800, false, fmtDur, (v) => cinSend({ fgIntervalSec: v }), c.fgIntervalSec || 180, '秒'),
+      cinSet('bg', '离开后最短间隔', fmtDur(c.bgIntervalSec || 600), 60, 3600, false, fmtDur, (v) => cinSend({ bgIntervalSec: v }), c.bgIntervalSec || 600, '秒'),
       cinToggle('离开后放慢节奏', !!c.diffRate, () => cinSend({ diffRate: !c.diffRate }))));
     body.appendChild(cinGroup('用量与刹车',
-      cinSlider('花费上限（每 5 小时）', cap === 0 ? 20.5 : Math.min(20, Math.max(0.5, cap)), 0.5, 20.5, 0.5,
-        (v) => v >= 20.5 ? '不限' : '$' + v.toFixed(1), (v) => cinSend({ maxCostPer5h: v >= 20.5 ? 0 : v })),
-      cinSlider('每 5 小时最多醒几次', c.maxWakesPer5h || 30, 5, 120, 5, (v) => v + ' 次', (v) => cinSend({ maxWakesPer5h: v })),
-      cinSlider('额度到多少 % 自动停', c.autoPauseUtil || 85, 50, 100, 1, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v }))));
+      cinSet('cost', '花费上限（每 5 小时）', cap > 0 ? '$' + cap.toFixed(1) : '不限', 0, 50, true,
+        (v) => v > 0 ? '$' + (+v).toFixed(1) : '不限', (v) => cinSend({ maxCostPer5h: v }), cap, '美元 · 0=不限'),
+      cinSet('wakes', '每 5 小时最多醒几次', (c.maxWakesPer5h || 30) + ' 次', 5, 120, false, (v) => v + ' 次', (v) => cinSend({ maxWakesPer5h: v }), c.maxWakesPer5h || 30, '次'),
+      cinSet('pause', '额度到多少 % 自动停', (c.autoPauseUtil || 85) + ' %', 50, 100, false, (v) => v + ' %', (v) => cinSend({ autoPauseUtil: v }), c.autoPauseUtil || 85, '%')));
     body.appendChild(cinGroup('模型', cinModelRow(c)));
   }
   renderCinReceipt();
@@ -2602,6 +2716,14 @@ function boot() {
   initChatSwipe();
   // 各独立页统一右滑返回；电影模式页另加左滑进入时间线
   initPageSwipe('cinema', { onBack: () => cinemaBack(), onLeft: openCinemaLog, under: () => (state.cinemaReturn === 'chat' && state.currentSession) ? 'chat' : 'list' });
+  $('memMgrBack').addEventListener('click', () => show(state.currentSession ? 'chat' : 'list'));
+  initPageSwipe('memMgr', { onBack: () => show(state.currentSession ? 'chat' : 'list'), under: () => state.currentSession ? 'chat' : 'list' });
+  // 键盘整页被顶修复：edge-to-edge 下 adjustResize 不缩 WebView，改用 visualViewport 把 .screen 钉到可见视口
+  if (window.visualViewport) {
+    const vv = window.visualViewport;
+    const fitVV = () => { document.documentElement.style.setProperty('--vvh', vv.height + 'px'); document.documentElement.style.setProperty('--vvtop', vv.offsetTop + 'px'); };
+    vv.addEventListener('resize', fitVV); vv.addEventListener('scroll', fitVV); fitVV();
+  }
   initPageSwipe('cinemaLog', { onBack: () => show('cinema'), under: 'cinema' });
   initPageSwipe('diary', { onBack: diaryBack });   // diary 是同屏 overview/detail 双视图，返回落点会变，不垫上一级
   initPageSwipe('diaryWrite', { onBack: () => { closeDwPicker(); show('diary'); }, under: 'diary' });
@@ -2635,8 +2757,21 @@ function boot() {
   $('mWake').addEventListener('click', () => { closeMenu(); if (state.currentSession) openWakeConfig(curSess()); });
   $('mCinema').addEventListener('click', () => { closeMenu(); if (state.currentSession) openCinema(curSess()); });
   $('memOn').addEventListener('click', () => { const mem = state.mem; if (!mem || !mem.available || !state.currentSession) return; const on = !mem.on; state.mem = { ...mem, on }; renderMemory(); buzz(12); wsend({ type: 'memory_set', sessionId: state.currentSession, on }); toast(on ? '已纳入长期记忆' : '已移出长期记忆'); });
+  // 恢复参数：失焦/回车提交，夹到范围、空则还原
+  const commitReco = () => {
+    const rn = parseInt($('memRecentN').value, 10), mt = parseInt($('memMaxTok').value, 10);
+    if (isNaN(rn) && isNaN(mt)) return;
+    wsend({ type: 'memory_cfg_set', sessionId: state.currentSession, recentN: isNaN(rn) ? undefined : rn, maxTok: isNaN(mt) ? undefined : mt });
+  };
+  ['memRecentN', 'memMaxTok'].forEach((id) => {
+    $(id).addEventListener('change', commitReco);
+    $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') $(id).blur(); });
+  });
+  $('memRecoverBtn').addEventListener('click', () => { if (!state.currentSession) return; buzz(12); wsend({ type: 'memory_recover', sessionId: state.currentSession }); });
+  $('memMgrOpen').addEventListener('click', () => { closeScrim('memScrim'); openMemMgr(); });
   // 重命名从菜单挪到「点对话标题」
   $('chatTitle').addEventListener('click', () => { if (!state.currentSession) return; openPrompt('重命名会话', state.curTitle || '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }); });
+  $('chatSub').addEventListener('click', () => { const cs = $('chatSub'); if (cs.classList.contains('mood')) cs.classList.toggle('expanded'); });   // 点心情展开/收起看全
   $('mDelete').addEventListener('click', () => { closeMenu(); openPrompt('输入「删除」确认', '', (v) => { if (v === '删除') { wsend({ type: 'delete', sessionId: state.currentSession }); goList(); } else toast('已取消'); }); });
   // 工具类下放到「＋」面板（编辑 CLAUDE.md / 记忆 / MCP 服务器）；复制目录路径并进文件管理
   $('atMemory').addEventListener('click', () => { closePlus(); openMemory(); });
@@ -2677,7 +2812,7 @@ function boot() {
   $('dwSave').addEventListener('click', saveDiaryEntry);
   $('dwMood').addEventListener('click', () => toggleDwPicker('mood'));
   $('dwWeather').addEventListener('click', () => toggleDwPicker('weather'));
-  $('dwTags').addEventListener('click', () => openPrompt('标签', state.dwTags || '', (v) => { state.dwTags = (v || '').trim(); updateDwMoodWeather(); }, '逗号分隔'));
+  $('dwTags').addEventListener('click', () => openPrompt('标签', state.dwTags || '', (v) => { state.dwTags = (v || '').trim(); updateDwMoodWeather(); }, '逗号分隔', { allowEmpty: true }));
   $('dwText').addEventListener('input', dwUpdateCount);
   $('duDownload').addEventListener('click', downloadUpdate);
   $('usLine').addEventListener('click', () => $('usageStrip').classList.toggle('open'));
@@ -2688,7 +2823,7 @@ function boot() {
   $('atCompact').addEventListener('click', () => {
     closePlus();
     if (!state.currentSession) { toast('新会话无需压缩'); return; }
-    openPrompt('压缩上下文', '', (extra) => doCompact(extra), '留空＝用设置里的压缩提示词');
+    openPrompt('压缩上下文', '', (extra) => doCompact(extra), '留空＝用设置里的压缩提示词', { allowEmpty: true });
   });
   // expand to fullscreen editor (expandBtn pointerdown wired below)
   $('composeBack').addEventListener('click', () => closeCompose(false));
@@ -2743,8 +2878,15 @@ function boot() {
   $('sessFolder').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openFolderPicker(s); });
   $('sessRename').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('重命名会话', s.title || '', (name) => { if (name) wsend({ type: 'rename', sessionId: s.id, title: name }); }); });
   $('sessDelete').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('输入「删除」确认删除', '', (v) => { if (v === '删除') wsend({ type: 'delete', sessionId: s.id }); else toast('已取消'); }); });
-  function savePrompt() { const v = $('promptInput').value.trim(); const cb = state.promptCb; closeScrim('promptScrim'); state.promptCb = null; if (cb) cb(v); }
+  function savePrompt() {
+    const inp = $('promptInput'); const raw = inp.value.trim();
+    if (!raw && !state.promptAllowEmpty) return;           // 没内容不提交（按钮本就藏着）
+    const cb = state.promptCb; const danger = state.promptDanger;
+    closeScrim('promptScrim'); state.promptCb = null;
+    if (cb) cb(danger ? '删除' : raw);                      // 删除：点红键即确认（自动补确认词）；其余回传输入值
+  }
   $('promptOk').addEventListener('click', savePrompt);
+  $('promptInput').addEventListener('input', () => { const inp = $('promptInput'); syncPromptGo(); inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, window.innerHeight * 0.38) + 'px'; });
   $('promptInput').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); savePrompt(); } });
   // generic ✕ / cancel buttons inside sheets
   document.querySelectorAll('[data-x]').forEach((b) => b.addEventListener('click', () => { const sc = b.closest('.scrim'); if (sc) closeScrim(sc.id); }));
