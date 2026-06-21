@@ -2584,16 +2584,19 @@ function setSearchProgress(p, anim) {
   ov.style.opacity = p;
   bar.style.transform = 'translateY(' + (-100 * (1 - p)) + '%)';
 }
-const SEARCH_PH = ['where did you go…', 'where were we…', 'what are you looking for…', 'find your way back…', 'retrace the thread…'];
+// 模式提示直接写进输入框（不再放徽标按钮）；双击搜索栏切语义/普通——两种 scope 都行
+function searchPlaceholder() {
+  const sem = state.searchMode === 'sem';
+  if (state.searchScope === 'list') return sem ? '语义搜全部对话，双击切普通' : '普通搜全部对话，双击切语义';
+  return sem ? '语义搜本对话，双击切普通' : '查找本对话，双击切语义';
+}
 function openSearch() {
   const ov = $('searchOverlay');
-  $('searchInput').placeholder = SEARCH_PH[Math.floor(Math.random() * SEARCH_PH.length)];
+  $('searchInput').placeholder = searchPlaceholder();
   if (!ov.classList.contains('show')) { ov.classList.add('show'); setSearchProgress(0, false); }
   ov.style.pointerEvents = 'auto';
   requestAnimationFrame(() => setSearchProgress(1, true));
   state.searchActive = true;
-  const chip = $('searchMode');   // 模式徽标只在全库搜索(list)显示；对话内搜不显
-  if (chip) { const isList = state.searchScope === 'list'; chip.style.display = isList ? '' : 'none'; chip.textContent = state.searchMode === 'sem' ? '语义' : '普通'; chip.classList.toggle('sem', state.searchMode === 'sem'); }
   syncAtRoot();
   $('usageStrip').classList.remove('open'); // collapse the session detail each open
   renderUsageStrip(); reqUsage(); // refresh the usage strip every time search opens
@@ -2631,40 +2634,53 @@ function runSearch(raw) {
   const results = $('searchResults'); results.innerHTML = '';
   if (!q) return;
   if (state.searchScope === 'list') {
-    // 全文对话搜索：默认普通(关键词 LIKE)，双击搜索栏切语义；结果成对 U/A、点击跳本地对话
+    // 全库对话搜索：普通(关键词 LIKE)/语义(向量)；结果成对 U/A、点击跳对应对话
     state._searchQ = q;
     results.innerHTML = '<div class="search-empty">搜索中…</div>';
-    wsend({ type: 'dialog_search', q, mode: state.searchMode || 'kw' });
+    wsend({ type: 'dialog_search', q, mode: state.searchMode || 'kw', scope: 'list' });
     return;
   }
-  const ql = q.toLowerCase(); let n = 0;
-  {
-    [...$('thread').querySelectorAll('.msg')].forEach((msg) => {
-      const text = (msg.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!text || !text.toLowerCase().includes(ql)) return;
-      n++;
-      const card = el('div', 'searchcard');
-      const snip = el('div', 'sc-snippet'); snip.appendChild(hlSnippet(text, q));
-      card.appendChild(snip);
-      // tap = jump to the message, long-press = expand the snippet
-      let lpTimer, lp = false, moved = false, sy = 0;
-      card.addEventListener('touchstart', (e) => { lp = false; moved = false; sy = e.touches[0].clientY; lpTimer = setTimeout(() => { lp = true; buzz(12); card.classList.toggle('expanded'); }, 480); }, { passive: true });
-      card.addEventListener('touchmove', (e) => { if (Math.abs(e.touches[0].clientY - sy) > 8) { moved = true; clearTimeout(lpTimer); } }, { passive: true });
-      card.addEventListener('touchend', () => { clearTimeout(lpTimer); if (!lp && !moved) jumpToMessage(msg); });
-      results.appendChild(card);
-    });
+  if (state.searchMode === 'sem') {
+    // 对话内语义：搜本对话的完整归档历史（按当前会话过滤）；没归档的对话后端会回 archived:false → 回退普通
+    state._searchQ = q;
+    results.innerHTML = '<div class="search-empty">搜索中…</div>';
+    wsend({ type: 'dialog_search', q, mode: 'sem', scope: 'chat', session: state.currentSession });
+    return;
   }
+  localChatSearch(q);
+}
+// 对话内普通查找：纯本地匹配当前已加载的消息（任何对话都行、即时）
+function localChatSearch(q) {
+  const results = $('searchResults'); results.innerHTML = '';
+  const ql = q.toLowerCase(); let n = 0;
+  [...$('thread').querySelectorAll('.msg')].forEach((msg) => {
+    const text = (msg.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text || !text.toLowerCase().includes(ql)) return;
+    n++;
+    const card = el('div', 'searchcard');
+    const snip = el('div', 'sc-snippet'); snip.appendChild(hlSnippet(text, q));
+    card.appendChild(snip);
+    // tap = jump to the message, long-press = expand the snippet
+    let lpTimer, lp = false, moved = false, sy = 0;
+    card.addEventListener('touchstart', (e) => { lp = false; moved = false; sy = e.touches[0].clientY; lpTimer = setTimeout(() => { lp = true; buzz(12); card.classList.toggle('expanded'); }, 480); }, { passive: true });
+    card.addEventListener('touchmove', (e) => { if (Math.abs(e.touches[0].clientY - sy) > 8) { moved = true; clearTimeout(lpTimer); } }, { passive: true });
+    card.addEventListener('touchend', () => { clearTimeout(lpTimer); if (!lp && !moved) jumpToMessage(msg); });
+    results.appendChild(card);
+  });
   if (!n) results.innerHTML = '<div class="search-empty">没有找到「' + q.replace(/</g, '&lt;') + '」</div>';
 }
 function openListSearch() { state.searchScope = 'list'; state.searchMode = 'kw'; openSearch(); }
 function setSearchMode(m) {
   state.searchMode = m === 'sem' ? 'sem' : 'kw';
-  const chip = $('searchMode'); if (chip) { chip.textContent = state.searchMode === 'sem' ? '语义' : '普通'; chip.classList.toggle('sem', state.searchMode === 'sem'); }
+  $('searchInput').placeholder = searchPlaceholder();   // 模式提示就在输入框里
+  buzz(10);
   const q = $('searchInput').value.trim(); if (q) runSearch(q);
 }
 function onDialogSearch(m) {
-  if (!searchOpen() || state.searchScope !== 'list') return;
+  if (!searchOpen()) return;
   if ((m.q || '') !== (state._searchQ || '')) return;   // 旧请求回包，丢弃
+  // 对话内语义：该对话没归档（archived:false）→ 静默回退本地普通查找
+  if (state.searchScope !== 'list' && m.archived === false) { localChatSearch(m.q || ''); return; }
   renderDialogResults(m.hits || [], m.q || '');
 }
 function renderDialogResults(hits, q) {
@@ -2809,7 +2825,7 @@ function initChatSwipe() {
       if (dx > BACK_TRIG()) { buzz(14); if (P('interruptOnLeave') && state.busy) wsend({ type: 'interrupt' }); chat.style.transition = 'transform .26s cubic-bezier(.32,.72,0,1)'; chat.style.transform = 'translateX(100%)'; setTimeout(() => { show('list'); resetChatSlide(); wsend({ type: 'list_sessions' }); }, 270); }
       else { chat.style.transition = 'transform .24s cubic-bezier(.32,.72,0,1)'; chat.style.transform = 'translateX(0)'; setTimeout(() => { resetChatSlide(); $('list').classList.remove('active'); }, 250); }
     } else if (dir === 'search') {
-      if (-dx > SEARCH_TRIG()) { buzz(14); state.searchScope = 'chat'; openSearch(); }
+      if (-dx > SEARCH_TRIG()) { buzz(14); state.searchScope = 'chat'; state.searchMode = 'kw'; openSearch(); }
       else closeSearch();
     }
     dir = null;
@@ -3092,8 +3108,7 @@ function boot() {
   $('searchInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('searchInput').blur(); runSearch(e.target.value); } });
   let _searchDeb;
   $('searchInput').addEventListener('input', (e) => { clearTimeout(_searchDeb); const v = e.target.value; _searchDeb = setTimeout(() => runSearch(v), 320); });   // 防抖实时搜
-  $('searchMode').addEventListener('click', () => setSearchMode(state.searchMode === 'sem' ? 'kw' : 'sem'));   // 点徽标切换
-  $('searchBarTop').addEventListener('dblclick', () => { if (state.searchScope === 'list') setSearchMode(state.searchMode === 'sem' ? 'kw' : 'sem'); });   // 双击搜索栏切语义
+  $('searchBarTop').addEventListener('dblclick', () => setSearchMode(state.searchMode === 'sem' ? 'kw' : 'sem'));   // 双击搜索栏切语义/普通（列表+对话内都行）
   $('searchOverlay').addEventListener('click', (e) => { if (e.target === $('searchOverlay') || e.target === $('searchResults')) closeSearch(); });
   $('plusBack').addEventListener('click', closePlus);
   $('discDismiss').addEventListener('click', dismissDisc);

@@ -757,11 +757,9 @@ button.model:active { opacity: .6; }
   font-family: var(--serif); letter-spacing: .01em;
   box-shadow: 0 10px 30px rgba(var(--shadow),.18), 0 2px 6px rgba(var(--shadow),.08);
 }
-.search-box::placeholder { color: var(--muted); }
+.search-box::placeholder { color: var(--muted); font-size: 14px; letter-spacing: 0; }
 .search-row { display: flex; align-items: center; gap: 8px; pointer-events: auto; }
 .search-row .search-box { flex: 1; width: auto; }
-.searchmode { flex: none; font-size: 12.5px; padding: 8px 13px; border-radius: 16px; background: var(--surface); color: var(--muted); white-space: nowrap; pointer-events: auto; box-shadow: 0 6px 18px rgba(var(--shadow),.14); }
-.searchmode.sem { background: var(--accent); color: #fff; }
 /* 全文搜索结果：成对 U/A */
 .dlgcard .dlg-turn { display: flex; gap: 8px; font-size: 13.5px; line-height: 1.45; padding: 3px 0; color: var(--muted); }
 .dlgcard .dlg-turn.hit { color: var(--text); }
