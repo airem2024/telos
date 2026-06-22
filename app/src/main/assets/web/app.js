@@ -436,6 +436,7 @@ function handle(m) {
       break;
     }
     case 'renamed': case 'deleted': case 'pinned': wsend({ type: 'list_sessions' }); break;
+    case 'cloned': if (m.error) { toast('复制失败：' + m.error); } else { toast('已复制为新窗口'); wsend({ type: 'list_sessions' }); } break;
     case 'cleanup_done': if (m.removed) toast('已清理 ' + m.removed + ' 个废弃对话'); wsend({ type: 'list_sessions' }); break;
     // ---- 醒来 / 日记 / 便签 ----
     case 'wakeup_state': onWakeState(m); break;
@@ -3341,6 +3342,7 @@ function boot() {
   $('sessPin').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) togglePin(s); });
   $('sessFolder').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openFolderPicker(s); });
   $('sessRename').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('重命名会话', '', (name) => { if (name) wsend({ type: 'rename', sessionId: s.id, title: name }); }, s.title || ''); });
+  $('sessClone').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) { toast('复制中…'); wsend({ type: 'clone_session', sessionId: s.id, title: s.title || '' }); } });
   $('sessDelete').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('输入「删除」确认删除', '', (v) => { if (v === '删除') wsend({ type: 'delete', sessionId: s.id }); else toast('已取消'); }); });
   function savePrompt() {
     const inp = $('promptInput'); const raw = inp.value.trim();
