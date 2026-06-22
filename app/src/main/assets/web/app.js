@@ -66,10 +66,11 @@ const EFFORTS = [
 ];
 
 /* ============ navigation ============ */
-const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryWrite', 'cinema', 'cinemaLog', 'memMgr', 'memEdit'];
+const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryWrite', 'favorites', 'cinema', 'cinemaLog', 'memMgr', 'memEdit'];
 function show(name) {
   SCREENS.forEach((s) => $(s).classList.toggle('active', s === name));
   state.screen = name;
+  if (name !== 'chat' && typeof hideSelBar === 'function') hideSelBar();   // 离开对话屏收起选词浮条
   syncAtRoot();
   if (typeof updateCinemaBar === 'function') updateCinemaBar();
   sendPresence(); // tell bridge which conversation I'm on (for wake-push 不打扰)
@@ -87,7 +88,7 @@ function overlayUp() {
 // close path (animated, swiped, future additions) converges without per-call-site bookkeeping.
 function syncAtRoot() { try { window.Android && Android.setAtRoot((state.screen === 'list' || state.screen === 'setup') && !overlayUp()); } catch (e) {} }
 setInterval(syncAtRoot, 300);
-const SCRIMS = ['permScrim', 'modelScrim', 'promptScrim', 'toolsScrim', 'modeScrim', 'sessScrim', 'msgScrim', 'folderScrim', 'claudeScrim', 'folderActScrim', 'pathActScrim', 'mcpScrim', 'mcpCfgScrim', 'memScrim', 'connScrim', 'wakeScrim', 'stickyScrim', 'compactScrim'];
+const SCRIMS = ['permScrim', 'modelScrim', 'promptScrim', 'toolsScrim', 'modeScrim', 'sessScrim', 'folderScrim', 'claudeScrim', 'folderActScrim', 'pathActScrim', 'mcpScrim', 'mcpCfgScrim', 'memScrim', 'connScrim', 'wakeScrim', 'stickyScrim', 'compactScrim'];
 const DRAG_SCRIMS = ['modelScrim', 'toolsScrim', 'modeScrim', 'claudeScrim', 'mcpCfgScrim', 'compactScrim'];
 function anyOverlay() { return SCRIMS.some((s) => $(s).classList.contains('show')) || $('menuPop').classList.contains('show'); }
 function openScrim(id) {
@@ -470,6 +471,7 @@ function handle(m) {
       break;
     case 'diary_overview': if (state.screen === 'diary' && state.diaryView === 'overview') renderDiaryOverview(m.cards || []); break;
     case 'stickies': onStickies(m); break;
+    case 'favorites': onFavorites(m); break;
     case 'diary_changed':
       if (state.screen === 'diary' && state.diaryView === 'detail' && m.sessionId === state.diarySession) wsend({ type: 'diary_get', sessionId: state.diarySession, date: state.diaryDay });
       else if (state.screen === 'diary' && state.diaryView === 'overview') wsend({ type: 'diary_overview' });
@@ -596,18 +598,6 @@ function openSessActions(s) {
   $('sessPin').textContent = s.pinned ? '取消置顶' : '置顶';
   openScrim('sessScrim');
 }
-// 长按一条消息弹出的操作菜单（先只放「复制整条」，往后可加引用/转发等）。
-function openMsgMenu(msgEl) {
-  state.msgTarget = msgEl;
-  $('msgMenuTitle').textContent = msgEl.classList.contains('user') ? '这条消息' : '这条回复';
-  openScrim('msgScrim');
-}
-function msgText(m) {
-  if (!m) return '';
-  if (m.dataset && m.dataset.src) return m.dataset.src;     // 原文（assistant 的 markdown / user 输入）
-  const body = m.querySelector('.md, .text, .bubble');       // 历史里没存 src 的兜底：取渲染后的纯文本
-  return (body || m).textContent || '';
-}
 function assignSelectedToFolder(folder) {
   if (!state.selected.size || !folder) return;
   wsend({ type: 'assign_many', ids: [...state.selected], folder });
@@ -661,7 +651,7 @@ function clearThread() { if (searchOpen()) closeSearch(); stopStatus(); $('threa
 function scrollThread() { if (RT) return; const t = $('thread'); t.scrollTop = t.scrollHeight; } // prepend 期间(RT 非空)不滚
 function scrollThreadAuto() { if (P('autoScroll')) scrollThread(); }
 function addUser(text, uuid, images) {
-  const m = el('div', 'msg user'); m.dataset.src = text || ''; const b = el('div', 'bubble');
+  const m = el('div', 'msg user'); const b = el('div', 'bubble');
   if (images && images.length) {
     const ig = el('div', 'bubimgs');
     images.forEach((p) => {
@@ -697,9 +687,9 @@ function regenerate() {
 }
 function ensureLive() { if (state.live) return state.live; const m = el('div', 'msg assistant'); const t = el('div', 'text cursor'); m.appendChild(t); $('thread').appendChild(m); state.live = t; return t; }
 function appendDelta(text) { const t = ensureLive(); t.textContent += text; scrollThreadAuto(); }
-function finalizeText(full) { const t = ensureLive(); t.classList.remove('cursor', 'text'); t.classList.add('md'); t.innerHTML = md(full); if (t.parentElement && t.parentElement.classList.contains('msg')) t.parentElement.dataset.src = full || ''; state.live = null; scrollThreadAuto(); }
+function finalizeText(full) { const t = ensureLive(); t.classList.remove('cursor', 'text'); t.classList.add('md'); t.innerHTML = md(full); state.live = null; scrollThreadAuto(); }
 function finalizeLive() { if (state.live) { state.live.classList.remove('cursor'); state.live = null; } }
-function addAssistantText(full) { const m = el('div', 'msg assistant'); m.dataset.src = full || ''; const t = el('div', 'md'); t.innerHTML = md(full); m.appendChild(t); rt().appendChild(m); }
+function addAssistantText(full) { const m = el('div', 'msg assistant'); const t = el('div', 'md'); t.innerHTML = md(full); m.appendChild(t); rt().appendChild(m); }
 function addThinking(text) { finalizeLive(); const d = el('div', 'thinking'); const inner = el('div', 'md'); inner.innerHTML = md(text); d.appendChild(inner); d.addEventListener('click', () => d.classList.toggle('collapsed')); rt().appendChild(d); scrollThreadAuto(); }
 
 /* ---- animated "thinking" status line, Claude Code style ---- */
@@ -2283,6 +2273,26 @@ function renderDiaryOverview(cards) {
     body.appendChild(card);
   });
 }
+/* ============ 收藏夹（跨对话金句，仿日记 overview） ============ */
+function openFavoritesOverview() {
+  $('favBody').innerHTML = '<div class="dempty">加载中…</div>';
+  show('favorites'); wsend({ type: 'favorites_get' });
+}
+function onFavorites(m) { state.favs = m.items || []; if (state.screen === 'favorites') renderFavCards(state.favs); }
+function favWhen(ts) { const d = new Date(ts); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
+function renderFavCards(items) {
+  const body = $('favBody'); body.innerHTML = '';
+  if (!items.length) { const e = el('div', 'dempty'); e.innerHTML = '还没有收藏。<br>在对话里选中一句话，点浮条上的「收藏」。'; body.appendChild(e); return; }
+  items.forEach((it) => {
+    const card = el('div', 'dcard'); let held = false;
+    const tx = el('div', 'fav-text'); tx.textContent = it.text;
+    const sub = el('div', 'dcard-sub'); sub.textContent = (it.title || '（来源对话）') + '  ·  ' + favWhen(it.ts);
+    card.append(tx, sub);
+    bindHold(card, () => { held = true; openPrompt('删除这条收藏？输入「删除」确认', '', (v) => { if (v === '删除') wsend({ type: 'favorites_delete', id: it.id }); }); });
+    card.addEventListener('click', () => { if (held) { held = false; return; } if (it.sessionId) jumpToDialog(it.sessionId, it.text); else toast('这条没有来源对话'); });
+    body.appendChild(card);
+  });
+}
 function diaryImgDir() { return (((state.defaultCwd || state.cwd || '').replace(/\/$/, '')) || '') + '/.telos-diary'; }
 // open the write/edit page. pass an entry to edit it, omit to write a new one.
 function diaryHead(ds) { const p = (ds || '').split('-'); const d = new Date(+p[0], (+p[1] || 1) - 1, +p[2] || 1); return { day: (+p[2] || 1), wk: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()], ym: (p[0] || '') + '.' + (+p[1] || 1) }; }
@@ -2809,24 +2819,12 @@ function initChatSwipe() {
   let sx = 0, sy = 0, dir = null, active = false, W = 0;
   const BACK_TRIG = () => Math.min(120, W * 0.32);
   const SEARCH_TRIG = () => Math.min(120, W * 0.32);
-  // 长按整条复制：按住不动 ~0.5s 弹菜单（openMsgMenu）。横滑/纵滚一旦超阈值就取消。
-  let lpTimer = null;
-  const clearLP = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
-  const armLP = (e) => {
-    clearLP(); state._msgLongPressed = false;
-    const m = e.target.closest && e.target.closest('.msg.assistant, .msg.user');
-    if (!m) return;
-    lpTimer = setTimeout(() => { lpTimer = null; state._msgLongPressed = true; buzz(14); openMsgMenu(m); }, 480);
-  };
   thread.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1 || searchOpen()) { clearLP(); return; }
-    sx = e.touches[0].clientX; sy = e.touches[0].clientY;   // 早设：长按取消判定也要用
-    armLP(e);
+    if (e.touches.length !== 1 || searchOpen()) return;
     if (hScrollAt(e.target, thread)) { active = false; return; }  // 正文里的命令行/表格自己横滚，优先级最高
-    dir = null; active = true; W = window.innerWidth;
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; dir = null; active = true; W = window.innerWidth;
   }, { passive: true });
   thread.addEventListener('touchmove', (e) => {
-    if (lpTimer) { const t = e.touches[0]; if (Math.abs(t.clientX - sx) > 10 || Math.abs(t.clientY - sy) > 10) clearLP(); }
     if (!active) return;
     const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
     if (dir === null) {
@@ -2842,11 +2840,7 @@ function initChatSwipe() {
     if (dir === 'back') chat.style.transform = 'translateX(' + Math.max(0, dx) + 'px)';
     else setSearchProgress(Math.min(1, Math.max(0, -dx) / SEARCH_TRIG()), false);
   }, { passive: false });
-  thread.addEventListener('touchcancel', clearLP);
-  // 长按弹了菜单后，松手那一下的 click 不要再落到气泡上（否则用户气泡会触发「编辑」）。捕获阶段先吞掉。
-  thread.addEventListener('click', (e) => { if (state._msgLongPressed) { state._msgLongPressed = false; e.stopPropagation(); e.preventDefault(); } }, true);
   thread.addEventListener('touchend', (e) => {
-    clearLP();
     if (!active) return; active = false;
     const dx = e.changedTouches[0].clientX - sx;
     if (dir === 'back') {
@@ -2858,6 +2852,61 @@ function initChatSwipe() {
     }
     dir = null;
   });
+}
+
+/* ============ 选词浮条：选中文字后浮在选区上方的小横条（复制/引用/收藏/分享，无遮罩） ============ */
+let selBarT = null;
+function curSelText() { try { return (window.getSelection() || '').toString(); } catch (e) { return ''; } }
+function selInThread() {
+  const s = window.getSelection();
+  if (!s || s.isCollapsed || !s.rangeCount) return false;
+  const n = s.anchorNode, e0 = n && (n.nodeType === 1 ? n : n.parentElement);
+  return !!(e0 && e0.closest && e0.closest('#thread .msg'));   // 选区落在某条消息里才算
+}
+function showSelBar() {
+  if (state.screen !== 'chat') { hideSelBar(); return; }
+  const txt = curSelText().trim();
+  if (!txt || !selInThread()) { hideSelBar(); return; }
+  state.selText = txt;
+  const bar = $('selBar'); bar.classList.add('show');          // 先显示才量得到尺寸
+  let rect; try { rect = window.getSelection().getRangeAt(0).getBoundingClientRect(); } catch (e) { hideSelBar(); return; }
+  if (!rect || (!rect.width && !rect.height)) { hideSelBar(); return; }
+  const bw = bar.offsetWidth, bh = bar.offsetHeight, M = 8, vw = window.innerWidth;
+  let left = Math.max(M, Math.min(rect.left + rect.width / 2 - bw / 2, vw - bw - M));
+  let top = rect.top - bh - 8;                                 // 默认浮在选区上方
+  if (top < 8) top = rect.bottom + 8;                          // 贴顶则翻到选区下方
+  bar.style.left = left + 'px'; bar.style.top = top + 'px';
+}
+function hideSelBar() { $('selBar').classList.remove('show'); state.selText = ''; }
+function clearSelection() { try { const s = window.getSelection(); if (s) s.removeAllRanges(); } catch (e) {} }
+function selBarAction(act) {
+  const txt = state.selText || curSelText().trim();
+  if (!txt) { hideSelBar(); return; }
+  if (act === 'copy') copyText(txt, '已复制');
+  else if (act === 'quote') {
+    const c = $('composer'), q = '> ' + txt.replace(/\n/g, '\n> ') + '\n\n';
+    c.value = c.value.trim() ? (c.value.replace(/\s*$/, '') + '\n\n' + q) : q;
+    resizeComposer(); updateSend(); c.focus(); toast('已引用到输入框');
+  } else if (act === 'fav') {
+    if (!state.currentSession) toast('没有当前对话');
+    else { wsend({ type: 'favorites_add', sessionId: state.currentSession, title: state.curTitle || '', text: txt }); toast('已收藏'); }
+  } else if (act === 'share') {
+    try {
+      if (window.Android && typeof window.Android.shareText === 'function') window.Android.shareText(txt);
+      else copyText(txt, '已复制（系统分享需更新到新版）');
+    } catch (e) { copyText(txt, '已复制'); }
+  }
+  buzz(10); clearSelection(); hideSelBar();
+}
+function initSelBar() {
+  const bar = $('selBar');
+  bar.addEventListener('mousedown', (e) => e.preventDefault());          // 点条本身别清掉选区（桌面）
+  bar.addEventListener('touchstart', (e) => e.stopPropagation(), { passive: true });
+  bar.addEventListener('click', (e) => { const b = e.target.closest('button[data-act]'); if (b) { e.preventDefault(); selBarAction(b.dataset.act); } });
+  document.addEventListener('selectionchange', () => { clearTimeout(selBarT); selBarT = setTimeout(showSelBar, 130); });
+  const thread = $('thread');
+  thread.addEventListener('touchend', () => { clearTimeout(selBarT); selBarT = setTimeout(showSelBar, 60); });
+  thread.addEventListener('scroll', hideSelBar, { passive: true });
 }
 
 /* ============ 通用整页手势：右滑返回(像对话右滑回列表)，可选左滑触发(像对话左滑搜索)。挂在 .screen 上 ============
@@ -3104,6 +3153,7 @@ function boot() {
 
   // in-conversation search (Enter to search; tap blank to close)
   initChatSwipe();
+  initSelBar();
   // 各独立页统一右滑返回；电影模式页另加左滑进入时间线
   initPageSwipe('cinema', { onBack: () => cinemaBack(), onLeft: openCinemaLog, under: () => (state.cinemaReturn === 'chat' && state.currentSession) ? 'chat' : 'list' });
   $('memMgrBack').addEventListener('click', () => show(state.currentSession ? 'chat' : 'list'));
@@ -3128,6 +3178,7 @@ function boot() {
   }, { passive: true });
   initPageSwipe('cinemaLog', { onBack: () => show('cinema'), under: 'cinema' });
   initPageSwipe('diary', { onBack: diaryBack });   // diary 是同屏 overview/detail 双视图，返回落点会变，不垫上一级
+  initPageSwipe('favorites', { onBack: () => show('list'), under: 'list' });
   initPageSwipe('diaryWrite', { onBack: () => { closeDwPicker(); show('diary'); }, under: 'diary' });
   initPageSwipe('files', { onBack: closeFiles, under: () => state.filesReturn || 'list' });
   initPageSwipe('import', { onBack: () => show(state.importReturn || 'files'), under: () => state.importReturn || 'files' });
@@ -3198,6 +3249,8 @@ function boot() {
   $('drFiles').addEventListener('click', () => { closeDrawer(); openFileManager('browse'); });
   $('drUsage').addEventListener('click', () => { closeDrawer(); openUsageFull(); });
   $('drDiary').addEventListener('click', () => { closeDrawer(); openDiaryOverview(); });
+  $('drFavorites').addEventListener('click', () => { closeDrawer(); openFavoritesOverview(); });
+  $('favBack').addEventListener('click', () => show('list'));
   // 醒来 / 小纸条 / 日记 wiring
   $('cinemaBack').addEventListener('click', () => { show('list'); wsend({ type: 'list_sessions' }); });
   $('cinemaLogBack').addEventListener('click', () => show('cinema'));
@@ -3286,8 +3339,6 @@ function boot() {
   $('sessFolder').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openFolderPicker(s); });
   $('sessRename').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('重命名会话', '', (name) => { if (name) wsend({ type: 'rename', sessionId: s.id, title: name }); }, s.title || ''); });
   $('sessDelete').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('输入「删除」确认删除', '', (v) => { if (v === '删除') wsend({ type: 'delete', sessionId: s.id }); else toast('已取消'); }); });
-  // message long-press actions
-  $('msgCopy').addEventListener('click', () => { const m = state.msgTarget; const isUser = m && m.classList.contains('user'); closeScrim('msgScrim'); const txt = msgText(m); if (!txt) { toast('没有可复制的文字'); return; } buzz(12); copyText(txt, isUser ? '已复制这条消息' : '已复制这条回复'); });
   function savePrompt() {
     const inp = $('promptInput'); const raw = inp.value.trim();
     if (!raw && !state.promptAllowEmpty) return;     // 空内容不提交（→ 本就藏着）

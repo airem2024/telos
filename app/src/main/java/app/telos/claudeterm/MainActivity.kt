@@ -7,10 +7,15 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
+import android.view.View
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.URLUtil
@@ -115,6 +120,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // 系统分享面板：选词浮条「分享」调它，把选中文字 ACTION_SEND 给微信/QQ/备忘录等
+        @JavascriptInterface
+        fun shareText(text: String) {
+            runOnUiThread {
+                try {
+                    val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+                    startActivity(Intent.createChooser(send, "分享").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                } catch (e: Exception) { Toast.makeText(this@MainActivity, "无法分享：${e.message}", Toast.LENGTH_SHORT).show() }
+            }
+        }
+
         @JavascriptInterface
         fun setStatusBar(visible: Boolean) {
             runOnUiThread {
@@ -148,7 +164,32 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        web = WebView(this)
+        // 选中正文（只读）时压掉系统自带的选词工具条，保留选区手柄，让前端浮条（#selBar）独占；
+        // 但输入框是可编辑的——它的剪切/复制/粘贴菜单要留着（否则没法往输入框里粘贴）。
+        // 办法：照常委托原回调把菜单填好，只在「没有 粘贴/剪切 项」（即只读选择）时才清空。
+        web = object : WebView(this) {
+            private fun hasEditItems(menu: Menu?): Boolean =
+                menu != null && (menu.findItem(android.R.id.paste) != null || menu.findItem(android.R.id.cut) != null
+                    || menu.findItem(android.R.id.pasteAsPlainText) != null)
+            private fun wrap(orig: ActionMode.Callback?): ActionMode.Callback2 = object : ActionMode.Callback2() {
+                override fun onCreateActionMode(mode: ActionMode?, menu: Menu?): Boolean = orig?.onCreateActionMode(mode, menu) ?: true
+                override fun onPrepareActionMode(mode: ActionMode?, menu: Menu?): Boolean {
+                    val r = orig?.onPrepareActionMode(mode, menu) ?: false   // 先让原回调填充菜单
+                    if (!hasEditItems(menu)) { menu?.clear(); return true }  // 只读选择 → 清空给浮条
+                    return r                                                 // 可编辑（输入框）→ 保留系统菜单
+                }
+                override fun onActionItemClicked(mode: ActionMode?, item: MenuItem?): Boolean = orig?.onActionItemClicked(mode, item) ?: false
+                override fun onDestroyActionMode(mode: ActionMode?) { orig?.onDestroyActionMode(mode) }
+                override fun onGetContentRect(mode: ActionMode?, view: View?, outRect: Rect?) {
+                    if (orig is ActionMode.Callback2) orig.onGetContentRect(mode, view, outRect)
+                    else super.onGetContentRect(mode, view, outRect)   // 保持选区手柄定位
+                }
+            }
+            override fun startActionMode(callback: ActionMode.Callback?): ActionMode? =
+                super.startActionMode(wrap(callback))
+            override fun startActionMode(callback: ActionMode.Callback?, type: Int): ActionMode? =
+                super.startActionMode(wrap(callback), type)
+        }
         setContentView(web)
 
         // True edge-to-edge: draw under the system bars and into the display cutout. The web UI

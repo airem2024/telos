@@ -167,19 +167,16 @@ input, textarea {
 .msg.user .bubble {
   background: var(--bubble-user); border-radius: 16px 16px 4px 16px;
   padding: 12px 15px; max-width: 86%; font-size: 16px; line-height: 1.5;
-  white-space: pre-wrap; word-break: break-word;
+  white-space: pre-wrap; word-break: break-word; -webkit-user-select: text; user-select: text;
 }
 .msg.assistant .text {
   font-size: 16px; line-height: 1.62; white-space: pre-wrap; word-break: break-word;
-  color: var(--text);
+  -webkit-user-select: text; user-select: text; color: var(--text);
 }
 .msg.assistant .text code, .msg.assistant .text .ic {
   font-family: var(--mono); font-size: .9em; background: var(--surface-2);
   padding: 1px 5px; border-radius: 5px;
 }
-/* 对话内消息关掉原生选区：长按改走「整条复制」菜单（openMsgMenu），免得一拖就跨回复全选。
-   要复制就长按整条；正文里的代码块等以后往菜单里加。 */
-.msg .bubble, .msg .text, .msg .md { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .cursor::after { content: '▍'; color: var(--accent); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -326,6 +323,21 @@ input, textarea {
   font-size: 14px; max-width: 82%; text-align: center; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 200;
 }
 .toast.show { opacity: 1; }
+
+/* 选词浮条：浮在选区上方的小横条，不变暗、无遮罩 */
+.selbar {
+  position: fixed; z-index: 180; display: none; align-items: stretch;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 6px 22px rgba(var(--shadow),.20), 0 1px 3px rgba(var(--shadow),.10);
+  overflow: hidden; -webkit-user-select: none; user-select: none;
+}
+.selbar.show { display: flex; }
+.selbar button {
+  border: none; background: transparent; color: var(--text);
+  font-family: var(--ui); font-size: 14px; padding: 8px 14px; white-space: nowrap;
+}
+.selbar button:not(:first-child) { border-left: 1px solid var(--hair); }
+.selbar button:active { background: var(--track); }
 
 /* connection banner */
 .connbar {
@@ -1194,3 +1206,4 @@ input[type=datetime-local] { width: 100%; padding: 11px 12px; border-radius: 12p
 .dcard { border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 10px; background: var(--surface); }
 .dcard-title { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dcard-sub { font-size: 12px; color: var(--muted); margin-top: 5px; }
+.fav-text { font-size: 15px; line-height: 1.55; color: var(--text); white-space: pre-wrap; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }

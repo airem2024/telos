@@ -394,16 +394,6 @@
     </div>
   </div>
 
-  <!-- message long-press actions（长按一条回复/消息弹出，可继续往里加） -->
-  <div class="scrim" id="msgScrim">
-    <div class="sheet">
-      <div class="sheethdr nodrag"><div class="ptitle" id="msgMenuTitle">这条回复</div></div>
-      <div class="sheetbody">
-        <button class="actitem" id="msgCopy">复制整条</button>
-      </div>
-    </div>
-  </div>
-
   <!-- import: choose which conversations to import -->
   <div id="import" class="screen">
     <div class="topbar">
@@ -442,6 +432,10 @@
       <button class="draweritem" id="drDiary">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
         <span>日记 / 便签夹</span>
+      </button>
+      <button class="draweritem" id="drFavorites">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17.3l-5.6 3.3 1.5-6.4-5-4.3 6.6-.5L12 3.5l2.5 5.9 6.6.5-5 4.3 1.5 6.4z"/></svg>
+        <span>收藏</span>
       </button>
       <button class="draweritem" id="drFiles">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -608,6 +602,24 @@
       <div class="spacer"></div>
     </div>
     <div class="pad" id="diaryBody" style="padding-top:6px; padding-bottom:calc(var(--safe-bottom) + 40px);"></div>
+  </div>
+
+  <!-- 收藏：跨对话的金句收藏，点卡片跳回来源、长按删 -->
+  <div id="favorites" class="screen">
+    <div class="topbar">
+      <button class="iconbtn" id="favBack">‹</button>
+      <div class="h2" style="font-family:var(--serif);font-size:22px;font-weight:700;">收藏</div>
+      <div class="spacer"></div>
+    </div>
+    <div class="pad" id="favBody" style="padding-top:6px; padding-bottom:calc(var(--safe-bottom) + 40px);"></div>
+  </div>
+
+  <!-- 选中文字后浮在选区上方的小横条（不变暗、无遮罩） -->
+  <div class="selbar" id="selBar">
+    <button data-act="copy">复制</button>
+    <button data-act="quote">引用</button>
+    <button data-act="fav">收藏</button>
+    <button data-act="share">分享</button>
   </div>
 
   <div class="toast" id="toast"></div>
