@@ -324,9 +324,9 @@ input, textarea {
 }
 .toast.show { opacity: 1; }
 
-/* 选区高亮：用主题的「深一档」色 --track（比气泡明显、一眼看清选了哪段，仍低饱和），随主题自动换 */
-::selection { background: var(--track); }
-::-moz-selection { background: var(--track); }
+/* 选区高亮：用强调色的淡色调（随强调色+主题自动换、低饱和不刺眼），别用中性灰会显脏 */
+::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+::-moz-selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 
 /* 选词浮条：浮在选区上方的小横条，不变暗、无遮罩。照系统选词条——扁平、无边框、无分割线 */
 .selbar {
