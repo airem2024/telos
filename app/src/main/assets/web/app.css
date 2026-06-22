@@ -23,9 +23,9 @@
   --border: #e9e3d6;
   --text: #2b2820;
   --muted: #8c8475;
-  --accent: #c2613f;
+  --accent: #5d6b78;
   --accent-weak: color-mix(in srgb, var(--accent) 15%, var(--surface));
-  --accent-press: #a94e30;
+  --accent-press: #4a555f;
   --ok: #6f8f4e;
   --err: #c0503e;
   --shadow: 40,38,31;

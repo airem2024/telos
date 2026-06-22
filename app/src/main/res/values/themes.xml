@@ -5,9 +5,10 @@
         <item name="android:statusBarColor">@color/bg</item>
         <item name="android:navigationBarColor">@color/bg</item>
         <item name="android:windowLightStatusBar">true</item>
-        <!-- WebView 选区：高亮带主力走 CSS ::selection(随强调色)，这里是兜底；手柄/光标用强调色砖橙，跟选中色一致 -->
+        <!-- WebView 选区：高亮带主力走 CSS ::selection(随强调色)，这里是兜底；手柄/光标=sel_handle，
+             随系统明暗换（纸白→近黑、夜间→浅灰，见 values / values-night），黑白两套对比择色 -->
         <item name="android:textColorHighlight">@color/sel_highlight</item>
-        <item name="colorAccent">@color/coral</item>
-        <item name="android:colorControlActivated">@color/coral</item>
+        <item name="colorAccent">@color/sel_handle</item>
+        <item name="android:colorControlActivated">@color/sel_handle</item>
     </style>
 </resources>

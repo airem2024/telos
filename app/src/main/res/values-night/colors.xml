@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 系统暗色模式下：选区拖动手柄/光标用浅灰，浅色衬深底（亮色模式见 values/colors.xml 的近黑） -->
+    <color name="sel_handle">#E4E6EA</color>
+</resources>

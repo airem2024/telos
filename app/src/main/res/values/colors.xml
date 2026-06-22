@@ -3,6 +3,8 @@
     <color name="bg">#FAF9F5</color>
     <color name="coral">#C2613F</color>
     <color name="cream">#FAF9F5</color>
-    <!-- 选区高亮兜底（CSS ::selection 未被 WebView 采纳时才用）：默认强调色砖橙的淡色，约 25% alpha -->
-    <color name="sel_highlight">#40C2613F</color>
+    <!-- 选区高亮兜底（CSS ::selection 未被 WebView 采纳时才用）：默认强调色 slate 的淡色，约 25% alpha -->
+    <color name="sel_highlight">#405D6B78</color>
+    <!-- 选区拖动手柄/光标（亮色=纸白主题）：近黑，深色衬白底；夜间在 values-night 里覆盖成浅灰 -->
+    <color name="sel_handle">#26292E</color>
 </resources>

@@ -20,7 +20,7 @@ const PREF_DEFAULTS = {
   interruptOnLeave: false, autoScroll: true, pasteAsFile: true, pasteThreshold: 1200, timezone: '',
   haptics: true, genHaptic: false, updateNotify: true, showStatusBar: true, discFx: true, discBlink: false,
   autoCleanup: true, wakePush: true, compactPrompt: '',
-  theme: 'warm', accent: 'brick', foldersCollapsed: false, autoOpenLast: false
+  theme: 'gray', accent: 'slate', foldersCollapsed: false, autoOpenLast: false
 };
 function loadPrefs() {
   const p = { ...PREF_DEFAULTS };
@@ -2405,6 +2405,9 @@ function applyFont() {
 }
 // 主题 + 强调色：都靠 <html> 上的 data-theme / data-accent 让 CSS 的属性选择器覆盖 token
 function applyTheme() {
+  // 暖调主题 / 砖橙强调色已下线 → 旧设置迁移到 纸白 / slate
+  if (P('theme') === 'warm') setPref('theme', 'gray');
+  if (P('accent') === 'brick') setPref('accent', 'slate');
   document.documentElement.setAttribute('data-theme', P('theme'));
   document.documentElement.setAttribute('data-accent', P('accent'));
 }
@@ -2421,8 +2424,8 @@ function tzToOffset(tz) { if (tz === 'UTC') return 0; const m = /^Etc\/GMT([+-])
 function tzOffLabel(off) { return off === 0 ? 'UTC' : 'UTC' + (off > 0 ? '+' : '-') + Math.abs(off); }
 const SET_CATS = {
   appearance: { name: '外观', items: [
-    { type: 'segment', key: 'theme', name: '主题', opts: [['warm', '暖调'], ['gray', '纸白'], ['dark', '夜间']], onChange: applyTheme },
-    { type: 'swatch', key: 'accent', name: '强调色', opts: [['brick', '#c2613f'], ['rose', '#c0506b'], ['amber', '#b07636'], ['green', '#4a7c59'], ['teal', '#2f7d8f'], ['indigo', '#3a6ea5'], ['violet', '#7a5cc6'], ['slate', '#5d6b78']], onChange: applyTheme },
+    { type: 'segment', key: 'theme', name: '主题', opts: [['gray', '纸白'], ['dark', '夜间']], onChange: applyTheme },
+    { type: 'swatch', key: 'accent', name: '强调色', opts: [['rose', '#c0506b'], ['amber', '#b07636'], ['green', '#4a7c59'], ['teal', '#2f7d8f'], ['indigo', '#3a6ea5'], ['violet', '#7a5cc6'], ['slate', '#5d6b78']], onChange: applyTheme },
     { type: 'slider', key: 'fontSize', name: '字体大小', min: 0.8, max: 1.4, step: 0.05, fmt: (v) => Math.round(v * 100) + '%', onChange: applyFont },
     { type: 'segment', key: 'fontFamily', name: '字体', opts: [['client', '客户端字体'], ['system', '系统字体']], onChange: applyFont },
     { type: 'toggle', key: 'showModel', name: '显示模型名称', onChange: updateHeader },
@@ -2455,7 +2458,7 @@ const SET_CATS = {
 };
 function refreshSettingsRows() {
   $('setConnDesc').textContent = state.connected ? (state.authed ? '已连接' : '连接中…') : '未连接';
-  $('setAppearDesc').textContent = ({ warm: '暖调', gray: '纸白', dark: '夜间' }[P('theme')] || '暖调') + ' · 字体 ' + Math.round(P('fontSize') * 100) + '%';
+  $('setAppearDesc').textContent = ({ gray: '纸白', dark: '夜间' }[P('theme')] || '纸白') + ' · 字体 ' + Math.round(P('fontSize') * 100) + '%';
   $('setChatDesc').textContent = (P('interruptOnLeave') ? '退出中断 · ' : '') + (P('autoScroll') ? '自动滚动' : '不自动滚动');
   $('setHapticDesc').textContent = P('haptics') ? '开' : '关';
   $('setUpdateDesc').textContent = P('updateNotify') ? '接受推送' : '不接受';
