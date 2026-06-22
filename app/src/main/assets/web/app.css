@@ -324,20 +324,23 @@ input, textarea {
 }
 .toast.show { opacity: 1; }
 
-/* 选词浮条：浮在选区上方的小横条，不变暗、无遮罩 */
+/* 选区高亮：用主题的「深一档」色 --track（比气泡明显、一眼看清选了哪段，仍低饱和），随主题自动换 */
+::selection { background: var(--track); }
+::-moz-selection { background: var(--track); }
+
+/* 选词浮条：浮在选区上方的小横条，不变暗、无遮罩。照系统选词条——扁平、无边框、无分割线 */
 .selbar {
-  position: fixed; z-index: 180; display: none; align-items: stretch;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-  box-shadow: 0 6px 22px rgba(var(--shadow),.20), 0 1px 3px rgba(var(--shadow),.10);
-  overflow: hidden; -webkit-user-select: none; user-select: none;
+  position: fixed; z-index: 180; display: none;
+  background: var(--surface); border-radius: 13px;
+  box-shadow: 0 4px 18px rgba(var(--shadow),.16), 0 1px 4px rgba(var(--shadow),.08);
+  padding: 2px; -webkit-user-select: none; user-select: none;
 }
 .selbar.show { display: flex; }
 .selbar button {
   border: none; background: transparent; color: var(--text);
-  font-family: var(--ui); font-size: 14px; padding: 8px 14px; white-space: nowrap;
+  font-family: var(--ui); font-size: 14px; padding: 6px 12px; border-radius: 11px; white-space: nowrap;
 }
-.selbar button:not(:first-child) { border-left: 1px solid var(--hair); }
-.selbar button:active { background: var(--track); }
+.selbar button:active { background: var(--surface-2); }
 
 /* connection banner */
 .connbar {

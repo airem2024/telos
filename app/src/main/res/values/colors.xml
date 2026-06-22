@@ -3,4 +3,8 @@
     <color name="bg">#FAF9F5</color>
     <color name="coral">#C2613F</color>
     <color name="cream">#FAF9F5</color>
+    <!-- 选区高亮兜底（CSS ::selection 未被 WebView 采纳时才用）：默认暖调 --track（深一档暖沙色） -->
+    <color name="sel_highlight">#D8D0C0</color>
+    <!-- 选区手柄/光标：低饱和暖灰，不要默认那种高饱和蓝 -->
+    <color name="sel_handle">#A99F8F</color>
 </resources>
