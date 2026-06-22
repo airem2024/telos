@@ -167,16 +167,19 @@ input, textarea {
 .msg.user .bubble {
   background: var(--bubble-user); border-radius: 16px 16px 4px 16px;
   padding: 12px 15px; max-width: 86%; font-size: 16px; line-height: 1.5;
-  white-space: pre-wrap; word-break: break-word; -webkit-user-select: text; user-select: text;
+  white-space: pre-wrap; word-break: break-word;
 }
 .msg.assistant .text {
   font-size: 16px; line-height: 1.62; white-space: pre-wrap; word-break: break-word;
-  -webkit-user-select: text; user-select: text; color: var(--text);
+  color: var(--text);
 }
 .msg.assistant .text code, .msg.assistant .text .ic {
   font-family: var(--mono); font-size: .9em; background: var(--surface-2);
   padding: 1px 5px; border-radius: 5px;
 }
+/* 对话内消息关掉原生选区：长按改走「整条复制」菜单（openMsgMenu），免得一拖就跨回复全选。
+   要复制就长按整条；正文里的代码块等以后往菜单里加。 */
+.msg .bubble, .msg .text, .msg .md { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .cursor::after { content: '▍'; color: var(--accent); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
