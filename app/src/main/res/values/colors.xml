@@ -5,6 +5,4 @@
     <color name="cream">#FAF9F5</color>
     <!-- 选区高亮兜底（CSS ::selection 未被 WebView 采纳时才用）：默认强调色砖橙的淡色，约 25% alpha -->
     <color name="sel_highlight">#40C2613F</color>
-    <!-- 选区手柄/光标：低饱和暖灰，不要默认那种高饱和蓝 -->
-    <color name="sel_handle">#A99F8F</color>
 </resources>
