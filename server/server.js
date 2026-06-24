@@ -196,6 +196,58 @@ let stickies = {}; // { [sid]: [ {id, text, ts, read} ] }
 try { stickies = JSON.parse(readFileSync(STICKIES_PATH, 'utf8')) || {}; } catch (e) {}
 function saveStickies() { try { writeFileSync(STICKIES_PATH, JSON.stringify(stickies)); } catch (e) {} }
 
+// ---- favorites (saved snippets, persisted) ----
+const FAVORITES_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'favorites.json');
+let favorites = []; // [ {id, text, sessionId, title, ts} ]
+try { favorites = JSON.parse(readFileSync(FAVORITES_PATH, 'utf8')) || []; if (!Array.isArray(favorites)) favorites = []; } catch (e) {}
+function saveFavorites() { try { writeFileSync(FAVORITES_PATH, JSON.stringify(favorites)); } catch (e) {} }
+function favItems() { return favorites.slice().sort((a, b) => b.ts - a.ts); } // newest first
+
+// ---- locate a session's JSONL across project dirs (used by clone) ----
+async function _sessionJsonl(sid) {
+  try {
+    const base = nodePath.join(homedir(), '.claude', 'projects');
+    for (const d of await fsp.readdir(base)) {
+      const p = nodePath.join(base, d, sid + '.jsonl');
+      try { await fsp.access(p); return p; } catch (e) {}
+    }
+  } catch (e) {}
+  return null;
+}
+
+// Clone a session into a brand-new "window": same dir, fresh sessionId, regenerated uuids +
+// re-chained parentUuid, content byte-for-byte identical. Use = move on to a clean window after a
+// conversation gets flagged: the old one stays put, the clone's attachments (wakeups/cost/archive)
+// start empty.
+async function cloneSession(srcSid, title) {
+  const srcPath = await _sessionJsonl(srcSid);
+  if (!srcPath) return null;
+  const lines = (await fsp.readFile(srcPath, 'utf8')).split('\n');
+  const newSid = randomUUID();
+  const idMap = new Map();                          // old uuid -> new uuid
+  const parsed = [];
+  for (const ln of lines) {
+    if (!ln.trim()) { parsed.push(null); continue; }
+    let o; try { o = JSON.parse(ln); } catch (e) { parsed.push(ln); continue; }  // keep non-JSON lines verbatim
+    if (o && typeof o === 'object' && o.uuid && !idMap.has(o.uuid)) idMap.set(o.uuid, randomUUID());
+    parsed.push(o);
+  }
+  const out = [];
+  for (const o of parsed) {
+    if (o == null) continue;
+    if (typeof o === 'string') { out.push(o); continue; }
+    if (o.uuid && idMap.has(o.uuid)) o.uuid = idMap.get(o.uuid);
+    if (o.parentUuid) o.parentUuid = idMap.get(o.parentUuid) || null;   // references outside the chain become null
+    if (o.leafUuid && idMap.has(o.leafUuid)) o.leafUuid = idMap.get(o.leafUuid);  // summary-line pointers
+    if ('sessionId' in o) o.sessionId = newSid;
+    out.push(JSON.stringify(o));
+  }
+  const newPath = nodePath.join(nodePath.dirname(srcPath), newSid + '.jsonl');  // same dir → cwd/path unchanged
+  await fsp.writeFile(newPath, out.join('\n') + '\n');
+  try { await renameSession(newSid, ((title || '对话') + ' ·副本').slice(0, 120)); } catch (e) {}
+  return newSid;
+}
+
 // ---- timezone-aware wall-clock helpers (Asia/* has no DST → one-iteration offset is exact) ----
 function tzParts(date, tz) {
   try {
@@ -1358,6 +1410,14 @@ async function handle(ws, conn, msg) {
       send(ws, { type: 'renamed', sessionId: msg.sessionId, title: msg.title });
       break;
 
+    case 'clone_session': {
+      try {
+        const newSid = await cloneSession(msg.sessionId, msg.title);
+        send(ws, newSid ? { type: 'cloned', sessionId: newSid } : { type: 'cloned', error: '找不到源对话文件' });
+      } catch (e) { send(ws, { type: 'cloned', error: String((e && e.message) || e) }); }
+      break;
+    }
+
     case 'pin':
       if (msg.pinned) pinned.add(msg.sessionId); else pinned.delete(msg.sessionId);
       savePins();
@@ -1853,6 +1913,26 @@ async function handle(ws, conn, msg) {
       const sid = msg.sessionId;
       if (sid && stickies[sid]) { stickies[sid] = stickies[sid].filter((n) => n.id !== msg.id); saveStickies(); broadcastSticky(sid); }
       send(ws, { type: 'stickies', sessionId: sid, notes: stickies[sid] || [] });
+      break;
+    }
+
+    case 'favorites_get':
+      send(ws, { type: 'favorites', items: favItems() });
+      break;
+    case 'favorites_add': {
+      const text = (msg.text || '').toString().trim();
+      if (text) {
+        favorites.push({ id: randomUUID(), text: text.slice(0, 8000), sessionId: msg.sessionId || '', title: (msg.title || '').toString().slice(0, 200), ts: Date.now() });
+        if (favorites.length > 500) favorites.splice(0, favorites.length - 500);
+        saveFavorites();
+      }
+      send(ws, { type: 'favorites', items: favItems() });
+      break;
+    }
+    case 'favorites_delete': {
+      favorites = favorites.filter((f) => f.id !== msg.id);
+      saveFavorites();
+      send(ws, { type: 'favorites', items: favItems() });
       break;
     }
 
