@@ -66,7 +66,7 @@ const EFFORTS = [
 ];
 
 /* ============ navigation ============ */
-const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'diaryView', 'diaryWrite', 'favorites', 'cinema', 'cinemaLog', 'memMgr', 'memEdit'];
+const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'stickies', 'diaryWrite', 'favorites', 'cinema', 'cinemaLog', 'memMgr', 'memEdit'];
 function show(name) {
   SCREENS.forEach((s) => $(s).classList.toggle('active', s === name));
   state.screen = name;
@@ -79,7 +79,6 @@ function show(name) {
 function overlayUp() {
   return anyOverlay() || drawerOpen() || searchOpen() || !!state.selectMode || !!state.plusOpen ||
     $('usageFull').classList.contains('show') || $('composeOver').classList.contains('show') ||
-    (typeof stickyPanelOpen === 'function' && stickyPanelOpen()) ||
     !!document.querySelector('.lightbox') || (state.discActive && !state.discCollapsed);
 }
 // tell native whether hardware-back should exit the app. Only a TRUE root counts: list/setup screen
@@ -163,7 +162,6 @@ window.onAndroidBack = () => {
   if (searchOpen()) { closeSearch(); return; }
   if (state.plusOpen) { closePlus(); return; }
   if (drawerOpen()) { closeDrawer(); return; }
-  if (stickyPanelOpen()) { closeStickyPanel(); return; }
   if ($('usageFull').classList.contains('show')) { closeUsageFull(); return; }
   if ($('composeOver').classList.contains('show')) { closeCompose(false); return; }
   if ($('permScrim').classList.contains('show')) { closePerm(true); return; }
@@ -173,7 +171,7 @@ window.onAndroidBack = () => {
   if (state.screen === 'cinema') { cinemaBack(); return; }
   if (state.screen === 'memEdit') { if (document.querySelector('.mepicker')) { closeMemTypePicker(); return; } show('memMgr'); return; }
   if (state.screen === 'memMgr') { show(state.currentSession ? 'chat' : 'list'); return; }
-  if (state.screen === 'diaryView') { show('diary'); return; }
+  if (state.screen === 'stickies') { show('diary'); return; }
   if (state.screen === 'diary') { diaryBack(); return; }
   if (state.screen === 'import') show(state.importReturn || 'files');
   else if (state.screen === 'files') closeFiles();
@@ -470,7 +468,7 @@ function handle(m) {
     case 'day': onDay(m); break;
     case 'todos': onTodos(m); break;
     case 'calendar_changed':
-      if (state.screen === 'diary') { reqCalendar(); if (state.selDay) reqDay(state.selDay); if (state.calMode === 'todo') wsend({ type: 'todos_get' }); }
+      if (state.screen === 'diary') { reqCalendar(); if (state.selDay) reqDay(state.selDay); wsend({ type: 'todos_get' }); }
       break;
     case 'diary_saved':
       toast('已保存到日记');
@@ -480,7 +478,7 @@ function handle(m) {
     case 'stickies_all': onStickiesAll(m); break;
     case 'favorites': onFavorites(m); break;
     case 'stickies_changed':
-      if (stickyPanelOpen() || state.screen === 'diary') wsend({ type: 'sticky_all' });
+      if (state.screen === 'stickies' || state.screen === 'diary') wsend({ type: 'sticky_all' });
       break;
     case 'sticky_changed':
       // refresh the unread badge on the list
@@ -2174,31 +2172,31 @@ function stickyAck(read) {
 
 /* ============ 总日历（全局：日程/待办/心情色/日记 + 便签栏） ============ */
 // 心情色：单轴 绿(平静·淡)→红(强烈·浓) 柔和渐变（与后端 moodLevelColor 同款）
-function moodColor(level) { const t = Math.max(0, Math.min(1, +level || 0)); return 'hsl(' + Math.round(140 - t * 130) + ', ' + Math.round(20 + t * 30) + '%, ' + Math.round(90 - t * 30) + '%)'; }
+function moodColor(level) { const t = Math.max(0, Math.min(1, +level || 0)); return 'rgb(' + Math.round(209 + 45 * t) + ', ' + Math.round(239 - 61 * t) + ', ' + Math.round(227 - 49 * t) + ')'; } // #d1efe3→#feb2b2
 function openCalendar(from) {
   state.calFrom = from || (state.currentSession ? 'chat' : 'list');
   const now = new Date(); state.calY = now.getFullYear(); state.calM = now.getMonth();
   state.selDay = todayLocalStr(); state.calMode = 'cal'; state.calDays = {}; state.dayData = null;
   $('diaryTitle').textContent = '日历';
   show('diary'); renderCalendarScreen();
-  reqCalendar(); reqDay(state.selDay); wsend({ type: 'sticky_all' });
+  reqCalendar(); reqDay(state.selDay); wsend({ type: 'todos_get' }); wsend({ type: 'sticky_all' });
 }
 function calMonthStr() { return state.calY + '-' + pad2(state.calM + 1); }
 function reqCalendar() { wsend({ type: 'calendar_get', month: calMonthStr() }); }
 function reqDay(ds) { wsend({ type: 'day_get', date: ds }); }
 function calNav(delta) { let m = state.calM + delta, y = state.calY; if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; } state.calM = m; state.calY = y; state.calDays = {}; reqCalendar(); renderCalGridOnly(); }
 function onCalendar(m) { state.calDays = m.days || {}; if (state.screen === 'diary' && state.calMode === 'cal') renderCalGridOnly(); }
-function onDay(m) { if (m.date !== state.selDay) return; state.dayData = m; if (state.screen === 'diary' && state.calMode === 'cal') renderDayPanel(); }
-function onTodos(m) { state.allTodos = m.items || []; if (state.screen === 'diary' && state.calMode === 'todo') renderTodoList(); }
+function onDay(m) { if (m.date !== state.selDay) return; state.dayData = m; if (state.screen === 'diary') { if (state.calMode === 'cal') renderDayPanel(); else renderDiaryList(); } }
+function onTodos(m) { state.allTodos = m.items || []; if (state.screen === 'diary' && state.calMode === 'cal') renderDayPanel(); }
 function selectDay(ds) { state.selDay = ds; state.dayData = null; reqDay(ds); renderCalGridOnly(); renderDayPanel(); }
 function diaryBack() { const to = state.calFrom === 'chat' ? 'chat' : 'list'; show(to); if (to === 'list') wsend({ type: 'list_sessions' }); }
 function renderCalendarScreen() {
   if (state.screen !== 'diary') return;
   const body = $('diaryBody'); body.innerHTML = '';
   const seg = el('div', 'calseg');
-  [['cal', '日历'], ['todo', '待办']].forEach(([mode, lbl]) => {
+  [['cal', '日历'], ['diary', '日记']].forEach(([mode, lbl]) => {
     const b = el('button', 'calseg-b' + (state.calMode === mode ? ' on' : '')); b.textContent = lbl;
-    b.onclick = () => { if (state.calMode === mode) return; state.calMode = mode; renderCalendarScreen(); if (mode === 'todo') wsend({ type: 'todos_get' }); };
+    b.onclick = () => { if (state.calMode === mode) return; state.calMode = mode; renderCalendarScreen(); };
     seg.appendChild(b);
   });
   body.appendChild(seg);
@@ -2207,8 +2205,8 @@ function renderCalendarScreen() {
     const panel = el('div', 'daypanel'); panel.id = 'dayPanel'; body.appendChild(panel);
     renderCalGridOnly(); renderDayPanel(); renderPinned();
   } else {
-    const list = el('div', 'todolist'); list.id = 'todoList'; body.appendChild(list);
-    renderTodoList();
+    const list = el('div', 'diarylist'); list.id = 'diaryList'; body.appendChild(list);
+    renderDiaryList();
   }
 }
 // 只重建日历网格（不动叠在上面的便签纸片层 .pinlayer）
@@ -2253,38 +2251,32 @@ function dpSec(title, addLabel, onAdd) {
 function dpEmpty(text) { const e = el('div', 'dp-empty'); e.textContent = text; return e; }
 function renderDayPanel() {
   const panel = $('dayPanel'); if (!panel) return; panel.innerHTML = '';
-  const ds = state.selDay; const d = state.dayData || { diary: [], events: [], todos: [], mood: null };
+  const ds = state.selDay; const d = state.dayData || { events: [], todos: [] };
   const hh = diaryHead(ds);
   const head = el('div', 'dp-head'); head.innerHTML = '<b>' + hh.day + '</b><span>' + hh.wk + ' · ' + hh.ym + '</span>';
   panel.appendChild(head);
-  panel.appendChild(moodBar(ds, d.mood));
   panel.appendChild(dpSec('日程', '日程', () => addEvent(ds)));
-  if (!d.events.length) panel.appendChild(dpEmpty('这天没有日程'));
-  d.events.forEach((ev) => panel.appendChild(eventRow(ev)));
+  const evs = d.events || [];
+  if (!evs.length) panel.appendChild(dpEmpty('这天没有日程'));
+  evs.forEach((ev) => panel.appendChild(eventRow(ev)));
   panel.appendChild(dpSec('待办', '待办', () => addTodo(ds)));
-  if (!d.todos.length) panel.appendChild(dpEmpty('这天没有待办'));
-  d.todos.forEach((td) => panel.appendChild(todoRow(td)));
-  panel.appendChild(dpSec('日记', '写日记', () => writeDiaryFor(ds)));
-  if (!d.diary.length) panel.appendChild(dpEmpty('这天还没有日记'));
-  d.diary.forEach((en) => panel.appendChild(diaryPreview(en, d.mood)));
+  const tds = (state.allTodos || []).filter((t) => t.date === ds || !t.date).sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0) || a.ts - b.ts);
+  if (!tds.length) panel.appendChild(dpEmpty('没有待办'));
+  tds.forEach((td) => panel.appendChild(todoRow(td)));
+}
+// 「日记」标签：只看选中那天（默认今天）的日记，缩略卡片（有图放缩略图 + 文字 3 行）
+function renderDiaryList() {
+  const list = $('diaryList'); if (!list) return; list.innerHTML = '';
+  const ds = state.selDay; const d = state.dayData || { diary: [], mood: null };
+  const hh = diaryHead(ds);
+  const head = el('div', 'dp-head'); head.innerHTML = '<b>' + hh.day + '</b><span>' + hh.wk + ' · ' + hh.ym + '</span>';
+  list.appendChild(head);
+  const add = el('button', 'dwritebtn'); add.textContent = '＋ 写日记'; add.onclick = () => writeDiaryFor(ds); list.appendChild(add);
+  const items = d.diary || [];
+  if (!items.length) { list.appendChild(dpEmpty('这天还没有日记')); return; }
+  items.forEach((en) => list.appendChild(diaryPreview(en, d.mood)));
 }
 // 心情取色条：绿(平静)→红(强烈)，点一下定当天心情色
-function moodBar(ds, mood) {
-  const wrap = el('div', 'moodbar');
-  const lab = el('div', 'mb-lab'); lab.textContent = '心情';
-  const bar = el('div', 'mb-track');
-  const lvl = mood && mood.level != null ? mood.level : null;
-  if (lvl != null) { const knob = el('div', 'mb-knob'); knob.style.left = (lvl * 100) + '%'; bar.appendChild(knob); }
-  bar.addEventListener('click', (e) => {
-    const r = bar.getBoundingClientRect(); const v = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-    wsend({ type: 'daymood_set', date: ds, level: v });
-    if (state.dayData) state.dayData.mood = { level: v }; state.calDays[ds] = Object.assign(state.calDays[ds] || {}, { mood: v });
-    renderDayPanel(); renderCalGridOnly();
-  });
-  wrap.append(lab, bar);
-  if (lvl != null) { const clr = el('button', 'mb-clear'); clr.textContent = '清除'; clr.onclick = () => { wsend({ type: 'daymood_clear', date: ds }); if (state.dayData) state.dayData.mood = null; if (state.calDays[ds]) state.calDays[ds].mood = null; renderDayPanel(); renderCalGridOnly(); }; wrap.appendChild(clr); }
-  return wrap;
-}
 function agCheck(done, onTap) { const ck = el('button', 'agck' + (done ? ' on' : '')); ck.textContent = done ? '✓' : ''; ck.onclick = (e) => { e.stopPropagation(); onTap(); }; return ck; }
 function eventRow(ev) {
   const r = el('div', 'agrow' + (ev.done ? ' done' : ''));
@@ -2304,7 +2296,7 @@ function todoRow(td) {
   r.appendChild(agCheck(td.done, () => wsend({ type: 'todo_toggle', id: td.id })));
   const mid = el('div', 'agmid');
   const tl = el('div', 'agtitle'); tl.textContent = td.title;
-  if (td.date && state.calMode === 'todo') { const dt = el('span', 'agdate'); dt.textContent = td.date.slice(5); tl.appendChild(dt); }
+  if (!td.date) { const dt = el('span', 'agdate'); dt.textContent = '不限'; tl.appendChild(dt); }
   if (td.by === 'cc') { const tag = el('span', 'agby'); tag.textContent = '茜茜'; tl.appendChild(tag); }
   mid.appendChild(tl);
   let held = false;
@@ -2324,49 +2316,22 @@ function diaryPreview(en, mood) {
   const meta = el('div', 'dprev-meta');
   const who = en.author === 'cc' ? (en.sidTitle || '茜茜') : '我';
   meta.textContent = fmtClock(en.ts) + ' · ' + who + (en.weather ? ' · ' + en.weather : '') + (en.tags ? ' · #' + en.tags : '');
-  const tx = el('div', 'dprev-text'); tx.textContent = en.text;
-  card.append(meta, tx);
-  card.addEventListener('click', () => openDiaryViewScreen(en));
+  card.appendChild(meta);
+  const row = el('div', 'dprev-row');
+  const tx = el('div', 'dprev-text'); tx.textContent = en.text || '（图片）'; row.appendChild(tx);
+  const imgs = en.images || [];
+  if (imgs.length) { const im = el('img', 'dprev-thumb'); im.src = diaryImgUrl(imgs[0]); row.appendChild(im); }
+  card.appendChild(row);
+  // 点缩略 → 打开日记页「只读态」（右上角是「编辑」，点了才能改）
+  card.addEventListener('click', () => { state.diarySession = en.sid; state.diaryDay = state.selDay; openDiaryWrite(en, { readonly: true }); });
   return card;
 }
-// 日记详情（只读），从这里再点「编辑」才进编辑屏
-function openDiaryViewScreen(en) {
-  state.viewEntry = en;
-  const body = $('diaryViewBody'); body.innerHTML = '';
-  const mood = state.dayData && state.dayData.mood;
-  const card = el('div', 'dvcard');
-  if (mood && mood.level != null) card.style.background = moodColor(mood.level);
-  const meta = el('div', 'dv-meta');
-  const who = en.author === 'cc' ? (en.sidTitle || '茜茜') : '我';
-  meta.textContent = state.selDay + ' ' + fmtClock(en.ts) + ' · ' + who + (en.weather ? ' · ' + en.weather : '') + (en.tags ? ' · #' + en.tags : '') + (en.edited ? ' · 已编辑' : '');
-  const tx = el('div', 'dv-text md'); tx.innerHTML = md(en.text);
-  card.append(meta, tx);
-  const imgs = en.images || [];
-  if (imgs.length) { const box = el('div', 'dentimgs'); imgs.forEach((u) => { const url = diaryImgUrl(u); const im = el('img', 'dthumb' + (imgs.length > 1 ? ' multi' : '')); im.src = url; im.addEventListener('click', () => openLightbox(url)); box.appendChild(im); }); card.appendChild(box); }
-  body.appendChild(card);
-  const acts = el('div', 'dv-acts');
-  const edit = el('button', 'dv-btn'); edit.textContent = '编辑'; edit.onclick = () => { state.diarySession = en.sid; state.diaryDay = state.selDay; openDiaryWrite(en); };
-  const del = el('button', 'dv-btn danger'); del.textContent = '删除'; del.onclick = () => openPrompt('删除这条日记？输入「删除」确认', '', (v) => { if (v === '删除') { wsend({ type: 'diary_delete', sessionId: en.sid, date: state.selDay, ts: en.ts }); show('diary'); } });
-  acts.append(edit, del); body.appendChild(acts);
-  show('diaryView');
-}
-function renderTodoList() {
-  const list = $('todoList'); if (!list) return; list.innerHTML = '';
-  const add = el('button', 'dwritebtn'); add.textContent = '＋ 新待办'; add.onclick = () => openPrompt('写一条待办（不限日期）', '', (v) => { const t = String(v || '').trim(); if (t) wsend({ type: 'todo_add', title: t }); }); list.appendChild(add);
-  const items = state.allTodos || [];
-  if (!items.length) { list.appendChild(dpEmpty('还没有待办。点上面新建，或让茜茜帮你加。')); return; }
-  const open = items.filter((t) => !t.done), done = items.filter((t) => t.done);
-  open.forEach((td) => list.appendChild(todoRow(td)));
-  if (done.length) { const h = el('div', 'dp-sec'); const t = el('div', 'dp-sec-t'); t.textContent = '已完成'; h.appendChild(t); list.appendChild(h); done.forEach((td) => list.appendChild(todoRow(td))); }
-}
 
-/* ---- 便签栏（从右侧滑出，统一管理所有便签；可贴到日历/摘下/收藏） ---- */
-function openStickyPanel() { const b = $('stickyBack'), p = $('stickyPanel'); clearTimeout(p._hideT); b.classList.add('show'); p.classList.add('show'); requestAnimationFrame(() => b.classList.add('in')); wsend({ type: 'sticky_all' }); renderStickyPanel(); syncAtRoot(); }
-function closeStickyPanel() { const b = $('stickyBack'), p = $('stickyPanel'); b.classList.remove('in'); p.classList.remove('show'); p._hideT = setTimeout(() => b.classList.remove('show'), 300); syncAtRoot(); }
-function stickyPanelOpen() { return $('stickyPanel').classList.contains('show'); }
-function onStickiesAll(m) { state.stickyAll = m.items || []; if (stickyPanelOpen()) renderStickyPanel(); if (state.screen === 'diary' && state.calMode === 'cal') renderPinned(); }
-function renderStickyPanel() {
-  const body = $('stickyPanelBody'); if (!body) return; body.innerHTML = '';
+/* ---- 便签栏（单独一页，统一管理所有便签；可贴到日历/摘下/收藏） ---- */
+function openStickies() { show('stickies'); wsend({ type: 'sticky_all' }); renderStickyPage(); }
+function onStickiesAll(m) { state.stickyAll = m.items || []; if (state.screen === 'stickies') renderStickyPage(); if (state.screen === 'diary' && state.calMode === 'cal') renderPinned(); }
+function renderStickyPage() {
+  const body = $('stickiesBody'); if (!body) return; body.innerHTML = '';
   const items = state.stickyAll || [];
   if (!items.length) { body.appendChild(dpEmpty('还没有便签。茜茜留的小纸条会收在这里。')); return; }
   items.forEach((n) => {
@@ -2404,23 +2369,6 @@ function bindPinDrag(note, wrap, n) {
   note.addEventListener('touchmove', (e) => { if (!dragging) return; const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy; if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true; if (!moved) return; e.preventDefault(); const r = wrap.getBoundingClientRect(); let x = (startL + dx) / r.width, y = (startT + dy) / r.height; x = Math.max(0, Math.min(1, x)); y = Math.max(0, Math.min(1, y)); note.style.left = (x * 100) + '%'; note.style.top = (y * 100) + '%'; note._x = x; note._y = y; }, { passive: false });
   note.addEventListener('touchend', () => { if (!dragging) return; dragging = false; note.style.transition = ''; note.classList.remove('drag'); if (moved && note._x != null) wsend({ type: 'sticky_pin', sid: n.sid, id: n.id, x: note._x, y: note._y }); else if (!moved) note.classList.toggle('open'); });
 }
-// 便签栏从右侧滑出 → 向右拖把它关掉
-function initStickyPanelSwipe() {
-  const p = $('stickyPanel'); if (!p) return; let sx = 0, sy = 0, dragging = false, dir = null, W = 0;
-  p.addEventListener('touchstart', (e) => { if (e.touches.length !== 1) return; sx = e.touches[0].clientX; sy = e.touches[0].clientY; dragging = true; dir = null; W = p.offsetWidth; p.style.transition = 'none'; }, { passive: true });
-  p.addEventListener('touchmove', (e) => {
-    if (!dragging) return; const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
-    if (dir === null) { if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return; dir = Math.abs(dx) > Math.abs(dy) * 1.3 ? 'h' : 'v'; }
-    if (dir !== 'h') return; e.preventDefault(); p.style.transform = 'translateX(' + Math.max(0, dx) + 'px)';
-  }, { passive: false });
-  p.addEventListener('touchend', (e) => {
-    if (!dragging) return; dragging = false; const dx = e.changedTouches[0].clientX - sx;
-    p.style.transition = 'transform .26s cubic-bezier(.32,.72,0,1)';
-    if (dir === 'h' && dx > W * 0.33) { p.style.transform = 'translateX(100%)'; $('stickyBack').classList.remove('in'); setTimeout(() => { p.classList.remove('show'); $('stickyBack').classList.remove('show'); p.style.transform = ''; p.style.transition = ''; syncAtRoot(); }, 270); }
-    else { p.style.transform = 'translateX(0)'; setTimeout(() => { p.style.transform = ''; p.style.transition = ''; }, 260); }
-    dir = null;
-  });
-}
 /* ============ 收藏夹（跨对话金句，仿日记 overview） ============ */
 function openFavoritesOverview() {
   $('favBody').innerHTML = '<div class="dempty">加载中…</div>';
@@ -2445,7 +2393,9 @@ function diaryImgDir() { return (((state.defaultCwd || state.cwd || '').replace(
 // open the write/edit page. pass an entry to edit it, omit to write a new one.
 function diaryHead(ds) { const p = (ds || '').split('-'); const d = new Date(+p[0], (+p[1] || 1) - 1, +p[2] || 1); return { day: (+p[2] || 1), wk: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()], ym: (p[0] || '') + '.' + (+p[1] || 1) }; }
 function dwUpdateCount() { $('dwCount').textContent = $('dwText').value.length + ' 字'; }
-function openDiaryWrite(entry) {
+function openDiaryWrite(entry, opts) {
+  opts = opts || {};
+  state.dwReadonly = !!opts.readonly;
   state.dwEditing = entry || null;
   state.dwImages = (entry && Array.isArray(entry.images)) ? entry.images.slice() : [];
   state.dwMoodLevel = (state.dayData && state.dayData.mood && state.dayData.mood.level != null) ? state.dayData.mood.level : null;
@@ -2453,9 +2403,20 @@ function openDiaryWrite(entry) {
   state.dwTags = entry ? (entry.tags || '') : '';
   $('dwText').value = entry ? (entry.text || '') : '';
   const h = diaryHead(state.diaryDay); $('dwDay').textContent = h.day; $('dwWk').textContent = h.wk; $('dwYm').textContent = h.ym;
-  closeDwPicker(); renderDwImgs(); updateDwMoodWeather(); dwUpdateCount();
+  closeDwPicker(); renderDwImgs(); updateDwMoodWeather(); dwUpdateCount(); applyDwMode();
   show('diaryWrite');
-  setTimeout(() => $('dwText').focus(), 150);
+  if (!state.dwReadonly) setTimeout(() => $('dwText').focus(), 150);
+}
+// 只读态：textarea 不可改、右上角按钮是「编辑」、隐藏加图/元数据交互。点「编辑」才转可改。
+function applyDwMode() {
+  const ro = !!state.dwReadonly;
+  $('dwText').readOnly = ro;
+  $('dwSave').textContent = ro ? '编辑' : '保存';
+  $('diaryWrite').classList.toggle('readonly', ro);
+}
+function dwSaveClick() {
+  if (state.dwReadonly) { state.dwReadonly = false; applyDwMode(); setTimeout(() => $('dwText').focus(), 80); return; }
+  saveDiaryEntry();
 }
 function updateDwMoodWeather() {
   const mv = $('dwMoodVal');
@@ -2473,11 +2434,15 @@ function toggleDwPicker(kind) {
   const p = el('div', 'dwpicker');
   if (kind === 'mood') {
     p.classList.add('moodpick');
-    const bar = el('div', 'mb-track big');
-    if (state.dwMoodLevel != null) { const k = el('div', 'mb-knob'); k.style.left = (state.dwMoodLevel * 100) + '%'; bar.appendChild(k); }
-    bar.addEventListener('click', (e) => { const r = bar.getBoundingClientRect(); state.dwMoodLevel = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); updateDwMoodWeather(); closeDwPicker(); });
+    const row = el('div', 'moodsw-row');
+    [0, 0.2, 0.4, 0.6, 0.8, 1].forEach((v) => {
+      const b = el('button', 'moodsw' + (state.dwMoodLevel != null && Math.abs(state.dwMoodLevel - v) < 0.05 ? ' on' : ''));
+      b.style.background = moodColor(v);
+      b.addEventListener('click', () => { state.dwMoodLevel = v; updateDwMoodWeather(); closeDwPicker(); });
+      row.appendChild(b);
+    });
     const clr = el('button', 'dwpick-clr'); clr.textContent = '清除心情'; clr.addEventListener('click', () => { state.dwMoodLevel = null; updateDwMoodWeather(); closeDwPicker(); });
-    p.append(bar, clr);
+    p.append(row, clr);
   } else {
     const clr = el('button'); clr.textContent = '✕'; clr.style.fontSize = '15px';
     clr.addEventListener('click', () => { state.dwWeather = ''; updateDwMoodWeather(); closeDwPicker(); });
@@ -3338,10 +3303,9 @@ function boot() {
     }
   }, { passive: true });
   initPageSwipe('cinemaLog', { onBack: () => show('cinema'), under: 'cinema' });
-  initPageSwipe('diary', { onBack: diaryBack, onLeft: openStickyPanel });   // 左滑唤出便签栏（从右侧滑入）
-  initPageSwipe('diaryView', { onBack: () => show('diary'), under: 'diary' });
+  initPageSwipe('diary', { onBack: diaryBack, onLeft: openStickies });   // 左滑进便签栏
+  initPageSwipe('stickies', { onBack: () => show('diary'), under: 'diary' });
   initPageSwipe('favorites', { onBack: () => show('list'), under: 'list' });
-  initStickyPanelSwipe();
   initPageSwipe('diaryWrite', { onBack: () => { closeDwPicker(); show('diary'); }, under: 'diary' });
   initPageSwipe('files', { onBack: closeFiles, under: () => state.filesReturn || 'list' });
   initPageSwipe('import', { onBack: () => show(state.importReturn || 'files'), under: () => state.importReturn || 'files' });
@@ -3430,13 +3394,12 @@ function boot() {
   $('stkSkip').addEventListener('click', () => stickyAck(false));
   $('atDiary').addEventListener('click', () => { closePlus(); openCalendar('chat'); });
   $('diaryBack').addEventListener('click', diaryBack);
-  $('diaryStickyBtn').addEventListener('click', openStickyPanel);
-  $('stickyBack').addEventListener('click', closeStickyPanel);
-  $('diaryViewBack').addEventListener('click', () => show('diary'));
+  $('diaryStickyBtn').addEventListener('click', openStickies);
+  $('stickiesBack').addEventListener('click', () => show('diary'));
   $('dwBack').addEventListener('click', () => { closeDwPicker(); show('diary'); });
   $('dwAddImg').addEventListener('click', () => $('dwFile').click());
   $('dwFile').addEventListener('change', (e) => { dwAddImages(e.target.files); e.target.value = ''; });
-  $('dwSave').addEventListener('click', saveDiaryEntry);
+  $('dwSave').addEventListener('click', dwSaveClick);
   $('dwMood').addEventListener('click', () => toggleDwPicker('mood'));
   $('dwWeather').addEventListener('click', () => toggleDwPicker('weather'));
   $('dwTags').addEventListener('click', () => openPrompt('标签', state.dwTags || '', (v) => { state.dwTags = (v || '').trim(); updateDwMoodWeather(); }, '逗号分隔', { allowEmpty: true }));

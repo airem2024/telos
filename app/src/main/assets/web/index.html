@@ -608,22 +608,15 @@
     <div class="pad" id="diaryBody" style="padding-top:6px; padding-bottom:calc(var(--safe-bottom) + 40px);"></div>
   </div>
 
-  <!-- 日记详情（只读；从这里再点编辑才进编辑屏） -->
-  <div id="diaryView" class="screen">
+  <!-- 便签栏（单独一页，统一管理所有便签） -->
+  <div id="stickies" class="screen">
     <div class="topbar">
-      <button class="iconbtn" id="diaryViewBack">‹</button>
-      <div class="h2" style="font-family:var(--serif);font-size:22px;font-weight:700;">日记</div>
+      <button class="iconbtn" id="stickiesBack">‹</button>
+      <div class="h2" style="font-family:var(--serif);font-size:22px;font-weight:700;">便签栏</div>
       <div class="spacer"></div>
     </div>
-    <div class="pad" id="diaryViewBody" style="padding-top:6px; padding-bottom:calc(var(--safe-bottom) + 40px);"></div>
+    <div class="pad" id="stickiesBody" style="padding-top:6px; padding-bottom:calc(var(--safe-bottom) + 40px);"></div>
   </div>
-
-  <!-- 便签栏（从右滑出，统一管理所有便签） -->
-  <div class="drawer-back" id="stickyBack"></div>
-  <aside class="stickypanel" id="stickyPanel">
-    <div class="sp-head"><div class="sp-title">便签栏</div><div class="sp-sub">贴到日历 · 摘下 · 收藏</div></div>
-    <div class="sp-body" id="stickyPanelBody"></div>
-  </aside>
 
   <!-- 收藏：跨对话的金句收藏，点卡片跳回来源、长按删 -->
   <div id="favorites" class="screen">
