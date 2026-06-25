@@ -431,8 +431,8 @@
     </div>
     <div class="drawer-items">
       <button class="draweritem" id="drDiary">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-        <span>日记 / 便签夹</span>
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+        <span>日历</span>
       </button>
       <button class="draweritem" id="drFavorites">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17.3l-5.6 3.3 1.5-6.4-5-4.3 6.6-.5L12 3.5l2.5 5.9 6.6.5-5 4.3 1.5 6.4z"/></svg>
@@ -595,15 +595,35 @@
     <div class="pad" id="memMgrBody" style="padding-top:2px;padding-bottom:calc(var(--safe-bottom) + 40px);overflow-y:auto;"></div>
   </div>
 
-  <!-- 日记 / 便签夹 页面 (上日记 下便签夹；汇总/单对话两种模式) -->
+  <!-- 总日历（全局：日程/待办/心情色/日记 + 右滑便签栏） -->
   <div id="diary" class="screen">
     <div class="topbar">
       <button class="iconbtn" id="diaryBack">‹</button>
-      <div class="h2" id="diaryTitle" style="font-family:var(--serif);font-size:22px;font-weight:700;">日记 / 便签夹</div>
+      <div class="h2" id="diaryTitle" style="font-family:var(--serif);font-size:22px;font-weight:700;">日历</div>
       <div class="spacer"></div>
+      <button class="iconbtn" id="diaryStickyBtn" title="便签栏">
+        <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9z"/><path d="M15 3v6h6"/></svg>
+      </button>
     </div>
     <div class="pad" id="diaryBody" style="padding-top:6px; padding-bottom:calc(var(--safe-bottom) + 40px);"></div>
   </div>
+
+  <!-- 日记详情（只读；从这里再点编辑才进编辑屏） -->
+  <div id="diaryView" class="screen">
+    <div class="topbar">
+      <button class="iconbtn" id="diaryViewBack">‹</button>
+      <div class="h2" style="font-family:var(--serif);font-size:22px;font-weight:700;">日记</div>
+      <div class="spacer"></div>
+    </div>
+    <div class="pad" id="diaryViewBody" style="padding-top:6px; padding-bottom:calc(var(--safe-bottom) + 40px);"></div>
+  </div>
+
+  <!-- 便签栏（从右滑出，统一管理所有便签） -->
+  <div class="drawer-back" id="stickyBack"></div>
+  <aside class="stickypanel" id="stickyPanel">
+    <div class="sp-head"><div class="sp-title">便签栏</div><div class="sp-sub">贴到日历 · 摘下 · 收藏</div></div>
+    <div class="sp-body" id="stickyPanelBody"></div>
+  </aside>
 
   <!-- 收藏：跨对话的金句收藏，点卡片跳回来源、长按删 -->
   <div id="favorites" class="screen">

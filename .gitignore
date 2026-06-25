@@ -35,6 +35,9 @@ server/wakeups.json
 server/diary.json
 server/stickies.json
 server/favorites.json
+server/events.json
+server/todos.json
+server/daymood.json
 server/sessmodel.json
 server/activedays.json
 server/apk_version.txt

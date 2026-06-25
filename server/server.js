@@ -203,6 +203,82 @@ try { favorites = JSON.parse(readFileSync(FAVORITES_PATH, 'utf8')) || []; if (!A
 function saveFavorites() { try { writeFileSync(FAVORITES_PATH, JSON.stringify(favorites)); } catch (e) {} }
 function favItems() { return favorites.slice().sort((a, b) => b.ts - a.ts); } // newest first
 
+// ====================================================================
+// 「总日历」(全局，跨所有对话共享一份)：日程 events / 待办 todos / 每日心情色 daymood。
+//   茜茜经 MCP 工具 add_event/add_todo/update_item/remove_item 增删改；
+//   心情/天气/标签由茜茜写进日记正文、后端解析出来（省掉单独的工具调用）。
+// ====================================================================
+const __sdir = nodePath.dirname(fileURLToPath(import.meta.url));
+const EVENTS_PATH = nodePath.join(__sdir, 'events.json');
+let events = []; // [ {id, date:'YYYY-MM-DD', time:'HH:MM'|'', title, note, by:'user'|'cc', done, ts} ]
+try { events = JSON.parse(readFileSync(EVENTS_PATH, 'utf8')) || []; if (!Array.isArray(events)) events = []; } catch (e) {}
+function saveEvents() { try { writeFileSync(EVENTS_PATH, JSON.stringify(events)); } catch (e) {} }
+
+const TODOS_PATH = nodePath.join(__sdir, 'todos.json');
+let todos = []; // [ {id, title, date:'YYYY-MM-DD'|'', done, by:'user'|'cc', ts} ]
+try { todos = JSON.parse(readFileSync(TODOS_PATH, 'utf8')) || []; if (!Array.isArray(todos)) todos = []; } catch (e) {}
+function saveTodos() { try { writeFileSync(TODOS_PATH, JSON.stringify(todos)); } catch (e) {} }
+
+const DAYMOOD_PATH = nodePath.join(__sdir, 'daymood.json');
+let daymood = {}; // { 'YYYY-MM-DD': { level:0..1, word, by, manual, at } }
+try { daymood = JSON.parse(readFileSync(DAYMOOD_PATH, 'utf8')) || {}; } catch (e) {}
+function saveDaymood() { try { writeFileSync(DAYMOOD_PATH, JSON.stringify(daymood)); } catch (e) {} }
+
+const isYMD = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+const isHM = (s) => /^\d{1,2}:\d{2}$/.test(String(s || ''));
+
+// 心情→颜色：单轴「绿(平静·淡) → 红(强烈·浓)」柔和渐变，低饱和、浓度封顶不刺眼。前端同款实现一份。
+function moodLevelColor(level) {
+  const t = Math.max(0, Math.min(1, +level || 0));
+  const hue = Math.round(140 - t * 130);   // 140 绿 → 10 红
+  const sat = Math.round(20 + t * 30);     // 20% → 50%（封顶）
+  const light = Math.round(90 - t * 30);   // 90% 淡 → 60% 浓（不过暗）
+  return `hsl(${hue}, ${sat}%, ${light}%)`;
+}
+const MOOD_LEX = [
+  [/平静|安宁|安稳|淡然|平和|宁静|踏实|安心/, 0.10],
+  [/愉快|开心|快乐|温柔|明朗|轻松|满足|甜|幸福|欢喜|雀跃/, 0.28],
+  [/想念|惦记|温暖|期待|柔软|依恋/, 0.36],
+  [/惆怅|怅然|淡淡|微凉|怀念|感伤|怔忡/, 0.46],
+  [/低落|难过|失落|沮丧|委屈|孤独|寂寞|疲惫|累|困倦|乏/, 0.58],
+  [/不安|忐忑|担心|焦虑|紧张|害怕|慌|忧/, 0.70],
+  [/烦躁|烦|郁闷|生气|不爽|别扭|闷|急/, 0.82],
+  [/愤怒|崩溃|绝望|痛苦|气炸|暴躁/, 0.93],
+];
+function moodWordLevel(word) {
+  const w = String(word || '').trim();
+  if (!w) return null;
+  for (const [re, v] of MOOD_LEX) if (re.test(w)) return v;
+  return 0.4;
+}
+// 从日记正文解析「心情/天气/标签」：只看最后一行非空文本，若像元数据行就抠出并把这行隐藏。
+function parseDiaryMeta(text) {
+  const lines = String(text || '').split('\n');
+  let li = -1;
+  for (let i = lines.length - 1; i >= 0; i--) { if (lines[i].trim()) { li = i; break; } }
+  let mood = '', weather = '', tags = '';
+  if (li >= 0) {
+    const ln = lines[li].trim();
+    const looksMeta = /(心情|天气)\s*[:：]/.test(ln) || /(^|\s)#\S/.test(ln);
+    if (looksMeta) {
+      const mm = ln.match(/心情\s*[:：]\s*([^｜|#\n]+)/); if (mm) mood = mm[1].trim();
+      const wm = ln.match(/天气\s*[:：]\s*([^｜|#\n]+)/); if (wm) weather = wm[1].trim();
+      const tg = [...ln.matchAll(/#([^\s#｜|]+)/g)].map((m) => m[1]);
+      if (tg.length) tags = tg.join(' ');
+      if (mood || weather || tags) lines.splice(li, 1);
+    }
+  }
+  const body = lines.join('\n').replace(/[\s]+$/, '').replace(/[ \t]*[—–\-]+[ \t]*$/, '').replace(/[\s]+$/, '');
+  return { body, mood, weather, tags };
+}
+function setDaymood(date, level, word, by, fromDiary) {
+  if (!isYMD(date)) return;
+  const cur = daymood[date];
+  if (fromDiary && cur && cur.manual) return;
+  daymood[date] = { level: Math.max(0, Math.min(1, +level || 0)), word: word || '', by: by || 'user', manual: !fromDiary, at: Date.now() };
+  saveDaymood();
+}
+
 // ---- locate a session's JSONL across project dirs (used by clone) ----
 async function _sessionJsonl(sid) {
   try {
@@ -336,8 +412,17 @@ function diaryAdd(sid, date, author, text, images, extra) {
   const day = date || todayStr(wakeups[sid]?.tz || currentTz || DEFAULT_TZ);
   const book = diary[sid] || (diary[sid] = {});
   const page = book[day] || (book[day] = []);
-  page.push({ author: author === 'cc' ? 'cc' : 'user', text: String(text).slice(0, 20000), images: Array.isArray(images) ? images.slice(0, 20) : [], mood: (extra && extra.mood) || '', weather: (extra && extra.weather) || '', tags: (extra && extra.tags) || '', ts: Date.now() });
+  // 心情/天气/标签：UI 显式传的优先，否则从正文里解析（茜茜写正文即可，不必另调工具）。
+  const meta = parseDiaryMeta(text);
+  const mood = (extra && extra.mood) || meta.mood || '';
+  const weather = (extra && extra.weather) || meta.weather || '';
+  const tags = (extra && extra.tags) || meta.tags || '';
+  const body = meta.body || String(text);
+  page.push({ author: author === 'cc' ? 'cc' : 'user', text: body.slice(0, 20000), images: Array.isArray(images) ? images.slice(0, 20) : [], mood, weather, tags, ts: Date.now() });
   saveDiary();
+  // 解析出心情词 → 给「总日历」当天上色（用户手设的色不被覆盖）。
+  const lv = moodWordLevel(mood);
+  if (lv != null) setDaymood(day, lv, mood, author === 'cc' ? 'cc' : 'user', true);
   return day;
 }
 // drop a deleted session's wake/diary/sticky/model/cost state so an orphan schedule can't keep
@@ -369,8 +454,38 @@ const clients = new Set();
 let pushEnabled = true; // master "receive wake push" switch, set by the client's pref (push_pref)
 function broadcast(obj) { const s = JSON.stringify(obj); for (const ws of clients) { if (ws.readyState === ws.OPEN) try { ws.send(s); } catch (e) {} } }
 function broadcastWake(sid) { broadcast({ type: 'wakeup_state', sessionId: sid, state: pubWake(sid) }); }
-function broadcastDiary(sid) { broadcast({ type: 'diary_changed', sessionId: sid }); }
+function broadcastDiary(sid) { broadcast({ type: 'diary_changed', sessionId: sid }); broadcast({ type: 'calendar_changed' }); }
 function broadcastSticky(sid) { broadcast({ type: 'sticky_changed', sessionId: sid, unread: (stickies[sid] || []).filter((s) => !s.read).length }); }
+function broadcastCalendar() { broadcast({ type: 'calendar_changed' }); }       // 日程/待办/心情色变了 → 各端重拉当前视图
+function broadcastStickyAll() { broadcast({ type: 'stickies_changed' }); }       // 便签栏（聚合全部对话）变了 → 重拉
+// 聚合所有对话的便签（便签栏统一管理用）。每条带上它属于哪个 sid。
+function allStickies() {
+  const out = [];
+  for (const sid of Object.keys(stickies)) for (const n of (stickies[sid] || [])) out.push({ ...n, sid });
+  out.sort((a, b) => b.ts - a.ts);
+  return out;
+}
+// 会话标题（给日历里日记条目标「是谁写的」用），缓存 30s 免得每次点天都全量扫。
+let _calTitleCache = { at: 0, map: {} };
+async function calTitles() {
+  if (Date.now() - _calTitleCache.at < 30000) return _calTitleCache.map;
+  const map = {};
+  try { const ss = await listSessions({ limit: 2000 }); for (const s of ss) map[s.sessionId] = cleanTitle(s.customTitle || s.summary || s.firstPrompt); } catch (e) {}
+  _calTitleCache = { at: Date.now(), map };
+  return map;
+}
+// 某天的全部日记，跨所有对话聚合（每条带 sid + 是谁写的）。'__me' = 用户在总日历里自己写的。
+async function dayDiary(date) {
+  const titles = await calTitles();
+  const out = [];
+  for (const sid of Object.keys(diary)) {
+    const page = diary[sid] && diary[sid][date];
+    if (!page) continue;
+    for (const e of page) out.push({ sid, sidTitle: sid === '__me' ? '我' : (titles[sid] || '(对话)'), author: e.author, text: e.text, images: e.images || [], mood: e.mood || '', weather: e.weather || '', tags: e.tags || '', ts: e.ts, edited: e.edited || 0 });
+  }
+  out.sort((a, b) => a.ts - b.ts);
+  return out;
+}
 
 // ---- session-scoped MCP tools (wake / diary / sticky). Built per-turn with a ref so the tool
 // knows which conversation called it without a racy global (the bridge runs turns concurrently). ----
@@ -437,7 +552,9 @@ function makeSessionMcp(sessionRef) {
           return { content: [{ type: 'text', text: days.length ? `有日记的日期：${days.join('、')}` : '这个对话还没有任何日记。' }] };
         }),
       tool('write_diary',
-        '给这个对话写一篇日记（显示在日记页，作者标记为 cc）。不传 date=今天；写昨天就传昨天的 "YYYY-MM-DD"。同一天可多条，与用户各写各的。',
+        '给这一天写一篇日记（显示在「总日历」里，作者标记为 cc）。不传 date=今天；写昨天就传昨天的 "YYYY-MM-DD"。同一天可多条。'
+        + '想标记当天的心情/天气/标签，**不用另调工具**——直接写进正文最后一行：`心情：词 ｜ 天气：词 ｜ #标签 #标签`（三样都可省略）。'
+        + '系统会把这行收起来、用「心情词」给日历当天上色（绿=平静、红=强烈的柔和渐变）、并归出标签。',
         { text: z.string(), date: z.string().optional() },
         async ({ text, date }) => {
           const sid = sessionRef.id;
@@ -479,6 +596,82 @@ function makeSessionMcp(sessionRef) {
           if (!c || !c.on) return { content: [{ type: 'text', text: '这个对话现在没开电影模式，记不了心情。' }] };
           timelinePush(c, 'mood', String(text || '').slice(0, 160)); saveWakeups(); broadcastCinema(sid);
           return { content: [{ type: 'text', text: '记下了。' }] };
+        }),
+      // ---- 「总日历」：日程/待办，全局共享、和用户同一份。可增删改。----
+      tool('add_event',
+        '在「总日历」上加一个日程（某一天的安排，可带时间点）。date="YYYY-MM-DD"（不传=今天），time 可选 "HH:MM"，title 必填，note 可选。这是和用户共享的全局日历，加了用户在日历上就能看到。',
+        { title: z.string(), date: z.string().optional(), time: z.string().optional(), note: z.string().optional() },
+        async ({ title, date, time, note }) => {
+          const t = String(title || '').trim();
+          if (!t) return { content: [{ type: 'text', text: '日程标题不能为空。' }] };
+          const d = isYMD(date) ? date : todayStr(currentTz || DEFAULT_TZ);
+          const id = randomUUID();
+          events.push({ id, date: d, time: isHM(time) ? time : '', title: t.slice(0, 300), note: String(note || '').slice(0, 2000), by: 'cc', done: false, ts: Date.now() });
+          saveEvents(); broadcastCalendar();
+          return { content: [{ type: 'text', text: `已加日程：${d}${isHM(time) ? ' ' + time : ''} ${t}（id:${id}）` }] };
+        }),
+      tool('add_todo',
+        '在「总日历」加一条待办（任务，可勾选完成，可不带日期）。title 必填，date 可选 "YYYY-MM-DD"（不带就是不限日期的待办）。和用户共享。',
+        { title: z.string(), date: z.string().optional() },
+        async ({ title, date }) => {
+          const t = String(title || '').trim();
+          if (!t) return { content: [{ type: 'text', text: '待办内容不能为空。' }] };
+          const id = randomUUID();
+          todos.push({ id, title: t.slice(0, 300), date: isYMD(date) ? date : '', done: false, by: 'cc', ts: Date.now() });
+          saveTodos(); broadcastCalendar();
+          return { content: [{ type: 'text', text: `已加待办：${t}（id:${id}）` }] };
+        }),
+      tool('list_agenda',
+        '查看「总日历」上的日程和待办。date 传 "YYYY-MM-DD"=只看那天；不传=看全部未完成待办 + 今天起的日程。返回每条带 id（改/删要用）。',
+        { date: z.string().optional() },
+        async ({ date }) => {
+          const fmtE = (e) => `· [日程 ${e.id}] ${e.date}${e.time ? ' ' + e.time : ''} ${e.title}${e.done ? '（已完成）' : ''}${e.note ? ' — ' + e.note : ''}`;
+          const fmtT = (t) => `· [待办 ${t.id}] ${t.date ? t.date + ' ' : ''}${t.title}${t.done ? '（已完成）' : ''}`;
+          if (isYMD(date)) {
+            const evs = events.filter((e) => e.date === date), tds = todos.filter((t) => t.date === date);
+            const lines = [...evs.map(fmtE), ...tds.map(fmtT)];
+            return { content: [{ type: 'text', text: lines.length ? `${date} 的日历：\n` + lines.join('\n') : `${date}：没有日程或待办。` }] };
+          }
+          const today = todayStr(currentTz || DEFAULT_TZ);
+          const evs = events.filter((e) => e.date >= today).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)).slice(0, 30);
+          const tds = todos.filter((t) => !t.done);
+          const lines = [...evs.map(fmtE), ...tds.map(fmtT)];
+          return { content: [{ type: 'text', text: lines.length ? `今天起的日程 + 未完成待办：\n` + lines.join('\n') : '总日历上还没有日程或待办。' }] };
+        }),
+      tool('update_item',
+        '改「总日历」上某条日程或待办（按 id，从 list_agenda 拿）。可改 title/date/time/note，或 done:true/false 标记完成/取消完成。只传要改的字段。',
+        { id: z.string(), title: z.string().optional(), date: z.string().optional(), time: z.string().optional(), note: z.string().optional(), done: z.boolean().optional() },
+        async ({ id, title, date, time, note, done }) => {
+          const ev = events.find((e) => e.id === id);
+          if (ev) {
+            if (title !== undefined) ev.title = String(title).slice(0, 300);
+            if (isYMD(date)) ev.date = date;
+            if (time !== undefined) ev.time = isHM(time) ? time : '';
+            if (note !== undefined) ev.note = String(note).slice(0, 2000);
+            if (done !== undefined) ev.done = !!done;
+            saveEvents(); broadcastCalendar();
+            return { content: [{ type: 'text', text: `已更新日程：${ev.date}${ev.time ? ' ' + ev.time : ''} ${ev.title}${ev.done ? '（已完成）' : ''}` }] };
+          }
+          const td = todos.find((t) => t.id === id);
+          if (td) {
+            if (title !== undefined) td.title = String(title).slice(0, 300);
+            if (date !== undefined) td.date = isYMD(date) ? date : '';
+            if (done !== undefined) td.done = !!done;
+            saveTodos(); broadcastCalendar();
+            return { content: [{ type: 'text', text: `已更新待办：${td.title}${td.done ? '（已完成）' : ''}` }] };
+          }
+          return { content: [{ type: 'text', text: `没找到 id 为 ${id} 的日程或待办。` }] };
+        }),
+      tool('remove_item',
+        '从「总日历」删掉某条日程或待办（按 id，从 list_agenda 拿，不可恢复）。',
+        { id: z.string() },
+        async ({ id }) => {
+          const ne = events.length, nt = todos.length;
+          events = events.filter((e) => e.id !== id);
+          todos = todos.filter((t) => t.id !== id);
+          if (events.length !== ne) { saveEvents(); broadcastCalendar(); return { content: [{ type: 'text', text: '已删掉那条日程。' }] }; }
+          if (todos.length !== nt) { saveTodos(); broadcastCalendar(); return { content: [{ type: 'text', text: '已删掉那条待办。' }] }; }
+          return { content: [{ type: 'text', text: `没找到 id 为 ${id} 的日程或待办。` }] };
         })
     ]
   });
@@ -1933,6 +2126,124 @@ async function handle(ws, conn, msg) {
       favorites = favorites.filter((f) => f.id !== msg.id);
       saveFavorites();
       send(ws, { type: 'favorites', items: favItems() });
+      break;
+    }
+
+    // ---- 「总日历」(全局)：月视图 / 某天详情 / 待办清单 / 日程·待办增删改 / 每日心情色 ----
+    case 'calendar_get': {
+      const month = /^\d{4}-\d{2}$/.test(msg.month || '') ? msg.month : todayStr(currentTz || DEFAULT_TZ).slice(0, 7);
+      const pre = month + '-';
+      const days = {};
+      const touch = (d) => (days[d] || (days[d] = { mood: null, diary: 0, events: 0, todos: 0 }));
+      for (const sid of Object.keys(diary)) for (const d of Object.keys(diary[sid] || {})) if (d.startsWith(pre)) touch(d).diary += diary[sid][d].length;
+      for (const ev of events) if ((ev.date || '').startsWith(pre)) touch(ev.date).events++;
+      for (const td of todos) if ((td.date || '').startsWith(pre)) touch(td.date).todos++;
+      for (const d of Object.keys(daymood)) if (d.startsWith(pre)) touch(d).mood = daymood[d].level;
+      send(ws, { type: 'calendar', month, days });
+      break;
+    }
+    case 'day_get': {
+      const date = msg.date;
+      if (!isYMD(date)) { send(ws, { type: 'day', date, diary: [], events: [], todos: [], mood: null }); break; }
+      const dia = await dayDiary(date);
+      const evs = events.filter((e) => e.date === date).sort((a, b) => (a.time || '~').localeCompare(b.time || '~') || a.ts - b.ts);
+      const tds = todos.filter((t) => t.date === date).sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0) || a.ts - b.ts);
+      send(ws, { type: 'day', date, diary: dia, events: evs, todos: tds, mood: daymood[date] || null });
+      break;
+    }
+    case 'todos_get':
+      send(ws, { type: 'todos', items: todos.slice().sort((a, b) => (a.done ? 1 : 0) - (b.done ? 1 : 0) || (a.date || '9999').localeCompare(b.date || '9999') || a.ts - b.ts) });
+      break;
+    case 'event_add': {
+      const t = String(msg.title || '').trim();
+      if (!t) { send(ws, { type: 'error', message: '日程标题为空' }); break; }
+      events.push({ id: randomUUID(), date: isYMD(msg.date) ? msg.date : todayStr(currentTz || DEFAULT_TZ), time: isHM(msg.time) ? msg.time : '', title: t.slice(0, 300), note: String(msg.note || '').slice(0, 2000), by: 'user', done: false, ts: Date.now() });
+      saveEvents(); broadcastCalendar();
+      break;
+    }
+    case 'event_update': {
+      const ev = events.find((e) => e.id === msg.id);
+      if (ev) {
+        if ('title' in msg) ev.title = String(msg.title || '').slice(0, 300);
+        if (isYMD(msg.date)) ev.date = msg.date;
+        if ('time' in msg) ev.time = isHM(msg.time) ? msg.time : '';
+        if ('note' in msg) ev.note = String(msg.note || '').slice(0, 2000);
+        if ('done' in msg) ev.done = !!msg.done;
+        saveEvents(); broadcastCalendar();
+      }
+      break;
+    }
+    case 'event_delete': {
+      events = events.filter((e) => e.id !== msg.id);
+      saveEvents(); broadcastCalendar();
+      break;
+    }
+    case 'todo_add': {
+      const t = String(msg.title || '').trim();
+      if (!t) { send(ws, { type: 'error', message: '待办内容为空' }); break; }
+      todos.push({ id: randomUUID(), title: t.slice(0, 300), date: isYMD(msg.date) ? msg.date : '', done: false, by: 'user', ts: Date.now() });
+      saveTodos(); broadcastCalendar();
+      break;
+    }
+    case 'todo_update': {
+      const td = todos.find((t) => t.id === msg.id);
+      if (td) {
+        if ('title' in msg) td.title = String(msg.title || '').slice(0, 300);
+        if ('date' in msg) td.date = isYMD(msg.date) ? msg.date : '';
+        if ('done' in msg) td.done = !!msg.done;
+        saveTodos(); broadcastCalendar();
+      }
+      break;
+    }
+    case 'todo_toggle': {
+      const td = todos.find((t) => t.id === msg.id);
+      if (td) { td.done = !td.done; saveTodos(); broadcastCalendar(); }
+      break;
+    }
+    case 'todo_delete': {
+      todos = todos.filter((t) => t.id !== msg.id);
+      saveTodos(); broadcastCalendar();
+      break;
+    }
+    case 'daymood_set': {
+      if (isYMD(msg.date)) { setDaymood(msg.date, msg.level, msg.word || '', 'user', false); broadcastCalendar(); }
+      break;
+    }
+    case 'daymood_clear': {
+      if (isYMD(msg.date) && daymood[msg.date]) { delete daymood[msg.date]; saveDaymood(); broadcastCalendar(); }
+      break;
+    }
+
+    // ---- 便签栏（聚合所有对话的便签，统一管理）：贴/摘/收藏 ----
+    case 'sticky_all':
+      send(ws, { type: 'stickies_all', items: allStickies() });
+      break;
+    case 'sticky_pin': {
+      const arr = msg.sid && stickies[msg.sid]; const n = arr && arr.find((x) => x.id === msg.id);
+      if (n) {
+        n.pinned = true;
+        if (Number.isFinite(msg.x) && Number.isFinite(msg.y)) n.pos = { x: Math.max(0, Math.min(1, msg.x)), y: Math.max(0, Math.min(1, msg.y)) };
+        else if (!n.pos) n.pos = { x: 0.5, y: 0.4 };
+        n.read = true;
+        saveStickies(); broadcastStickyAll(); broadcastSticky(msg.sid);
+      }
+      break;
+    }
+    case 'sticky_unpin': {
+      const arr = msg.sid && stickies[msg.sid]; const n = arr && arr.find((x) => x.id === msg.id);
+      if (n) { n.pinned = false; saveStickies(); broadcastStickyAll(); }
+      break;
+    }
+    case 'sticky_fav': {
+      // 「放进收藏夹」：把这张便签移进全局收藏夹（从便签里取走）。
+      const arr = msg.sid && stickies[msg.sid]; const n = arr && arr.find((x) => x.id === msg.id);
+      if (n) {
+        const titles = await calTitles();
+        favorites.push({ id: randomUUID(), text: String(n.text || '').slice(0, 8000), sessionId: msg.sid === '__me' ? '' : msg.sid, title: (msg.sid === '__me' ? '便签' : (titles[msg.sid] || '便签')).slice(0, 200), ts: Date.now() });
+        if (favorites.length > 500) favorites.splice(0, favorites.length - 500);
+        stickies[msg.sid] = arr.filter((x) => x.id !== msg.id);
+        saveFavorites(); saveStickies(); broadcastStickyAll(); broadcastSticky(msg.sid);
+      }
       break;
     }
 
