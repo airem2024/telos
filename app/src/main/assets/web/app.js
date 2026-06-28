@@ -36,7 +36,15 @@ function P(k) { return state.prefs && state.prefs[k] !== undefined ? state.prefs
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };
 if (window.marked) marked.setOptions({ gfm: true, breaks: true });
-function md(t) { try { return window.marked ? marked.parse(t || '') : esc(t); } catch (e) { return esc(t); } }
+function md(t) {
+  try {
+    let html = window.marked ? marked.parse(t || '') : esc(t);
+    // bundled UI is a file:// page — marked emits relative `/media` img srcs that resolve to
+    // file:///media (404). Prepend the bridge origin so inline images actually load.
+    if (state.origin) html = html.replace(/(<img\b[^>]*\bsrc=["'])\/(?!\/)/gi, '$1' + state.origin + '/');
+    return html;
+  } catch (e) { return esc(t); }
+}
 function esc(s) { return (s || '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
 
 /* ============ inline line icons ============ */
@@ -214,6 +222,11 @@ function initLinkHandler() {
     e.preventDefault();
     openExternal(u.href);
   }, true);
+  // tap an inline (markdown) image in a message/thinking block -> lightbox
+  document.addEventListener('click', (e) => {
+    const im = e.target.closest && e.target.closest('.md img');
+    if (im && im.src) { e.preventDefault(); openLightbox(im.src); }
+  });
 }
 
 /* ============ state ============ */
