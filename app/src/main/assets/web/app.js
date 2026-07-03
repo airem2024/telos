@@ -243,7 +243,8 @@ const state = {
   availModels: [], modelDefault: '', uploading: 0, filesReturn: 'list', searchScope: 'chat',
   selectMode: false, selected: new Set(),
   importItems: [], importSel: new Set(), importPath: '', everAuthed: false,
-  lastRx: 0, pendingHistory: null, pendingSticky: null, liveTimer: null
+  lastRx: 0, pendingHistory: null, pendingSticky: null, liveTimer: null,
+  aName: localStorage.getItem('cc_aname') || 'TA' // 助手显示名：服务器 config 下发，公开仓只有中性默认
 };
 
 /* ============ websocket ============ */
@@ -373,6 +374,7 @@ function handle(m) {
   switch (m.type) {
     case 'auth_ok':
       state.authed = true; state.everAuthed = true; state.defaultCwd = m.defaultCwd || ''; connbar(''); hideDisc();
+      if (m.assistantName) { state.aName = m.assistantName; try { localStorage.setItem('cc_aname', m.assistantName); } catch (e) {} }
       state.lastRx = Date.now(); startLiveness();
       checkUpdate(false); wsend({ type: 'model_list' }); wsend({ type: 'cache_ttl_get' });
       if (state.screen === 'setup') show('list');
@@ -868,14 +870,40 @@ function toolsLeftAction() {
 }
 
 /* ============ open / new / history ============ */
-function moodHue(s) { let h = 0; for (let i = 0; i < (s || '').length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return 'hsl(' + h + ',52%,56%)'; }
+/* 心情→颜色：色相=情绪类别、深浅=强度k(0..1)。词典包含匹配、先具体后泛化；未识别=中性米灰（颜色即含义，选择器chip带字当图例） */
+const MOOD_CATS = [
+  { key: '低落', hue: 215, re: /绝望|痛苦|崩溃/, k: 0.9 },
+  { key: '开心', hue: 48, re: /雀跃|兴奋|狂喜/, k: 0.8 },
+  { key: '平静', hue: 160, re: /平静|安宁|安稳|淡然|平和|宁静|踏实|安心|放松/, k: 0.35 },
+  { key: '开心', hue: 48, re: /开心|快乐|愉快|轻松|明朗|满足|甜|幸福|欢喜|喜/, k: 0.55 },
+  { key: '想念', hue: 330, re: /想念|惦记|温暖|期待|柔软|依恋|温柔|心动/, k: 0.5 },
+  { key: '惆怅', hue: 280, re: /惆怅|怅然|淡淡|微凉|怀念|感伤|怔忡|空落/, k: 0.45 },
+  { key: '低落', hue: 215, re: /低落|难过|失落|沮丧|委屈|孤独|寂寞|疲惫|累|困倦|乏|哭/, k: 0.55 },
+  { key: '不安', hue: 35, re: /不安|忐忑|担心|焦虑|紧张|害怕|慌|忧/, k: 0.6 },
+  { key: '烦躁', hue: 20, re: /烦躁|烦|郁闷|不爽|别扭|闷|急/, k: 0.6 },
+  { key: '生气', hue: 357, re: /生气|愤怒|气炸|暴躁|恼/, k: 0.75 },
+];
+function moodCat(word) { const w = String(word || '').trim(); if (!w) return null; for (const c of MOOD_CATS) if (c.re.test(w)) return c; return null; }
+function moodK01(v) { return Math.max(0, Math.min(1, +v || 0)); }
+// 实色（色点/选择器chip）
+function moodTint(word, k) {
+  const c = moodCat(word); const kk = moodK01(k != null ? k : (c ? c.k : 0.4));
+  if (!c) return 'hsl(45, 8%, ' + Math.round(72 - 14 * kk) + '%)';
+  return 'hsl(' + c.hue + ', ' + Math.round(40 + 30 * kk) + '%, ' + Math.round(76 - 24 * kk) + '%)';
+}
+// 浅印（日记卡/日历格底色）：同色相近白，k 只轻微加深
+function moodWash(word, k) {
+  const c = moodCat(word); const kk = moodK01(k != null ? k : (c ? c.k : 0.4));
+  if (!c) return 'hsl(45, 12%, ' + Math.round(94 - 5 * kk) + '%)';
+  return 'hsl(' + c.hue + ', ' + Math.round(45 + 15 * kk) + '%, ' + Math.round(93 - 10 * kk) + '%)';
+}
 function updateHeader() {
   $('chatTitle').textContent = state.currentSession ? (state.curTitle || 'Claude Code') : '新会话';
   const md = state.mood, hasMood = !!(md && md.on && md.label);
   if (state.currentSession && (P('showModel') || hasMood)) {
     // 有心情就让它独占这行：隐藏模型名腾出全宽 + 允许换行，省得长情绪被省略号截断；没心情才显模型名
     const html = hasMood
-      ? '<span class="mood-dot" style="background:' + moodHue(md.label) + '"></span><span class="mood-lab">' + esc(md.label) + '</span>'
+      ? '<span class="mood-dot" style="background:' + moodTint(md.label) + '"></span><span class="mood-lab">' + esc(md.label) + '</span>'
       : esc(state.sessionModel || 'Claude');
     $('chatSub').innerHTML = html;
     $('chatSub').classList.toggle('mood', hasMood);
@@ -1061,7 +1089,7 @@ function renderInitWindow(m, isFind, tentative) {
   if (!isFind) scrollThread();   // find：不滚到底，交给 tryPendingJump 滚到命中那条
 }
 const PRELOAD_ROUNDS = 60;      // 历史全文每段补这么多「轮」（一来一回）
-const RT_ITEM_CAP = 400;        // 长独白段（茜茜守夜/电影连说很多条）兜底：一段最多这么多条，免一次拉爆
+const RT_ITEM_CAP = 400;        // 长独白段（守夜/电影模式连说很多条）兜底：一段最多这么多条，免一次拉爆
 function roundStartBefore(items, anchor, n) { // 本地模式上滑：往回数 n 轮的起点（用户消息为一轮之首）
   let users = 0; const floor = Math.max(0, anchor - RT_ITEM_CAP);
   for (let i = anchor - 1; i >= floor; i--) { const it = items[i]; if (it && it.kind === 'text' && it.role === 'user') { if (++users >= n) return i; } }
@@ -1563,7 +1591,7 @@ function syncMoodMenu() {
   const dot = $('mMoodDot'); if (!dot) return;
   const on = !!(state.mood && state.mood.on);
   dot.classList.toggle('on', on);
-  dot.style.background = on ? (state.mood.label ? moodHue(state.mood.label) : 'var(--accent)') : '';
+  dot.style.background = on ? (state.mood.label ? moodTint(state.mood.label) : 'var(--accent)') : '';
 }
 // 每对话「情绪」开关：开了她会带着常驻心情回应（标签由模型自己写）。默认关、不动现有对话。
 function toggleMood() {
@@ -1593,7 +1621,6 @@ function curSess() {
 function openMemory() {
   closeMenu();
   if (!state.currentSession) return;
-  $('memSub').textContent = state.curTitle || '';
   state.mem = null; renderMemory();          // 加载态
   openScrim('memScrim');
   wsend({ type: 'memory_get', sessionId: state.currentSession });
@@ -1604,23 +1631,18 @@ function onMemory(m) {
   renderMemory();
 }
 function renderMemory() {
-  const sw = $('memOn'), note = $('memNote'), box = $('memStats'); if (!sw) return;
+  const sw = $('memOn'), sub = $('memSub'), reco = $('memReco'); if (!sw) return;
   const mem = state.mem;
-  const reco = $('memReco');
-  if (!mem) { sw.classList.remove('on'); box.innerHTML = '<div class="memstat"><div class="mslab">读取中…</div></div>'; box.classList.add('off'); if (reco) reco.style.display = 'none'; return; }
+  if (!mem) { sw.classList.remove('on'); sub.textContent = '读取中…'; if (reco) reco.style.display = 'none'; return; }
   if (!mem.available) {
     sw.classList.remove('on'); sw.disabled = true; sw.style.opacity = '.4';
-    note.textContent = '这台服务器还没装长期记忆模块（Mnemosyne），暂时开不了。';
-    box.innerHTML = ''; box.classList.add('off'); if (reco) reco.style.display = 'none'; return;
+    sub.textContent = '服务器没装记忆模块';
+    if (reco) reco.style.display = 'none'; return;
   }
   sw.disabled = false; sw.style.opacity = '';
-  note.textContent = '开启后，这个对话会自动归档进茜茜的长期记忆，压缩后也能用记忆接回状态。关掉只是不再自动归档／恢复，记忆工具本身一直都在。';
   sw.classList.toggle('on', mem.on);
   const s = mem.stats || {}; let mems = 0; if (s.memories) for (const k in s.memories) mems += (s.memories[k].count || 0);
-  const turns = s.dialog_turns || 0;
-  box.innerHTML = '<div class="memstat"><div class="msnum">' + mems + '</div><div class="mslab">精炼记忆</div></div>'
-    + '<div class="memstat"><div class="msnum">' + turns + '</div><div class="mslab">归档对话（轮）</div></div>';
-  box.classList.toggle('off', !mem.on);
+  sub.textContent = mems + ' 条记忆 · ' + (s.dialog_turns || 0) + ' 轮归档';
   if (reco) {
     reco.style.display = '';
     if (document.activeElement !== $('memRecentN')) $('memRecentN').value = (mem.recentN != null ? mem.recentN : 8);
@@ -1664,24 +1686,15 @@ function renderMemMgr() {
   box.innerHTML = '';
   const archView = state.memMgr.filter === 'archived';
   for (const it of items) {
-    const card = el('div', 'memcard');
-    const top = el('div', 'memcard-top');
-    const meta = el('span', 'memcard-meta');
-    meta.textContent = (MEM_TYPE[it.memory_type] || it.memory_type || '?') + ' · 重要度 ' + (it.importance != null ? it.importance : '?')
-      + (it.pinned ? ' · 钉' : '') + (it.resolved === 0 ? ' · 未了结' : '') + (it.domain ? ' · ' + it.domain : '');
-    const del = el('button', 'memcard-del' + (archView ? '' : ' danger')); del.textContent = archView ? '取消归档' : '归档';
-    del.addEventListener('click', (e) => {
-      e.stopPropagation();   // 别触发卡片的编辑
-      buzz(12);
-      wsend({ type: 'memory_archive', id: it.id, archived: !archView });
-      state.memMgr.items = state.memMgr.items.filter((x) => x.id !== it.id);   // 乐观移出当前视图
-      renderMemMgr();
-      toast(archView ? '已取消归档' : '已归档');
-    });
-    top.appendChild(meta); top.appendChild(del); card.appendChild(top);
+    const card = el('div', 'memcard tappable');
     // 正文(content)才是记忆实体；summary 只是标题、且 Ombre 正文已内嵌【标题】，不重复显示
     const text = el('div', 'memcard-text'); text.textContent = it.content || it.summary || '(空)'; card.appendChild(text);
-    if (!archView) { card.classList.add('tappable'); card.addEventListener('click', () => openMemEdit(it)); }
+    const meta = el('div', 'memcard-meta');
+    if (it.pinned) meta.appendChild(el('span', 'mempin'));
+    meta.appendChild(document.createTextNode((MEM_TYPE[it.memory_type] || it.memory_type || '?') + ' · ' + (it.importance != null ? it.importance : '?')
+      + (it.resolved === 0 ? ' · 未了结' : '') + (it.domain ? ' · ' + it.domain : '')));
+    card.appendChild(meta);
+    card.addEventListener('click', () => openMemEdit(it, archView)); // 归档/删除都在编辑页里
     box.appendChild(card);
   }
 }
@@ -1692,11 +1705,12 @@ const ME_ICON = {
   imp: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
   pin: '<path d="M9 4h6l-1 7 3 3v2H7v-2l3-3z"/><line x1="12" y1="16" x2="12" y2="21"/>',
   pending: '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/>',
+  arch: '<polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/>',
   del: '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
 };
-function openMemEdit(it) {
+function openMemEdit(it, archived) {
   state.memEdit = { id: it.id, domain: it.domain || '', type: it.memory_type || 'experience',
-    importance: it.importance != null ? it.importance : 5, pinned: !!it.pinned, resolved: it.resolved !== 0 };
+    importance: it.importance != null ? it.importance : 5, pinned: !!it.pinned, resolved: it.resolved !== 0, archived: !!archived };
   state._memDelArm = null;
   $('memEditText').value = it.content || it.summary || '';
   $('memEditSub').textContent = 'id ' + it.id + (it.domain ? ' · ' + it.domain : '');
@@ -1734,10 +1748,18 @@ function renderMemEditList() {
   valw.appendChild(inp);
   box.appendChild(meRow(ME_ICON.imp, '重要度', valw));
   // 钉选 / 未了结
-  box.appendChild(meRow(ME_ICON.pin, '钉选 · 核心准则不衰减', meSwitch(e.pinned, (v) => { e.pinned = v; })));
-  box.appendChild(meRow(ME_ICON.pending, '未了结 · 压缩后优先浮现', meSwitch(!e.resolved, (v) => { e.resolved = !v; })));
-  // 删除（两步确认）
-  box.appendChild(meRow(ME_ICON.del, state._memDelArm === e.id ? '确认删除？不可恢复' : '删除这条记忆', null, deleteMemEdit, true));
+  box.appendChild(meRow(ME_ICON.pin, '钉选', meSwitch(e.pinned, (v) => { e.pinned = v; })));
+  box.appendChild(meRow(ME_ICON.pending, '未了结', meSwitch(!e.resolved, (v) => { e.resolved = !v; })));
+  // 归档（软删）/ 删除（两步确认）
+  box.appendChild(meRow(ME_ICON.arch, e.archived ? '取消归档' : '归档', null, toggleMemArchive));
+  box.appendChild(meRow(ME_ICON.del, state._memDelArm === e.id ? '确认删除？不可恢复' : '删除', null, deleteMemEdit, true));
+}
+function toggleMemArchive() {
+  const e = state.memEdit; if (!e) return;
+  wsend({ type: 'memory_archive', id: e.id, archived: !e.archived });
+  state.memMgr.items = (state.memMgr.items || []).filter((x) => x.id !== e.id);   // 乐观移出当前视图
+  renderMemMgr();
+  closeMemTypePicker(); show('memMgr'); buzz(12); toast(e.archived ? '已取消归档' : '已归档');
 }
 const ME_TYPES = [['experience', '经历'], ['persona', '自我'], ['emotion', '情感'], ['knowledge', '知识'], ['secret', '秘密']];
 function closeMemTypePicker() { const p = document.querySelector('.mepicker'); if (p) p.remove(); }
@@ -1868,7 +1890,7 @@ function renderCinemaLog(m) {
     let meta = '';
     if (it.trigger === 'self') meta = '你定的时间';        // 她自己定的下次时间到了
     else if (it.trigger === 'mark') meta = '守夜';         // 守夜的坎兜底叫起
-    const dotHtml = (it.kind !== 'mood' && it.mood) ? '<span class="cl-dot" style="background:' + moodHue(it.mood) + '" title="' + esc(it.mood) + '"></span>' : '';
+    const dotHtml = (it.kind !== 'mood' && it.mood) ? '<span class="cl-dot" style="background:' + moodTint(it.mood) + '" title="' + esc(it.mood) + '"></span>' : '';
     html += '<div class="cl-row ' + cls + '"><span class="cl-t">' + hm + '</span>' + dotHtml
       + '<span class="cl-x">' + esc(txt) + '</span>'
       + (meta ? '<span class="cl-meta">' + meta + '</span>' : '') + '</div>';
@@ -1884,7 +1906,7 @@ function cinNoteHTML(c) {
   if (c.paused) return '已暂停：' + esc(c.pauseReason || '') + '。重新打开开关即可继续。';
   if (on) {
     const md = c.mood; let now = '';
-    if (md && md.label) now = '此刻 <span class="mood-dot" style="background:' + moodHue(md.label) + '"></span><span class="mood-lab">' + esc(md.label) + '</span><span class="mood-sep">·</span>';
+    if (md && md.label) now = '此刻 <span class="mood-dot" style="background:' + moodTint(md.label) + '"></span><span class="mood-lab">' + esc(md.label) + '</span><span class="mood-sep">·</span>';
     return '<span class="cin-hint">' + now + '左滑查看时间线</span>';
   }
   if (otherHolder) return '另一个对话正开着（同一时间只能开一个），在这里打开会关掉那个。';
@@ -2184,8 +2206,6 @@ function stickyAck(read) {
 }
 
 /* ============ 总日历（全局：日程/待办/心情色/日记 + 便签栏） ============ */
-// 心情色：单轴 绿(平静·淡)→红(强烈·浓) 柔和渐变（与后端 moodLevelColor 同款）
-function moodColor(level) { const t = Math.max(0, Math.min(1, +level || 0)); return 'rgb(' + Math.round(209 + 45 * t) + ', ' + Math.round(239 - 61 * t) + ', ' + Math.round(227 - 49 * t) + ')'; } // #d1efe3→#feb2b2
 function openCalendar(from) {
   state.calFrom = from || (state.currentSession ? 'chat' : 'list');
   const now = new Date(); state.calY = now.getFullYear(); state.calM = now.getMonth();
@@ -2242,7 +2262,7 @@ function renderCalGridOnly() {
     const ds = Y + '-' + pad2(M + 1) + '-' + pad2(d);
     const info = state.calDays[ds] || {};
     const cell = el('div', 'cal-cell' + (ds === state.selDay ? ' sel' : '') + (ds === today ? ' today' : ''));
-    if (info.mood != null) { cell.style.background = moodColor(info.mood); cell.classList.add('hasmood'); }
+    if (info.mood != null) { const mo = (typeof info.mood === 'object') ? info.mood : { word: '', level: info.mood }; cell.style.background = moodWash(mo.word, mo.k != null ? mo.k : mo.level); cell.classList.add('hasmood'); }
     cell.appendChild(document.createTextNode(String(d)));
     const marks = el('div', 'cal-marks');
     if (info.diary) marks.appendChild(el('span', 'cm cm-d'));
@@ -2287,16 +2307,15 @@ function renderDiaryList() {
   const add = el('button', 'dwritebtn'); add.textContent = '＋ 写日记'; add.onclick = () => writeDiaryFor(ds); list.appendChild(add);
   const items = d.diary || [];
   if (!items.length) { list.appendChild(dpEmpty('这天还没有日记')); return; }
-  items.forEach((en) => list.appendChild(diaryPreview(en, d.mood)));
+  items.forEach((en) => list.appendChild(diaryPreview(en)));
 }
-// 心情取色条：绿(平静)→红(强烈)，点一下定当天心情色
 function agCheck(done, onTap) { const ck = el('button', 'agck' + (done ? ' on' : '')); ck.textContent = done ? '✓' : ''; ck.onclick = (e) => { e.stopPropagation(); onTap(); }; return ck; }
 function eventRow(ev) {
   const r = el('div', 'agrow' + (ev.done ? ' done' : ''));
   r.appendChild(agCheck(ev.done, () => wsend({ type: 'event_update', id: ev.id, done: !ev.done })));
   const mid = el('div', 'agmid');
   const tl = el('div', 'agtitle'); tl.textContent = (ev.time ? ev.time + '  ' : '') + ev.title;
-  if (ev.by === 'cc') { const tag = el('span', 'agby'); tag.textContent = '茜茜'; tl.appendChild(tag); }
+  if (ev.by === 'cc') { const tag = el('span', 'agby'); tag.textContent = state.aName; tl.appendChild(tag); }
   mid.appendChild(tl);
   if (ev.note) { const nt = el('div', 'agnote'); nt.textContent = ev.note; mid.appendChild(nt); }
   let held = false;
@@ -2310,7 +2329,7 @@ function todoRow(td) {
   const mid = el('div', 'agmid');
   const tl = el('div', 'agtitle'); tl.textContent = td.title;
   if (!td.date) { const dt = el('span', 'agdate'); dt.textContent = '不限'; tl.appendChild(dt); }
-  if (td.by === 'cc') { const tag = el('span', 'agby'); tag.textContent = '茜茜'; tl.appendChild(tag); }
+  if (td.by === 'cc') { const tag = el('span', 'agby'); tag.textContent = state.aName; tl.appendChild(tag); }
   mid.appendChild(tl);
   let held = false;
   bindHold(mid, () => { held = true; openPrompt('删除这条待办？输入「删除」确认', '', (v) => { if (v === '删除') wsend({ type: 'todo_delete', id: td.id }); }); });
@@ -2323,11 +2342,11 @@ function editEvent(ev) { openPrompt('改这条日程（开头可写时间，如 
 function addTodo(ds) { openPrompt('写一条待办', '', (v) => { const t = String(v || '').trim(); if (t) wsend({ type: 'todo_add', title: t, date: ds }); }); }
 function editTodo(td) { openPrompt('改这条待办', td.title, (v) => { const t = String(v || '').trim(); if (t) wsend({ type: 'todo_update', id: td.id, title: t }); }); }
 function writeDiaryFor(ds) { state.diarySession = '__me'; state.diaryDay = ds; openDiaryWrite(); }
-function diaryPreview(en, mood) {
+function diaryPreview(en) {
   const card = el('div', 'dprev');
-  if (mood && mood.level != null) card.style.background = moodColor(mood.level);
+  if (en.mood) card.style.background = moodWash(en.mood, en.moodK); // 单条日记自己的心情，不再共用全天一个色
   const meta = el('div', 'dprev-meta');
-  const who = en.author === 'cc' ? (en.sidTitle || '茜茜') : '我';
+  const who = en.author === 'cc' ? (en.sidTitle || state.aName) : '我';
   meta.textContent = fmtClock(en.ts) + ' · ' + who + (en.weather ? ' · ' + en.weather : '') + (en.tags ? ' · #' + en.tags : '');
   card.appendChild(meta);
   const row = el('div', 'dprev-row');
@@ -2346,7 +2365,7 @@ function onStickiesAll(m) { state.stickyAll = m.items || []; if (state.screen ==
 function renderStickyPage() {
   const body = $('stickiesBody'); if (!body) return; body.innerHTML = '';
   const items = state.stickyAll || [];
-  if (!items.length) { body.appendChild(dpEmpty('还没有便签。茜茜留的小纸条会收在这里。')); return; }
+  if (!items.length) { body.appendChild(dpEmpty('还没有便签。')); return; }
   items.forEach((n) => {
     const note = el('div', 'panelnote' + (n.pinned ? ' pinned' : '') + (n.read ? '' : ' unread'));
     const tx = el('div', 'pn-text'); tx.textContent = n.text; note.appendChild(tx);
@@ -2411,7 +2430,8 @@ function openDiaryWrite(entry, opts) {
   state.dwReadonly = !!opts.readonly;
   state.dwEditing = entry || null;
   state.dwImages = (entry && Array.isArray(entry.images)) ? entry.images.slice() : [];
-  state.dwMoodLevel = (state.dayData && state.dayData.mood && state.dayData.mood.level != null) ? state.dayData.mood.level : null;
+  state.dwMood = entry ? (entry.mood || '') : '';                       // 心情是这条日记自己的，从 entry 回填
+  state.dwMoodK = (entry && entry.moodK != null) ? entry.moodK : null;
   state.dwWeather = entry ? (entry.weather || '') : '';
   state.dwTags = entry ? (entry.tags || '') : '';
   $('dwText').value = entry ? (entry.text || '') : '';
@@ -2433,12 +2453,11 @@ function dwSaveClick() {
 }
 function updateDwMoodWeather() {
   const mv = $('dwMoodVal');
-  if (state.dwMoodLevel != null) mv.innerHTML = '<span class="mb-dot" style="background:' + moodColor(state.dwMoodLevel) + '"></span>';
+  if (state.dwMood) mv.innerHTML = '<span class="mb-dot" style="background:' + moodTint(state.dwMood, state.dwMoodK) + '"></span><span class="mb-word">' + esc(state.dwMood) + '</span>';
   else mv.textContent = '';
   $('dwWeatherVal').textContent = state.dwWeather || '';
   $('dwTagsVal').textContent = state.dwTags || '';
 }
-const DW_MOODS = ['😊', '🙂', '😌', '🥰', '😍', '😎', '🤔', '😪', '😔', '😢', '😭', '😡', '🥹', '🤒', '😴'];
 const DW_WEATHERS = ['☀️', '🌤️', '⛅', '☁️', '🌧️', '⛈️', '🌩️', '❄️', '🌫️', '🌈', '🌙', '💨'];
 function closeDwPicker() { const p = document.querySelector('.dwpicker'); if (p) p.remove(); state.dwPickerKind = null; }
 function toggleDwPicker(kind) {
@@ -2447,15 +2466,28 @@ function toggleDwPicker(kind) {
   const p = el('div', 'dwpicker');
   if (kind === 'mood') {
     p.classList.add('moodpick');
-    const row = el('div', 'moodsw-row');
-    [0, 0.2, 0.4, 0.6, 0.8, 1].forEach((v) => {
-      const b = el('button', 'moodsw' + (state.dwMoodLevel != null && Math.abs(state.dwMoodLevel - v) < 0.05 ? ' on' : ''));
-      b.style.background = moodColor(v);
-      b.addEventListener('click', () => { state.dwMoodLevel = v; updateDwMoodWeather(); closeDwPicker(); });
-      row.appendChild(b);
-    });
-    const clr = el('button', 'dwpick-clr'); clr.textContent = '清除心情'; clr.addEventListener('click', () => { state.dwMoodLevel = null; updateDwMoodWeather(); closeDwPicker(); });
-    p.append(row, clr);
+    // 8 类情绪 chip（带字即图例）+ 轻/中/浓 三档深浅；选完不自动关，好接着调深浅
+    const render = () => {
+      p.innerHTML = '';
+      const row = el('div', 'moodsw-row');
+      ['平静', '开心', '想念', '惆怅', '低落', '不安', '烦躁', '生气'].forEach((w) => {
+        const b = el('button', 'moodsw' + (state.dwMood === w ? ' on' : ''));
+        b.style.background = moodTint(w, state.dwMoodK);
+        const lb = el('span', 'moodsw-lb'); lb.textContent = w; b.appendChild(lb);
+        b.addEventListener('click', () => { state.dwMood = w; if (state.dwMoodK == null) state.dwMoodK = 0.6; updateDwMoodWeather(); render(); });
+        row.appendChild(b);
+      });
+      const seg = el('div', 'seg dwseg');
+      [['轻', 0.3], ['中', 0.6], ['浓', 0.85]].forEach(([lb, v]) => {
+        const b = el('button', state.dwMoodK != null && Math.abs(state.dwMoodK - v) < 0.05 ? 'on' : '');
+        b.textContent = lb;
+        b.addEventListener('click', () => { state.dwMoodK = v; updateDwMoodWeather(); render(); });
+        seg.appendChild(b);
+      });
+      const clr = el('button', 'dwpick-clr'); clr.textContent = '清除心情'; clr.addEventListener('click', () => { state.dwMood = ''; state.dwMoodK = null; updateDwMoodWeather(); closeDwPicker(); });
+      p.append(row, seg, clr);
+    };
+    render();
   } else {
     const clr = el('button'); clr.textContent = '✕'; clr.style.fontSize = '15px';
     clr.addEventListener('click', () => { state.dwWeather = ''; updateDwMoodWeather(); closeDwPicker(); });
@@ -2482,10 +2514,10 @@ function dwAddImages(fileList) {
 function saveDiaryEntry() {
   const text = $('dwText').value.trim();
   if (!text && !state.dwImages.length) { toast('写点什么吧'); return; }
-  const base = { sessionId: state.diarySession || '__me', date: state.diaryDay, text: text || '（图片）', images: state.dwImages.slice(), weather: state.dwWeather || '', tags: state.dwTags || '' };
+  const base = { sessionId: state.diarySession || '__me', date: state.diaryDay, text: text || '（图片）', images: state.dwImages.slice(), mood: state.dwMood || '', moodK: state.dwMood ? state.dwMoodK : null, weather: state.dwWeather || '', tags: state.dwTags || '' };
   if (state.dwEditing) wsend({ type: 'diary_edit', ts: state.dwEditing.ts, ...base });
   else wsend({ type: 'diary_write', ...base });
-  if (state.dwMoodLevel != null) wsend({ type: 'daymood_set', date: state.diaryDay, level: state.dwMoodLevel });
+  // daymood_set 不再发：日历天色由后端按「当天最新一条带心情的日记」算
   state.dwEditing = null; closeDwPicker();
   show('diary');
 }
@@ -2853,7 +2885,7 @@ function renderDialogResults(hits, q) {
     for (const t of (h.context || [])) {
       const isHit = t.turn_index === h.hit_index;
       const row = el('div', 'dlg-turn' + (isHit ? ' hit' : ''));
-      const who = el('span', 'dlg-who'); who.textContent = (t.role === 'user' ? '用户' : '茜茜') + (t.kind && t.kind !== 'chat' ? '·' + t.kind : '');
+      const who = el('span', 'dlg-who'); who.textContent = (t.role === 'user' ? '用户' : state.aName) + (t.kind && t.kind !== 'chat' ? '·' + t.kind : '');
       const body = el('span', 'dlg-text'); const txt = (t.content || '').replace(/\s+/g, ' ').trim();
       if (isHit && q) body.appendChild(hlSnippet(txt, q)); else body.textContent = txt.slice(0, 140);
       row.appendChild(who); row.appendChild(body); card.appendChild(row);

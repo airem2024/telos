@@ -300,21 +300,17 @@
     </div>
   </div>
 
-  <!-- 长期记忆（Mnemosyne）：本对话开关 + 统计 -->
+  <!-- 长期记忆（Mnemosyne）：本对话开关 + 恢复设置 -->
   <div class="scrim" id="memScrim">
     <div class="sheet">
       <div class="sheethdr nodrag"><div class="ptitle">记忆</div><div class="psub" id="memSub"></div></div>
       <div class="sheetbody">
-        <div class="wkrow"><span>本对话纳入长期记忆</span><button class="switch" id="memOn"><span class="knob"></span></button></div>
-        <div class="memnote" id="memNote">开启后，这个对话会自动归档进茜茜的长期记忆，压缩后也能用记忆接回状态。关掉只是不再自动归档／恢复，记忆工具本身一直都在。</div>
-        <div class="memstats" id="memStats"></div>
+        <div class="wkrow"><span>纳入长期记忆</span><button class="switch" id="memOn"><span class="knob"></span></button></div>
         <div class="memreco" id="memReco">
-          <div class="memreco-hd">恢复设置</div>
           <div class="memreco-row"><span>恢复时回看轮数</span><input class="numin" id="memRecentN" inputmode="numeric" enterkeyhint="done"></div>
           <div class="memreco-row"><span>恢复块上限 token</span><input class="numin" id="memMaxTok" inputmode="numeric" enterkeyhint="done"></div>
           <button class="memact" id="memRecoverBtn">立即恢复一次</button>
-          <div class="memreco-hint">按一下，下次发消息时把核心准则·浮现记忆·最近几轮唤回（=保底）。</div>
-          <button class="memact ghost" id="memMgrOpen">管理精炼记忆</button>
+          <button class="memact ghost" id="memMgrOpen">记忆库</button>
         </div>
       </div>
     </div>
@@ -584,7 +580,7 @@
     <div class="pad" id="cinemaLogBody" style="padding-top:6px;padding-bottom:calc(var(--safe-bottom) + 40px);overflow-y:auto;"></div>
   </div>
 
-  <!-- 记忆管理 (记忆面板里进入；翻看 / 删除茜茜的精炼记忆，单独一页) -->
+  <!-- 记忆库 (记忆面板里进入；翻看 / 编辑 / 归档精炼记忆，单独一页) -->
   <div id="memMgr" class="screen">
     <div class="topbar">
       <button class="iconbtn" id="memMgrBack">‹</button>
