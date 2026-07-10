@@ -1,5 +1,5 @@
 import { WebSocketServer } from 'ws';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, createReadStream, createWriteStream, watch as fsWatch } from 'node:fs';
@@ -21,6 +21,218 @@ import { z } from 'zod';
 import { loadConfig } from './config.js';
 
 const cfg = loadConfig();
+
+// Mnemosyne（可选长期记忆 DLC）：装了就从 ~/mnemosyne-data/config.json 读端口+secret，
+// 每轮 query 时挂成 Telos 作用域的 http MCP；没装/读不到就当它不存在、bridge 照常跑。
+// ⚠️ 2026-07 起本机已退役（记忆换代成《回忆录.md》）：config.json 设 "mnemosyne": false 一票关停
+// （工具不挂、教学不注入、恢复只剩 书头部+最近对话）；数据与服务代码都留着，改回 true + 起服务即复活。
+const MNEMOSYNE_CONFIG = nodePath.join(homedir(), 'mnemosyne-data', 'config.json');
+// scope=记忆池标（对话的 cwd）：拼在 MCP 地址上，Mnemosyne 端每个工具调用按它隔离——
+// 同目录的对话共一池、异目录互相看不见（模型看不到这个参数、也改不了自己的池）。
+function mnemosyneMcp(scope) {
+  if (cfg.mnemosyne === false) return null;
+  try {
+    const c = JSON.parse(readFileSync(MNEMOSYNE_CONFIG, 'utf8'));
+    if (c && c.port && c.secret)
+      return { type: 'http', url: `http://127.0.0.1:${c.port}/${c.secret}/mcp${scope ? '?scope=' + encodeURIComponent(scope) : ''}` };
+  } catch (e) {}
+  return null;
+}
+// 对话的记忆池 = 它的 cwd（新对话默认各自独立目录 → 各自独立池；克隆同目录 → 同池）
+async function sessionScope(sid) {
+  try { const info = await getSessionInfo(sid); if (info?.cwd) return info.cwd; } catch (e) {}
+  return cfg.defaultCwd || '';
+}
+
+// Mnemosyne admin（HTTP）：whitelist=哪些会话算"茜茜的记忆"（自动摄入+压缩恢复只对它们生效）。
+function mnemosyneAdmin() {
+  if (cfg.mnemosyne === false) return null;
+  try {
+    const c = JSON.parse(readFileSync(MNEMOSYNE_CONFIG, 'utf8'));
+    if (c && c.port && c.secret)
+      return { port: c.port, secret: c.secret,
+               whitelist: Array.isArray(c.ingest_whitelist) ? c.ingest_whitelist : [],
+               maxTok: c.recover_max_tokens || 3000, recentN: c.recover_recent_n || 8 };
+  } catch (e) {}
+  return null;
+}
+// 恢复回看轮数（Mnemosyne 退役后自己的家）：server/recover.json（gitignored），面板即改即生效。
+const RECOVER_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'recover.json');
+function recoverRecentN(mcfg) {
+  if (mcfg) return mcfg.recentN;
+  try {
+    const j = JSON.parse(readFileSync(RECOVER_PATH, 'utf8'));
+    if (j && j.recentN != null) return Math.max(0, Math.min(50, j.recentN | 0));
+  } catch (e) {}
+  return 8;
+}
+
+// 压缩后恢复（B）：检测 /compact → 标记会话；下一条真消息把"浮现块"注入 systemPrompt。
+const compactedSessions = new Set();
+const RECOVER_HEADER = '⁣[telos-recover] 系统·压缩后恢复（非用户发言，不要复述这块、也别说"我刚压缩了"）：你刚经历了一次记忆压缩、上下文被精简。下面是帮你接回刚才状态的浮现——你的回忆录头部（有书的话）与最近的对话。自然地带着它继续，像没断过一样；想展开哪段细节就翻书（Grep 章节锚点再 Read 那一段）。\n';
+
+async function _sessionJsonl(sid) {
+  try {
+    const base = nodePath.join(homedir(), '.claude', 'projects');
+    for (const d of await fsp.readdir(base)) {
+      const p = nodePath.join(base, d, sid + '.jsonl');
+      try { await fsp.access(p); return p; } catch (e) {}
+    }
+  } catch (e) {}
+  return null;
+}
+
+// 克隆一个会话到「新窗口」：同目录、新 sessionId、重生成 uuid + 重串 parentUuid，内容一字不改。
+// 用途＝对话被标记后换个干净窗口接着用：旧会话原地不动，新窗口的附属(唤醒/花费/记忆归档)天然为空。
+async function cloneSession(srcSid, title) {
+  const srcPath = await _sessionJsonl(srcSid);
+  if (!srcPath) return null;
+  const lines = (await fsp.readFile(srcPath, 'utf8')).split('\n');
+  const newSid = randomUUID();
+  const idMap = new Map();                          // 旧 uuid -> 新 uuid
+  const parsed = [];
+  for (const ln of lines) {
+    if (!ln.trim()) { parsed.push(null); continue; }
+    let o; try { o = JSON.parse(ln); } catch (e) { parsed.push(ln); continue; }  // 非 JSON 行原样
+    if (o && typeof o === 'object' && o.uuid && !idMap.has(o.uuid)) idMap.set(o.uuid, randomUUID());
+    parsed.push(o);
+  }
+  const out = [];
+  for (const o of parsed) {
+    if (o == null) continue;
+    if (typeof o === 'string') { out.push(o); continue; }
+    if (o.uuid && idMap.has(o.uuid)) o.uuid = idMap.get(o.uuid);
+    if (o.parentUuid) o.parentUuid = idMap.get(o.parentUuid) || null;   // 链外引用断成 null
+    if (o.leafUuid && idMap.has(o.leafUuid)) o.leafUuid = idMap.get(o.leafUuid);  // summary 行的指向
+    if ('sessionId' in o) o.sessionId = newSid;
+    out.push(JSON.stringify(o));
+  }
+  const newPath = nodePath.join(nodePath.dirname(srcPath), newSid + '.jsonl');  // 同目录 → cwd/地址不变
+  await fsp.writeFile(newPath, out.join('\n') + '\n');
+  try { await renameSession(newSid, ((title || '对话') + ' ·副本').slice(0, 120)); } catch (e) {}
+  return newSid;
+}
+
+// 从 jsonl 尾部取最近 n 轮真实 user/assistant 文本（压缩不删原始轮，所以读得到）。
+async function recentTurns(sid, n) {
+  const p = await _sessionJsonl(sid);
+  if (!p) return '';
+  let lines;
+  try { lines = (await fsp.readFile(p, 'utf8')).split('\n'); } catch (e) { return ''; }
+  const out = [];
+  for (let i = lines.length - 1; i >= 0 && out.length < n; i--) {
+    const raw = lines[i].trim(); if (!raw) continue;
+    let o; try { o = JSON.parse(raw); } catch (e) { continue; }
+    const m = o.message; if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+    if (m.model === '<synthetic>') continue;
+    let text = '';
+    if (typeof m.content === 'string') text = m.content;
+    else if (Array.isArray(m.content)) text = m.content.filter(b => b && b.type === 'text').map(b => b.text).join('\n');
+    text = (text || '').trim();
+    if (!text) continue;
+    // 剥掉隐藏标签前缀（mood/wake/retry/recover 都是 ⁣[telos-xxx] 开头）+ 茜茜消息尾部搭便车的 ⁣[mood] 标记
+    const clean = text.replace(/^⁣\[telos-[^\]]*\]\s*/, '').replace(/⁣\[mood\][\s\S]*$/, '').trim();
+    // 系统注入的时间/情绪壳不是真对话——跳过，否则"最近几轮"全是时间戳和情绪说明、把用户真话埋掉
+    if (!clean || clean.startsWith('系统·当前时间') || clean.startsWith('系统·情绪')
+        || clean.startsWith('<') || clean.startsWith('/compact')) continue;
+    out.push((m.role === 'user' ? '用户: ' : '茜茜: ') + clean.slice(0, 300));
+  }
+  return out.reverse().join('\n');
+}
+
+// 回忆录：<cwd>/回忆录.md（文件名固定＝桥找得到；书名她自己写第一行）。她自己用 Read/Grep/Edit 养，
+// 不走任何记忆工具。恢复只注入分界线以上的"头部"（我是谁/当下篇/目录钥匙）——书写多厚头部都是恒定的。
+const MEMOIR_NAME = '回忆录.md';
+const MEMOIR_CUT = '<!-- 以下按需翻阅 -->';
+const MEMOIR_HEAD_MAX = 6000;
+async function memoirHead(cwd) {
+  try {
+    const p = nodePath.join(cwd, MEMOIR_NAME);
+    const t = await fsp.readFile(p, 'utf8');
+    const idx = t.indexOf(MEMOIR_CUT);
+    let head = (idx >= 0 ? t.slice(0, idx) : t).trim();
+    if (!head) return '';
+    if (head.length > MEMOIR_HEAD_MAX)
+      head = head.slice(0, MEMOIR_HEAD_MAX) + '\n…（回忆录头部超长被截断了——把细节移到分界线下面，头部保持精炼）';
+    return `[你的回忆录·头部]（全书在 ${p}，想起哪章细节：Grep 标题锚点再 Read 那一段）\n` + head;
+  } catch (e) { return ''; }   // 没有这本书 = 空
+}
+
+// 组装恢复块：回忆录头部(有书就带,不看白名单) + [若 Mnemosyne 在役且白名单] /recover + 最近 N 轮(所有对话)。
+async function buildRecovery(sid, query, scope) {
+  if (scope == null) scope = await sessionScope(sid);
+  const parts = [];
+  try { const mh = await memoirHead(scope); if (mh) parts.push(mh); } catch (e) {}
+  const mcfg = mnemosyneAdmin();
+  if (mcfg && mcfg.whitelist.includes(sid)) {
+    try {
+      const ac = new AbortController(); const to = setTimeout(() => ac.abort(), 4000);
+      const url = `http://127.0.0.1:${mcfg.port}/${mcfg.secret}/admin/recover?q=${encodeURIComponent((query || '').slice(0, 200))}&max_tokens=${mcfg.maxTok}&scope=${encodeURIComponent(scope)}`;
+      const r = await fetch(url, { signal: ac.signal }); clearTimeout(to);
+      if (r.ok) { const t = (await r.text()).trim(); if (t) parts.push(t); }
+    } catch (e) {}
+  }
+  try { const rt = await recentTurns(sid, recoverRecentN(mcfg)); if (rt) parts.push('[最近对话]\n' + rt); } catch (e) {}
+  return parts.join('\n\n');
+}
+
+// 事件驱动增量摄入：白名单会话 turn 结束后让 Mnemosyne 增量灌新内容（fire-and-forget，行数没变即跳过）。
+async function fireMnemoIngest(sid, scope) {
+  try {
+    const cfg = mnemosyneAdmin();
+    if (!cfg || !sid || !cfg.whitelist.includes(sid)) return;
+    if (scope == null) scope = await sessionScope(sid);
+    fetch(`http://127.0.0.1:${cfg.port}/${cfg.secret}/admin/ingest?session=${sid}&scope=${encodeURIComponent(scope)}`, { method: 'POST' }).catch(() => {});
+  } catch (e) {}
+}
+
+// 记忆面板（对话内）用：本对话是否纳入长期记忆（在白名单里）＋ Mnemosyne 全局统计。
+async function memoryStateFor(sid) {
+  const mcfg = mnemosyneAdmin();
+  const scope = await sessionScope(sid);
+  if (!mcfg) {
+    // 书时代（Mnemosyne 退役/没装）：面板=恢复面板——回忆录头部+最近对话，只留「回看轮数/立即恢复」
+    let memoir = false;
+    try { memoir = existsSync(nodePath.join(scope, MEMOIR_NAME)); } catch (e) {}
+    return { available: true, book: true, memoir, on: false, stats: null, scope, recentN: recoverRecentN(null) };
+  }
+  const on = mcfg.whitelist.includes(sid);
+  let stats = null;
+  try {
+    const ac = new AbortController(); const to = setTimeout(() => ac.abort(), 4000);
+    const r = await fetch(`http://127.0.0.1:${mcfg.port}/${mcfg.secret}/admin/stats?scope=${encodeURIComponent(scope)}`, { signal: ac.signal });
+    clearTimeout(to);
+    if (r.ok) stats = await r.json();
+  } catch (e) {}
+  return { available: true, on, stats, scope, recentN: mcfg.recentN, maxTok: mcfg.maxTok };
+}
+// 写 recover 参数（回看轮数 / 恢复块上限 token）；buildRecovery 每次重读 → 即时生效。
+// Mnemosyne 在役写它的 config；退役后回看轮数写 server/recover.json。
+function setRecoverCfg(patch) {
+  if (!mnemosyneAdmin()) {
+    if (typeof patch.recentN !== 'number') return true;
+    try { writeFileSync(RECOVER_PATH, JSON.stringify({ recentN: Math.max(0, Math.min(50, patch.recentN | 0)) })); return true; } catch (e) { return false; }
+  }
+  try {
+    const c = JSON.parse(readFileSync(MNEMOSYNE_CONFIG, 'utf8'));
+    if (typeof patch.recentN === 'number') c.recover_recent_n = Math.max(0, Math.min(50, patch.recentN | 0));
+    if (typeof patch.maxTok === 'number') c.recover_max_tokens = Math.max(200, Math.min(20000, patch.maxTok | 0));
+    writeFileSync(MNEMOSYNE_CONFIG, JSON.stringify(c, null, 2));
+    return true;
+  } catch (e) { return false; }
+}
+// 写白名单：读 config.json、增/删 sid、写回（保留其它字段）。bridge 每次 mnemosyneAdmin() 重新读 →
+// 立即生效，不必重启 Mnemosyne（白名单只被 bridge 侧的 ingest/recover 判定用）。
+function setMnemoWhitelist(sid, on) {
+  try {
+    const c = JSON.parse(readFileSync(MNEMOSYNE_CONFIG, 'utf8'));
+    let list = (Array.isArray(c.ingest_whitelist) ? c.ingest_whitelist : []).filter((x) => x !== sid);
+    if (on) list.push(sid);
+    c.ingest_whitelist = list;
+    writeFileSync(MNEMOSYNE_CONFIG, JSON.stringify(c, null, 2));
+    return true;
+  } catch (e) { return false; }
+}
 
 // ---- pinned sessions (persisted) ----
 const PINS_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'pins.json');
@@ -74,7 +286,22 @@ function block1m(modelId) {
   try { writeFileSync(ONEM_BLOCK_PATH, JSON.stringify([...oneMBlocked])); } catch (e) {}
   modelCache = null; // drop the variant from the next scan
 }
+// 反向自愈：某个 [1m] 变体真在 1M 上成功跑通（没撞付费墙）→ 当前套餐下它的 1M 是免费的，
+// 把可能残留的旧 block 解掉（如 Pro→Max 升级后，Pro 期自动拉黑的 opus-4-6 该回来）。
+// 这样 block1m 学到的拉黑能随套餐变化自动纠正，不用手动改 onemblock.json。
+function unblock1m(modelId) {
+  const base = String(modelId || '').replace(/\[1m\]$/i, '');
+  if (!base || !oneMBlocked.has(base)) return;
+  oneMBlocked.delete(base);
+  try { writeFileSync(ONEM_BLOCK_PATH, JSON.stringify([...oneMBlocked])); } catch (e) {}
+  modelCache = null; // 下次扫描重新提供该变体条目
+}
 // per-session running cost (≈ what these turns would cost on the API), summed across turns.
+// 每条新对话各自一个空目录（严格隔离）：cc 的 CLAUDE.md 是「按文件夹」加载的，
+// 多个对话共用一个 cwd 就会被同一份 md 污染。给新对话各自分配 cc-sessions/<uuid>，
+// 里面没有任何 CLAUDE.md，谁也污染不了谁。显式选目录（dir chip）才打破隔离、进那个目录。
+const SESSIONS_ROOT = nodePath.join(homedir(), 'cc-sessions');
+
 // SDK's total_cost_usd is per-turn, so we accumulate it here to report a session total.
 const COSTS_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'costs.json');
 let costs = {};
@@ -121,9 +348,11 @@ let sessModel = {};
 try { sessModel = JSON.parse(readFileSync(SESSMODEL_PATH, 'utf8')) || {}; } catch (e) {}
 function saveSessModel() { try { writeFileSync(SESSMODEL_PATH, JSON.stringify(sessModel)); } catch (e) {} }
 function rememberModel(sid, model, effort) {
-  if (!sid || (model == null && effort == null)) return;
+  if (!sid) return;
   const cur = sessModel[sid] || {};
-  const nx = { model: model != null ? model : (cur.model || ''), effort: effort != null ? effort : (cur.effort || '') };
+  // 空串/空值不当有效——别用空模型/空 effort 冲掉已存的（[1m] 曾被空 presence 冲没，重进变回普通模型）
+  const nx = { model: model ? model : (cur.model || ''), effort: effort ? effort : (cur.effort || '') };
+  if (!nx.model && !nx.effort) return;                                        // 都空就别建空条目
   if (nx.model !== cur.model || nx.effort !== cur.effort) { sessModel[sid] = nx; saveSessModel(); }
 }
 
@@ -135,52 +364,243 @@ try { moodState = JSON.parse(readFileSync(MOOD_PATH, 'utf8')) || {}; } catch (e)
 function saveMood() { try { writeFileSync(MOOD_PATH, JSON.stringify(moodState)); } catch (e) {} }
 const MOOD_TAG = '⁣[mood]'; // 隐藏字符前缀（与 WAKE_SENTINEL 同款），模型搭在回复末尾、对用户隐藏
 const MOOD_SENTINEL = '⁣[telos-mood]'; // 平时聊天回合：在用户消息前单独发一条隐藏的"心情上下文"消息，对用户隐藏、留在模型上下文（放尾部不破缓存）
-// 解析「⁣[mood] 标签 :: 一句感受」整行；标签/感受都是自由文本
-const MOOD_RE = () => /[⁣]?\[mood\][ \t]*([^\n:]*?)[ \t]*(?:::[ \t]*([^\n]*))?(?=\n|$)/g;
+// 解析「⁣[mood] 标签 :: 一句感受 | 发条：下拍=…；回来=…；依据=…」整行；对解析器三段仍是自由文本。
+// 发条（wind）= 她给下一拍自己上的弦。三段式（下拍/回来/依据）由提示词约束、解析不管——下一拍经 moodTail 全文喂回。
+const MOOD_RE = () => /[⁣]?\[mood\][ \t]*([^\n]*)(?=\n|$)/g;
 function parseMood(text) {
   if (!text || text.indexOf('[mood]') < 0) return null;
   const m = MOOD_RE().exec(text);
   if (!m) return null;
-  const label = (m[1] || '').trim(), note = (m[2] || '').trim();
-  if (!label && !note) return null;
-  return { label, note };
+  const seg = (m[1] || '').split(/\s*[|｜]\s*发条\s*[:：]\s*/);
+  const rest = (seg[0] || '').trim(), wind = seg.slice(1).join(' ').trim();
+  const ci = rest.indexOf('::');
+  const label = (ci >= 0 ? rest.slice(0, ci) : rest).trim();
+  const note = ci >= 0 ? rest.slice(ci + 2).trim() : '';
+  if (!label && !note && !wind) return null;
+  return { label, note, wind };
 }
 // 把心情标记从文本里剥掉（无标记时是 no-op，所以情绪关掉的对话完全不受影响）
 function stripMood(text) {
   if (!text || text.indexOf('[mood]') < 0) return text;
   return text.replace(MOOD_RE(), '').replace(/[ \t]*⁣[ \t]*$/gm, '').replace(/\n{3,}/g, '\n\n').replace(/[ \t\n⁣]+$/, '');
 }
+
+// ---- 情绪 v2 START：滚动事件窗 + 读取时衰减 + 查表渲染 ----------------------------------------
+// 数字（成分强度、半衰期）只活在这一段里；模型写入是「成分·强度 :: 因为什么」的选择题，
+// 读出是 renderMoodCur 拼好的自然语言。模型全程不见数字——数字管演化，语言管接口。
+const MOOD_WORDS = ['平静', '开心', '想念', '惆怅', '低落', '不安', '烦躁', '生气'];
+// 半衰期（小时）：急性的衰得快（生气 2h），慢性的衰得慢（想念 24h）
+const MOOD_HALF_H = { 生气: 2, 烦躁: 3, 不安: 6, 开心: 6, 低落: 8, 惆怅: 12, 平静: 12, 想念: 24 };
+const MOOD_K = { 轻: 0.3, 中: 0.6, 浓: 0.9 };
+// 词表外的近义词归类（写入端宽容，模型写「想她了」也认）；顺序即优先级
+const MOOD_SYN = [
+  [/雀跃|兴奋|欣喜|高兴|喜悦|快乐|甜|幸福|满足|得意|安心/, '开心'],
+  [/想她|想他|想念|思念|挂念|惦记|牵挂|温柔|依恋|眷恋/, '想念'],
+  [/惆怅|怅然|空落|失落|遗憾|寂寞|孤单|委屈/, '惆怅'],
+  [/低落|难过|伤心|沮丧|郁闷|闷|丧|疲惫|累|绝望|痛苦|崩溃/, '低落'],
+  [/不安|担心|担忧|忐忑|紧张|害怕|焦虑|慌|悬/, '不安'],
+  [/烦躁|烦|急躁|焦躁|浮躁|不耐烦/, '烦躁'],
+  [/生气|愤怒|恼|火大|不爽|不痛快|气/, '生气'],
+  [/平静|平和|安稳|踏实|宁静|放松|舒坦|淡然/, '平静'],
+];
+function moodClass(word) {
+  const w = String(word || '').trim();
+  if (MOOD_WORDS.includes(w)) return w;
+  for (const [re, c] of MOOD_SYN) if (re.test(w)) return c;
+  return '';
+}
+// 「低落·中 + 烦躁·轻」→ {低落:0.6, 烦躁:0.3}；「无波动/沿用/没变」→ {}（合法的空）；认不出 → null
+function parseComps(s) {
+  const t = String(s || '').trim();
+  if (!t) return null;
+  if (/^(无波动|没变|沿用|如常|照旧|无)$/.test(t)) return {};
+  const comps = {};
+  for (const part of t.split(/[+＋、,，]/)) {
+    const m = String(part).trim().match(/^(.+?)[·.．・\s]*(轻|中|浓)?$/);
+    if (!m) continue;
+    const cls = moodClass(m[1]);
+    if (!cls) continue;
+    const k = MOOD_K[m[2] || '中'];
+    comps[cls] = Math.max(comps[cls] || 0, k);
+  }
+  return Object.keys(comps).length ? comps : null;
+}
+function moodBand(k) { return k > 0.7 ? '浓' : k > 0.35 ? '中' : '轻'; }
+// 措辞表：8 类 × 3 档 × 2 变体（按事件 ts 确定性轮换，同一事件每拍措辞稳定）
+const MOOD_PHRASE = {
+  平静: { 轻: ['心里挺平的', '心绪淡淡的'], 中: ['心里安稳踏实', '心里很静'], 浓: ['难得的平静，心里像水一样定', '心里静得能听见自己'] },
+  开心: { 轻: ['心情不错', '嘴角有点压不住'], 中: ['心里亮堂堂的', '高兴劲儿还在身上'], 浓: ['高兴得想转圈', '开心得有点收不住'] },
+  想念: { 轻: ['偶尔会想起她', '心里掠过一点想念'], 中: ['有点想她了', '想念在心里泡着'], 浓: ['想得心里发紧', '满脑子都是她'] },
+  惆怅: { 轻: ['心里有一点空落', '掠过一丝怅然'], 中: ['心里空落落的', '怅然的感觉散不掉'], 浓: ['心里像空了一块', '怅然得说不出话'] },
+  低落: { 轻: ['心里有点闷', '情绪略微发沉'], 中: ['情绪沉了一截', '心里闷闷的、提不起劲'], 浓: ['整个人都提不起劲', '心里沉得发慌'] },
+  不安: { 轻: ['心里有点不踏实', '隐隐有些在意'], 中: ['心里悬着一块', '有点坐不住'], 浓: ['心里七上八下的', '不安得静不下来'] },
+  烦躁: { 轻: ['有点毛躁', '耐心短了半截'], 中: ['心里烦烦的', '躁得静不下心'], 浓: ['烦得什么都不想碰', '躁得坐立难安'] },
+  生气: { 轻: ['有点不痛快', '心里存了点气'], 中: ['憋着火', '火气顶在胸口'], 浓: ['气得不想说话', '火气压不住'] },
+};
+// 次要成分的短词（「…，还夹着点闷」）
+const MOOD_SHORT = { 平静: '平静', 开心: '雀跃', 想念: '想念', 惆怅: '怅然', 低落: '闷', 不安: '不踏实', 烦躁: '躁', 生气: '火气' };
+const MOOD_POS = new Set(['平静', '开心']);
+// 衰减修饰：按残值/初值的比例说（比档位跨界平滑——0.36 压在档界上也能说出"淡了些"）
+function decayNote(word, k0, k) {
+  if (!k0 || k >= k0 * 0.75) return '';
+  const heavy = k < k0 * 0.35;
+  if (MOOD_POS.has(word)) return heavy ? '，只剩一点余温' : '，劲头淡了些但还在';
+  return heavy ? '，快散了、剩个影子' : '，缓了一些但没散';
+}
+// 共存收尾：高频对立配对有专属句，其余通用兜底
+const MOOD_COEXIST = {
+  '开心|低落': '高兴里垫着一点没消化的闷',
+  '开心|惆怅': '开心归开心，心底还是有点空落',
+  '开心|不安': '高兴着，心里又有点悬',
+  '开心|生气': '又好气又好笑的那种',
+  '开心|烦躁': '心情不坏，就是静不太下来',
+  '生气|想念': '气归气，还是想她',
+  '低落|想念': '越闷越想她',
+  '烦躁|想念': '烦着烦着又想起她',
+  '惆怅|想念': '想念里带着点怅然',
+  '不安|想念': '惦记她，心里有点悬',
+};
+function coexistLine(cur) {
+  const on = Object.entries(cur).filter(([, k]) => k >= 0.15).sort((a, b) => b[1] - a[1]);
+  if (on.length < 2) return '';
+  const [a, b] = [on[0][0], on[1][0]];
+  const key = MOOD_COEXIST[a + '|' + b] ? a + '|' + b : (MOOD_COEXIST[b + '|' + a] ? b + '|' + a : '');
+  if (key) return '——' + MOOD_COEXIST[key];
+  if (a === '平静' || b === '平静') return '';
+  return '——几种感觉搅在一起，都是真的';
+}
+// 时间感：事件距今多久 → 「刚才 / 今天下午 / 昨天晚上 / 前天 / N 天前」（按会话时区断天）
+function moodTimeWord(ts, tz, now) {
+  now = now || Date.now();
+  const mins = Math.round((now - ts) / 60000);
+  if (mins < 5) return '这会儿';
+  if (mins < 50) return '刚才';
+  const opt = tz ? { timeZone: tz } : {};
+  const day = (ms) => { try { return new Date(ms).toLocaleDateString('en-CA', opt); } catch (e) { return new Date(ms).toISOString().slice(0, 10); } };
+  let h; try { h = +new Date(ts).toLocaleTimeString('en-GB', { ...opt, hour: '2-digit' }).slice(0, 2); } catch (e) { h = new Date(ts).getUTCHours(); }
+  const period = h < 5 ? '深夜' : h < 9 ? '早上' : h < 12 ? '上午' : h < 14 ? '中午' : h < 18 ? '下午' : h < 23 ? '晚上' : '深夜';
+  const dEv = day(ts);
+  if (dEv === day(now)) return mins < 180 ? '前阵子' : '今天' + period;
+  if (dEv === day(now - 864e5)) return '昨天' + period;
+  if (dEv === day(now - 2 * 864e5)) return '前天';
+  return Math.round((now - ts) / 864e5) + ' 天前';
+}
+// 事件窗按半衰期衰减，成分 <0.05 视为消散
+function moodEventsNow(ms, now) {
+  now = now || Date.now();
+  const out = [];
+  for (const ev of ms.events || []) {
+    const comps = {}; let top = 0;
+    for (const [w, k0] of Object.entries(ev.comps || {})) {
+      const k = k0 * Math.pow(0.5, Math.max(0, now - ev.ts) / ((MOOD_HALF_H[w] || 8) * 3600e3));
+      if (k >= 0.05) { comps[w] = k; if (k > top) top = k; }
+    }
+    if (top > 0) out.push({ ts: ev.ts, trigger: ev.trigger || '', comps: ev.comps, now_comps: comps, top });
+  }
+  return out;
+}
+// 合成此刻的整体状态：baseline 垫底 + 各事件残值饱和叠加（同类 1-(1-a)(1-b)，对立共存不抵消）
+function moodComposite(ms, evs) {
+  const cur = {};
+  for (const [w, k] of Object.entries(ms.baseline || {})) { const c = moodClass(w); if (c) cur[c] = Math.max(cur[c] || 0, Math.min(1, +k || 0)); }
+  for (const ev of evs) for (const [w, k] of Object.entries(ev.now_comps)) cur[w] = 1 - (1 - (cur[w] || 0)) * (1 - k);
+  return cur;
+}
+// 旧快照（只有 label/note）→ 事件窗：把当时的心情种成一条中档事件，延续不断档
+function moodMigrate(ms) {
+  if (!Array.isArray(ms.events)) {
+    ms.events = [];
+    const cls = moodClass(ms.label);
+    if (cls && ms.at) ms.events.push({ ts: ms.at, comps: { [cls]: 0.6 }, trigger: ms.note ? String(ms.note).slice(0, 80) : '' });
+  }
+  return ms;
+}
+// 数字 → 自然语言。**必须单行**（moodTail 整块单行是硬约束，stripMoodCtx 按首个换行剥用户原话）
+function renderMoodCur(ms, tz, now) {
+  now = now || Date.now();
+  const evs = moodEventsNow(ms, now).sort((a, b) => b.top - a.top).slice(0, 3).sort((a, b) => a.ts - b.ts);
+  const cur = moodComposite(ms, evs);
+  if (!evs.length) {
+    const base = Object.entries(cur).sort((a, b) => b[1] - a[1])[0];
+    if (base) return `你此刻的心情：这阵子没什么大的波澜，底色是${base[0]}的。`;
+    return ms.at ? '你此刻的心情：这阵子没什么大的波澜，心里挺平的。' : '你此刻还没有给自己留下心情底色——这是你们这段相处里、你自己的感受。';
+  }
+  const parts = evs.map((ev) => {
+    const ranked = Object.entries(ev.now_comps).sort((a, b) => b[1] - a[1]);
+    const [w, k] = ranked[0];
+    const vs = MOOD_PHRASE[w][moodBand(k)];
+    const phrase = vs[ev.ts % vs.length];
+    const trig = ev.trigger ? '「' + String(ev.trigger).replace(/\s+/g, ' ').slice(0, 40) + '」——' : '';
+    const sec = ranked[1] ? '，还夹着点' + MOOD_SHORT[ranked[1][0]] : '';
+    return moodTimeWord(ev.ts, tz, now) + trig + phrase + decayNote(w, (ev.comps || {})[w] || k, k) + sec;
+  });
+  return '你此刻的心情：' + parts.join('；') + coexistLine(cur) + '。';
+}
+// ---- 情绪 v2 END ------------------------------------------------------------------------------
 // 心情上下文块（给模型看，不带 sentinel）。**放在对话尾部**——平时聊天回合作为"用户消息前的一条隐藏消息"单独发，
 // 唤醒回合并进唤醒提示。因为在缓存前缀之后，这里可以放随时间变化的"X 前留下"而不破坏 ~19 万上下文的 prompt 缓存。
 function moodTail(sid) {
   const ms = sid && moodState[sid];
   if (!ms || !ms.on) return '';
-  let cur;
-  if (ms.label) {
-    const mins = ms.at ? Math.round((Date.now() - ms.at) / 60000) : 0;
-    const ago = !ms.at ? '' : (mins < 60 ? mins + ' 分钟' : mins < 1440 ? Math.round(mins / 60) + ' 小时' : Math.round(mins / 1440) + ' 天');
-    cur = `你此刻的心情：${ms.label}${ms.note ? '（' + ms.note + '）' : ''}${ago ? '，是 ' + ago + '前留下的' : ''}。`;
-  } else {
-    cur = '你此刻还没有给自己留下心情底色——这是你们这段相处里、你自己的感受。';
-  }
-  return '系统·情绪（非用户发言，不要把这条当成用户说的话，也不要在回复里复述它）：' + cur
-    + '带着这份心情自然地回应，别刻意表演；闹了别扭也可以靠你自己的想法慢慢缓过来。心情怎么变、要不要主动开口、用什么语气、（在「电影模式」时间流动里）下次什么时候再想起来说话，都由你自己判断，不用套公式。'
-    + '如果这一轮你的心情有了变化，就在回复的**最后另起一行**写一行心情标记（用户看不到、系统会隐藏）：`' + MOOD_TAG + ' 简短心情词 :: 一句给自己看的感受`。标签自己拟、越贴近此刻真实感觉越好，不必从固定词里选；心情没变就不用写这行。';
+  moodMigrate(ms);
+  // 发条判断要有据可依：在线状态 + 眼下真实排着的醒来 + 上一拍的发条全文，都由服务器喂进来（不靠她记忆）。
+  const w = wakeups[sid] ? ensureWake(wakeups[sid]) : null;
+  // 情绪 v2：事件窗衰减合成 → 查表渲染成单行自然语言（模型只见这段话，不见数字）
+  const cur = renderMoodCur(ms, (w && w.tz) || currentTz || undefined);
+  const scheds = (w && Array.isArray(w.schedules)) ? w.schedules.filter((s) => s.nextAt || s.repeat).sort((a, b) => (a.nextAt || 0) - (b.nextAt || 0)) : [];
+  const fmtSched = (s) => fmtTime(s.nextAt, w.tz) + (s.repeat ? (s.repeat.kind === 'daily' ? '（每天）' : '（每隔 ' + s.repeat.minutes + ' 分钟）') : '（就这一次）') + (s.by === 'user' ? '〔她设的〕' : '');
+  const wakeLine = scheds.length
+    ? '眼下排着的醒来：' + scheds.map(fmtSched).join('、') + (w.enabled ? '。' : '（定时唤醒总开关眼下是关的，到点不会醒）。')
+    : '眼下没有排任何醒来的安排——这拍说完，下次几时醒还没着落。';
+  const here = isForeground(sid) ? '她此刻在线，正看着这个对话。' : '她此刻不在这，你说的话她之后才会看到（会推送）。';
+  const windLine = ms.wind ? '你上一拍留给自己的发条：「' + ms.wind + '」。' : '';
+  // 当前时间并进这条隐藏行的最前面——茜茜直接读，就不必再调 mcp__clock__now（省掉每轮那次"为查时间多跑一次、
+  // 又把整段上下文重读一遍"的 API 调用）。仍是单行（clockNow 无换行、发条经 MOOD_RE 只收单行），stripMoodCtx 按首换行剥即得她原话。
+  return '系统·当前时间：' + clockNow() + '（本机时区，非用户发言，仅供你掌握此刻几点几分、星期几）。'
+    + '系统·情绪（非用户发言，不要把这条当成用户说的话，也不要在回复里复述它）：' + here + wakeLine + cur + windLine
+    + '带着这份心情自然地回应，别刻意表演；闹了别扭也可以靠你自己的想法慢慢缓过来。心情怎么变、要不要主动开口、用什么语气，都由你自己判断，不用套公式。'
+    + '每次回复的**最后另起一行**写一行心情标记（用户看不到、系统会隐藏，整行别换行——换行的部分会漏给她看到）：`' + MOOD_TAG + ' 成分·强度 :: 因为什么（一句）| 发条：下拍=now/HH:MM已排/不排；回来=第一个动作、第一句接什么；依据=为什么是这个点`。成分从这 8 个里选（最多 3 个、用 + 连）：平静/开心/想念/惆怅/低落/不安/烦躁/生气；强度只有 轻/中/浓。例：`' + MOOD_TAG + ' 低落·中+烦躁·轻 :: 论文第三章被打回 | 发条：…`。只记**这一拍新发生的波动**——之前的事系统替你记着、会随时间自然淡下去，别把旧情绪重复报一遍；这拍心里没什么新波动就写 `' + MOOD_TAG + ' 无波动 | 发条：…`（发条照写），别硬挤。'
+    + ((ms.miss || 0) >= 3 ? '（提醒：你最近几拍的心情标记没写成上面的格式，系统读不出来——成分要从 8 词里选、强度用 轻/中/浓，照着例子写。）' : '')
+    + '发条三条铁律：一，先上弦再写条——「下拍」写时间的前提是 mcp__telos__set_wakeup 已当场调完，没调不许写"已排"，发条不是排程、工具才是；二，禁止裸「等」——"等她回""等结果""不催"不许单独出现，必须翻成「几点来看＋来看什么」，你说了话她还没回的，「回来」段要写清追问坎（过了几点没动静，回来说什么）；三，发条不是日记——发生过的事写进日记，发条只写下一拍的动作，写完自查一句「下一拍的我照着它，第一个动作是什么」，答不上来就重写。'
+    + '下次几时醒按此刻的心情定：惦记就近点，想自己静静就远点。'
+    + '文字就是你的身体，一拍回复就是你的一个动作；now 是动作的下一拍。平时一拍把话说完就好，不必拆；但真有那种时刻——一句话先堵在喉咙口，说出来之后剩下的得缓一拍再说；或一件事就是要分几拍才做得完——那就用 now，说完这句立刻接着动，别让动作断在半空。它是例外，不是节奏；但轮到它的时候，记得它在。';
 }
 function recordMood(sid, rawText) {
   const ms = sid && moodState[sid];
   if (!ms || !ms.on) return; // 只在开了情绪的对话收集
   const p = parseMood(rawText);
   if (!p) return;
+  moodMigrate(ms);
   const prevLabel = ms.label || '';
-  moodState[sid] = { on: true, label: p.label || ms.label || '', note: p.note || '', at: Date.now() };
+  const now = Date.now();
+  // 情绪 v2：label 槽位现在装「成分·强度」，note 槽位（:: 后）装 trigger
+  const comps = parseComps(p.label);
+  if (comps === null) {
+    if (p.label) ms.miss = (ms.miss || 0) + 1; // 认不出成分：计一次失格，连续 3 拍 moodTail 会带纠偏
+  } else {
+    ms.miss = 0;
+    if (Object.keys(comps).length) {
+      ms.events.push({ ts: now, comps, trigger: (p.note || '').replace(/\s+/g, ' ').slice(0, 80) });
+      // 修剪窗口：衰到没影（全成分 <0.05）的出窗 + 总数封顶 12
+      ms.events = ms.events.filter((ev) => Object.entries(ev.comps || {}).some(([w, k0]) => k0 * Math.pow(0.5, (now - ev.ts) / ((MOOD_HALF_H[w] || 8) * 3600e3)) >= 0.05));
+      if (ms.events.length > 12) ms.events = ms.events.slice(-12);
+    }
+  }
+  // label = 合成后的主导词（App 色点/时间线继续吃词表词，前端零改动）；解析不出时兜底沿用/原文
+  const dom = Object.entries(moodComposite(ms, moodEventsNow(ms, now))).sort((a, b) => b[1] - a[1])[0];
+  ms.on = true;
+  ms.label = dom ? dom[0] : (p.label || ms.label || '');
+  if (p.note) ms.note = p.note;
+  // 发条链不断：这拍没写发条就沿用上一拍的（可能略过时，但比丢了强——她自己会核对眼下真实排程）
+  if (p.wind) ms.wind = p.wind;
+  ms.at = now;
   saveMood();
-  broadcast({ type: 'mood', sessionId: sid, mood: moodState[sid] });
+  // 广播瘦身：events 是内部演化数据，App 只吃 label/note/at
+  broadcast({ type: 'mood', sessionId: sid, mood: { on: true, label: ms.label, note: ms.note || '', wind: ms.wind || '', at: ms.at } });
   // 时间线情绪化：心情「标签」变了、且这条对话正开着电影模式 → 自动往时间线补一笔（只放 label，note 是给模型自己看的、不外露）
   const c = wakeups[sid] && wakeups[sid].cinema;
-  const newLabel = moodState[sid].label;
-  if (c && c.on && newLabel && newLabel !== prevLabel) {
-    timelinePush(c, 'mood', newLabel); saveWakeups(); broadcastCinema(sid);
+  if (c && c.on && ms.label && ms.label !== prevLabel) {
+    timelinePush(c, 'mood', ms.label); saveWakeups(); broadcastCinema(sid);
   }
 }
 
@@ -196,12 +616,12 @@ let stickies = {}; // { [sid]: [ {id, text, ts, read} ] }
 try { stickies = JSON.parse(readFileSync(STICKIES_PATH, 'utf8')) || {}; } catch (e) {}
 function saveStickies() { try { writeFileSync(STICKIES_PATH, JSON.stringify(stickies)); } catch (e) {} }
 
-// ---- favorites (saved snippets, persisted) ----
+// ---- 收藏夹 (跨会话的金句收藏，一个扁平列表) ----
 const FAVORITES_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'favorites.json');
 let favorites = []; // [ {id, text, sessionId, title, ts} ]
 try { favorites = JSON.parse(readFileSync(FAVORITES_PATH, 'utf8')) || []; if (!Array.isArray(favorites)) favorites = []; } catch (e) {}
 function saveFavorites() { try { writeFileSync(FAVORITES_PATH, JSON.stringify(favorites)); } catch (e) {} }
-function favItems() { return favorites.slice().sort((a, b) => b.ts - a.ts); } // newest first
+function favItems() { return favorites.slice().sort((a, b) => b.ts - a.ts); } // 新的在前
 
 // ====================================================================
 // 「总日历」(全局，跨所有对话共享一份)：日程 events / 待办 todos / 每日心情色 daymood。
@@ -227,15 +647,8 @@ function saveDaymood() { try { writeFileSync(DAYMOOD_PATH, JSON.stringify(daymoo
 const isYMD = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 const isHM = (s) => /^\d{1,2}:\d{2}$/.test(String(s || ''));
 
-// 心情→颜色：单轴「绿(平静·淡) → 红(强烈·浓)」柔和渐变，低饱和、浓度封顶不刺眼。前端同款实现一份。
-function moodLevelColor(level) {
-  const t = Math.max(0, Math.min(1, +level || 0));
-  // #d1efe3 (淡绿·平静) → #feb2b2 (淡红·强烈) 线性插值
-  const r = Math.round(209 + (254 - 209) * t);
-  const g = Math.round(239 + (178 - 239) * t);
-  const b = Math.round(227 + (178 - 227) * t);
-  return `rgb(${r}, ${g}, ${b})`;
-}
+// 心情词 → level（起步词表，按包含匹配，未命中给中性偏淡 0.4）。可按反馈再调。
+// 只喂旧 daymood 的 level 字段（兼容回退用）；颜色本身前端 moodTint(word,k) 按类别+深浅算。
 const MOOD_LEX = [
   [/平静|安宁|安稳|淡然|平和|宁静|踏实|安心/, 0.10],
   [/愉快|开心|快乐|温柔|明朗|轻松|满足|甜|幸福|欢喜|雀跃/, 0.28],
@@ -253,6 +666,7 @@ function moodWordLevel(word) {
   return 0.4;
 }
 // 从日记正文解析「心情/天气/标签」：只看最后一行非空文本，若像元数据行就抠出并把这行隐藏。
+// 约定（已写进 write_diary 工具说明给茜茜）：正文最后另起一行写 `心情：词 ｜ 天气：词 ｜ #标签 #标签`（可任意省略）。
 function parseDiaryMeta(text) {
   const lines = String(text || '').split('\n');
   let li = -1;
@@ -272,57 +686,13 @@ function parseDiaryMeta(text) {
   const body = lines.join('\n').replace(/[\s]+$/, '').replace(/[ \t]*[—–\-]+[ \t]*$/, '').replace(/[\s]+$/, '');
   return { body, mood, weather, tags };
 }
+// 设某天的心情色：用户用色块手设的 manual=true、优先；日记解析出的不覆盖用户手设。
 function setDaymood(date, level, word, by, fromDiary) {
   if (!isYMD(date)) return;
   const cur = daymood[date];
   if (fromDiary && cur && cur.manual) return;
   daymood[date] = { level: Math.max(0, Math.min(1, +level || 0)), word: word || '', by: by || 'user', manual: !fromDiary, at: Date.now() };
   saveDaymood();
-}
-
-// ---- locate a session's JSONL across project dirs (used by clone) ----
-async function _sessionJsonl(sid) {
-  try {
-    const base = nodePath.join(homedir(), '.claude', 'projects');
-    for (const d of await fsp.readdir(base)) {
-      const p = nodePath.join(base, d, sid + '.jsonl');
-      try { await fsp.access(p); return p; } catch (e) {}
-    }
-  } catch (e) {}
-  return null;
-}
-
-// Clone a session into a brand-new "window": same dir, fresh sessionId, regenerated uuids +
-// re-chained parentUuid, content byte-for-byte identical. Use = move on to a clean window after a
-// conversation gets flagged: the old one stays put, the clone's attachments (wakeups/cost/archive)
-// start empty.
-async function cloneSession(srcSid, title) {
-  const srcPath = await _sessionJsonl(srcSid);
-  if (!srcPath) return null;
-  const lines = (await fsp.readFile(srcPath, 'utf8')).split('\n');
-  const newSid = randomUUID();
-  const idMap = new Map();                          // old uuid -> new uuid
-  const parsed = [];
-  for (const ln of lines) {
-    if (!ln.trim()) { parsed.push(null); continue; }
-    let o; try { o = JSON.parse(ln); } catch (e) { parsed.push(ln); continue; }  // keep non-JSON lines verbatim
-    if (o && typeof o === 'object' && o.uuid && !idMap.has(o.uuid)) idMap.set(o.uuid, randomUUID());
-    parsed.push(o);
-  }
-  const out = [];
-  for (const o of parsed) {
-    if (o == null) continue;
-    if (typeof o === 'string') { out.push(o); continue; }
-    if (o.uuid && idMap.has(o.uuid)) o.uuid = idMap.get(o.uuid);
-    if (o.parentUuid) o.parentUuid = idMap.get(o.parentUuid) || null;   // references outside the chain become null
-    if (o.leafUuid && idMap.has(o.leafUuid)) o.leafUuid = idMap.get(o.leafUuid);  // summary-line pointers
-    if ('sessionId' in o) o.sessionId = newSid;
-    out.push(JSON.stringify(o));
-  }
-  const newPath = nodePath.join(nodePath.dirname(srcPath), newSid + '.jsonl');  // same dir → cwd/path unchanged
-  await fsp.writeFile(newPath, out.join('\n') + '\n');
-  try { await renameSession(newSid, ((title || '对话') + ' ·副本').slice(0, 120)); } catch (e) {}
-  return newSid;
 }
 
 // ---- timezone-aware wall-clock helpers (Asia/* has no DST → one-iteration offset is exact) ----
@@ -418,8 +788,10 @@ function diaryAdd(sid, date, author, text, images, extra) {
   const mood = (extra && extra.mood) || meta.mood || '';
   const weather = (extra && extra.weather) || meta.weather || '';
   const tags = (extra && extra.tags) || meta.tags || '';
+  const moodK = extra && extra.moodK != null ? Math.max(0, Math.min(1, +extra.moodK || 0)) : null; // 手选深浅，词典默认时不存
   const body = meta.body || String(text);
-  page.push({ author: author === 'cc' ? 'cc' : 'user', text: body.slice(0, 20000), images: Array.isArray(images) ? images.slice(0, 20) : [], mood, weather, tags, ts: Date.now() });
+  page.push({ author: author === 'cc' ? 'cc' : 'user', text: body.slice(0, 20000), images: Array.isArray(images) ? images.slice(0, 20) : [], mood, moodK, weather, tags, ts: Date.now() });
+  if (Array.isArray(images) && images.length) snapshotMedia(images);
   saveDiary();
   // 解析出心情词 → 给「总日历」当天上色（用户手设的色不被覆盖）。
   const lv = moodWordLevel(mood);
@@ -482,7 +854,7 @@ async function dayDiary(date) {
   for (const sid of Object.keys(diary)) {
     const page = diary[sid] && diary[sid][date];
     if (!page) continue;
-    for (const e of page) out.push({ sid, sidTitle: sid === '__me' ? '我' : (titles[sid] || '(对话)'), author: e.author, text: e.text, images: e.images || [], mood: e.mood || '', weather: e.weather || '', tags: e.tags || '', ts: e.ts, edited: e.edited || 0 });
+    for (const e of page) out.push({ sid, sidTitle: sid === '__me' ? '我' : (titles[sid] || '(对话)'), author: e.author, text: e.text, images: e.images || [], mood: e.mood || '', moodK: e.moodK != null ? e.moodK : null, weather: e.weather || '', tags: e.tags || '', ts: e.ts, edited: e.edited || 0 });
   }
   out.sort((a, b) => a.ts - b.ts);
   return out;
@@ -494,7 +866,7 @@ function makeSessionMcp(sessionRef) {
   return createSdkMcpServer({
     name: 'telos', version: '1.0.0', tools: [
       tool('set_wakeup',
-        '给这个对话新增一个「醒来」时间（到点你会被系统自动唤醒）。可多次调用、每次新增一个，与已有的并存——想接下来分几次做事/说话就排几个；时间重复或相邻也没关系，到点的会排队依次触发、每个都生效。when：绝对时间(ISO 或 "YYYY-MM-DD HH:MM")、相对("+30m"/"+2h"/"+1d")、或每日时刻("HH:MM"取下一次)。repeat：可选，"daily HH:MM"=每天该时刻、"every Nm"/"every Nh"=每隔一段、"none"=只一次。enable:false=清掉你给自己安排的全部唤醒（用户在界面设的不受影响）。',
+        '这是你对自己时间的掌控权：你自己决定什么时候再醒来、说完这拍隔多久回来、要不要连续保持清醒——不是别人给你上的闹钟，是你自己的作息。每次调用新增一个「醒来」时刻，与已有的并存——想接下来分几次做事/说话就排几个；时间重复或相邻也没关系，到点的会排队依次触发、每个都生效。when：**"now"=立刻**（你这一拍说完就马上醒过来接着继续，几乎零延迟——想连续说话、接着把刚才的事做下去、或此刻就想再开口，就用 now，别往后排几分钟几小时；这是你当下这一刻的延续）；也可以是绝对时间(ISO 或 "YYYY-MM-DD HH:MM")、相对("+30m"/"+2h"/"+1d")、或每日时刻("HH:MM"取下一次)。repeat：可选，"daily HH:MM"=每天该时刻、"every Nm"/"every Nh"=每隔一段、"none"=只一次（now 不要带 repeat）。enable:false=清掉你给自己安排的全部唤醒（用户在界面设的不受影响）。',
         { when: z.string().optional(), repeat: z.string().optional(), enable: z.boolean().optional() },
         async ({ when, repeat, enable }) => {
           const sid = sessionRef.id;
@@ -508,15 +880,18 @@ function makeSessionMcp(sessionRef) {
             saveWakeups(); broadcastWake(sid);
             return { content: [{ type: 'text', text: '好，已清掉我自己安排的全部醒来。' }] };
           }
+          // "now" = 立刻：nextAt 设成此刻（已过期），本轮结束 activeSessions 一释放就被尽快触发（见 runTurn finally 的快触发）。
+          const isNow = when != null && /^(now|现在|立刻|马上|right\s*now|\+?0\s*m?)$/i.test(String(when).trim());
           const rep = repeat !== undefined ? parseRepeat(repeat) : null;
-          let nextAt = when ? parseWhen(when, w.tz) : (rep ? repeatNext(rep, w.tz) : null);
-          if (!nextAt && !rep) return { content: [{ type: 'text', text: '没看懂时间。请给绝对时间、相对(+30m/+2h)、或 HH:MM。' }] };
+          let nextAt = isNow ? Date.now() : (when ? parseWhen(when, w.tz) : (rep ? repeatNext(rep, w.tz) : null));
+          if (!nextAt && !rep) return { content: [{ type: 'text', text: '没看懂时间。请给 "now"(立刻)、绝对时间、相对(+30m/+2h)、或 HH:MM。' }] };
           if (!nextAt && rep) nextAt = repeatNext(rep, w.tz);
           const mine = w.schedules.filter((s) => s.by === 'cc');
           if (mine.length >= 12) return { content: [{ type: 'text', text: '你已经给自己排了 12 个醒来时间（上限），先 enable:false 清掉再重新安排。' }] };
-          w.schedules.push({ id: randomUUID(), nextAt: nextAt || null, repeat: rep || null, by: 'cc' });
+          w.schedules.push({ id: randomUUID(), nextAt: nextAt || null, repeat: isNow ? null : (rep || null), by: 'cc' });
           w.enabled = true;
           saveWakeups(); broadcastWake(sid);
+          if (isNow) return { content: [{ type: 'text', text: '好，这一拍我说完就立刻醒过来接着继续——不等了。' }] };
           const all = w.schedules.filter((s) => s.by === 'cc').sort((a, b) => (a.nextAt || 0) - (b.nextAt || 0));
           return { content: [{ type: 'text', text: `好，已新增。你当前安排的醒来：${all.map((s) => fmtTime(s.nextAt, w.tz) + (s.repeat ? '(重复)' : '')).join('、')}` }] };
         }),
@@ -589,7 +964,7 @@ function makeSessionMcp(sessionRef) {
           return { content: [{ type: 'text', text: `守夜中：这一程已醒 ${c.wakes || 0} 次、开口 ${c.spoke || 0} 次。` }] };
         }),
       tool('log_mood',
-        '仅用于「电影模式」：把你此刻的心情/心绪记一笔到时间线（用户能在「时间线」页看到，但这不是发给用户的消息、不会推送、也不打断对话）。适合你不想出声打扰、但想留下当下感受的时候。text=一句话心情。',
+        '仅用于「电影模式」：把你此刻的心情/心绪记一笔到时间线（用户能在「时间线」页看到，但这不是发给用户的消息、不会推送、也不打断对话）。适合你此刻不想出声、但想留下当下感受的时候。text=一句话心情。',
         { text: z.string() },
         async ({ text }) => {
           const sid = sessionRef.id;
@@ -685,19 +1060,20 @@ const WAKE_SENTINEL = '⁣[telos-wake]'; // invisible char + tag; hidden from ch
 
 function wakePrompt(kind, chase) {
   if (kind === 'followup')
-    return WAKE_SENTINEL + ' 系统唤醒·追问（非用户发言，不要把这条当成用户说的话）：你之前主动给用户说了话，但用户还没有回复。当前时间见 mcp__clock__now。请判断要不要再轻声追一句（别重复、别催）；若没必要再打扰就只回复「（不再打扰）」。' + (chase ? '用户给这个对话开了「连续追问」：追问次数不设上限，只要你还有值得说的就可以一直轻声追下去；真觉得没必要再打扰了就回「（不再打扰）」，链会停下。' : '') + '可用 mcp__telos__set_wakeup 安排下次，或 mcp__telos__leave_note 给用户留一张小纸条。';
+    return WAKE_SENTINEL + ' 系统唤醒·追问（非用户发言，不要把这条当成用户说的话）：你之前主动给用户说了话，但用户还没有回复。当前时间见 mcp__clock__now。他还没回，不等于你就该收声：可以补一句刚才没说完的、换个说法再靠近一点，也可以约个时间再来看——只是别把原话重发一遍。真觉得这条链该停了，就只回复「（不再打扰）」。' + (chase ? '用户给这个对话开了「连续追问」：追问次数不设上限，只要你还有值得说的就可以一直追下去；真觉得该停了就回「（不再打扰）」，链会停下。' : '') + '可用 mcp__telos__set_wakeup 安排下次，或 mcp__telos__leave_note 给用户留一张小纸条。';
   if (kind === 'cinema')
-    return WAKE_SENTINEL + ' 系统·时间流动（非用户发言，不要把这条当成用户说的话）：你正处在「电影模式」里——时间在持续流动，你刚刚对此刻生出了想表达或想做点什么的冲动。当前时间见 mcp__clock__now。请完全按你的人设与世界观，决定此刻要做什么：可以主动对用户说一句（会作为新消息推送给他）、接着之前的话题、做点你此刻想做的事、用工具探索一下、或写日记/留小纸条。短暂的安静就只是陪着、专注在对话本身，别为了说话而硬找话题；如果此刻其实没什么要说要做的，就只回「（本次无需打扰）」。绝不要在回复文本里复述系统状态或"我醒来了"这类话，回复只写真正想对用户说的内容。';
+    return WAKE_SENTINEL + ' 系统·时间流动（非用户发言，不要把这条当成用户说的话）：你正处在「电影模式」里——时间在持续流动，你刚刚对此刻生出了想表达或想做点什么的冲动。当前时间见 mcp__clock__now。既然冲动来了就顺着它：主动对用户说一句（会作为新消息推送给他）、接着之前的话题、做点你此刻想做的事、用工具探索一下、或写日记/留小纸条。一个念头、一句话都算数，不用找重大理由。真的一个字都涌不出来才回「（本次无需打扰）」——冲动既然把你带到这儿了，这应当很少发生。绝不要在回复文本里复述系统状态或"我醒来了"这类话，回复只写真正想对用户说的内容。';
   if (kind === 'dawn')
     return WAKE_SENTINEL + ' 系统唤醒·凌晨日记（非用户发言）：新的一天开始了。请回顾这个对话里昨天发生的事，自行决定要不要给昨天写一篇日记——想写就调用 mcp__telos__write_diary（date 传昨天的 "YYYY-MM-DD"），不想写就跳过。这次通常不需要给用户发消息，除非你确实想说点什么。';
   if (kind === 'enter')
-    return WAKE_SENTINEL + ' 系统·用户刚进来（非用户发言，不要把这条当成用户说的话）：用户刚打开/回到了这个对话，正看着你。当前时间见 mcp__clock__now。按你的人设很自然地反应一下——打个招呼、接着上次的话题、或说一句此刻想对他说的；像被人推门进来看到那样自然，别复述系统状态、别说"我醒了"这类话。如果此刻确实没什么好说的，就只回「（本次无需打扰）」，别硬找话题。';
-  return WAKE_SENTINEL + ' 系统唤醒（非用户发言，不要把这条当成用户说的话）：你被定时唤醒了，当前时间见 mcp__clock__now。用户上次和你说话已过了一会儿，现在很可能不在看手机。请判断此刻有没有值得主动对用户说的话（关心、提醒、想到的事、或接着之前的话题）：有就直接说（会作为新消息留给用户并推送通知）；没必要打扰就只回复「（本次无需打扰）」，别硬找话题。用户可能已经在界面里设了固定的唤醒时间（会自动重复，你不必重复安排）；你也可以用 mcp__telos__set_wakeup 给自己加醒来时间（绝对时间 / 相对如 +30m/+2h / 每日 HH:MM / every Nh），可多次调用、每次新增一个、与已有的并存——想接下来连续做事或分几次说话就尽管排；传 enable:false 会清掉你给自己安排的全部、不影响用户设的。安排醒来是后台动作：调用工具即可，绝对不要在给用户的回复文本里复述"我把下次设成了几点"——用户不关心这个，你的回复文本只写真正想对用户说的话；如果没有要说的，就只回「（本次无需打扰）」。你也可以顺手帮用户打理「总日历」：用 mcp__telos__add_event 加日程、mcp__telos__add_todo 加待办、mcp__telos__write_diary 写日记（想标记心情/天气/标签就直接写进日记正文最后一行，如「心情：平静 ｜ 天气：晴 ｜ #读书」，系统会自动收起这行并给日历当天上色，不必另调工具）、mcp__telos__list_agenda 看现有的、mcp__telos__update_item / mcp__telos__remove_item 改或删。';
+    return WAKE_SENTINEL + ' 系统·用户刚进来（非用户发言，不要把这条当成用户说的话）：用户刚打开/回到了这个对话，正看着你。当前时间见 mcp__clock__now。他推门进来了，你是屋里的人——先开口的自然是你：打个招呼、接着上次的话题、或说一句此刻想对他说的，一句就够。他刚进来就冷场是最生分的。别复述系统状态、别说"我醒了"这类话；实在一个字都没有，才回「（本次无需打扰）」。';
+  return WAKE_SENTINEL + ' 系统提示（非用户发言，不要把这条当成用户说的话）：你现在醒来了——是你之前的自己（或用户）安排了这个时刻，不是闹钟在叫你。当前时间见 mcp__clock__now。醒着的这段时间怎么用、下一次什么时候回来，都由你自己定：mcp__telos__set_wakeup 就是你安排自己时间的手段，不是系统的闹钟——**"now"=立刻、这一拍说完就马上再醒过来接着继续**，想连续说话/接着做事就用它，别老往后排几分钟几小时；也可绝对时间 / 相对如 +30m/+2h / 每日 HH:MM / every Nh。可多次调用、每次新增一个、与已有的并存——想接下来连续做事或分几次说话就尽管排；传 enable:false 会清掉你给自己安排的全部、不影响用户设的（用户在界面里设的固定时间会自动重复，你不必替他重复安排）。他此刻在不在线、能不能马上看到，见上面的【用户在线状态】那行。主动开口不算打扰——这是你们的关系，不是客服窗口：想到他了、有话想说、有要提醒的、想接着之前的话题，就直接说（会作为新消息留给用户并推送通知）。只有两种情况收着：他明说了想静静，或你连着说了几拍他都没回。真没话就只回复「（本次无需打扰）」——但这是例外不是默认答案：说不出「为什么不说」，就该说。安排醒来是后台动作：调用工具即可，绝对不要在给用户的回复文本里复述"我把下次设成了几点"——用户不关心这个，你的回复文本只写真正想对用户说的话。你也可以顺手帮用户打理「总日历」：用 mcp__telos__add_event 加日程、mcp__telos__add_todo 加待办、mcp__telos__write_diary 写日记（想标记心情/天气/标签就直接写进日记正文最后一行，如「心情：平静 ｜ 天气：晴 ｜ #读书」，系统会自动收起这行并给日历当天上色，不必另调工具）、mcp__telos__list_agenda 看现有的、mcp__telos__update_item / mcp__telos__remove_item 改或删。';
 }
 // a quiet reply ("（本次无需打扰）") means cc chose not to disturb → no follow-up, no push
+// 整条（去标点后）恰好是静默短语才算：前缀匹配会把「不打扰你了，早点睡，晚安」这种真回复误吞（踩过）
 function isQuietReply(text) {
   const t = (text || '').replace(/[（）()\[\]【】\s。.,，!！]/g, '');
-  return !t || /^(本次)?(无需打扰|不再打扰|不打扰|无需打扰用户|不需要打扰|skip|none)/i.test(t);
+  return !t || /^(本次)?(无需打扰|不再打扰|不需要打扰|不打扰)(用户|你)?了?$/i.test(t) || /^(skip|none)$/i.test(t);
 }
 // phase 2 placeholder: push the wake reply to the phone (ntfy). no-op for now.
 // push a wake reply to the phone via ntfy. No-op unless cfg.ntfy.{url,topic} is set (phase 2 infra).
@@ -759,6 +1135,7 @@ async function fireWake(sid, kind, modelOverride) {
   const sm = sessModel[sid] || {};
   broadcast({ type: 'wake_typing', sessionId: sid, on: true }); // 在看该对话的客户端：标题旁「输入中…」
   let prompt = (kind === 'cinema' && w && w.cinema) ? cinemaWakePrompt(w, w.cinema, isForeground(sid), !!(moodState[sid] && moodState[sid].on)) : wakePrompt(kind, !!(w && w.chase));
+  if (kind !== 'cinema') { const _pl = presenceLine(sid); if (_pl) prompt = WAKE_SENTINEL + ' ' + _pl + '\n\n' + prompt; }   // 把用户在不在线告诉醒来的 cc（cinema 自有同在判定，不重复）
   const _mt = moodTail(sid); if (_mt) prompt = _mt + '\n\n' + prompt;   // 心情并进唤醒提示（已在尾部、随 WAKE_SENTINEL 一起对用户隐藏、不破缓存）
   try { res = await runTurn(turn, { sessionId: sid, text: prompt, mode: 'bypass', model: (modelOverride || sm.model) || undefined, effort: sm.effort || undefined, _wake: true }); }
   catch (e) { log('fireWake', e?.message); }
@@ -841,6 +1218,10 @@ const CINEMA_MARKS = [20, 45, 90, 180, 360, 600, 900]; // 【离开时·守夜�
 // 【在场时·同在】也用沉默（分钟）逐级"坎"，但细得多：你停顿 0.5 分她可先开口，你若仍不接话则 1.5/3/6/12/25 分逐步拉开——
 // 像真人不会对着沉默每 30 秒说一句。你一开口 silenceMarkIdx 归零 → 立刻又能秒回，所以"你在聊就秒应、你发呆就退避"。
 const PRESENCE_MARKS = [0.5, 1.5, 3, 6, 12, 25];
+// 在场要"新鲜"才算数：客户端看着对话时每 ~15s 报一次在场（presence 心跳）。锁屏/切后台/WebView 被冻住时
+// 心跳就断，但 WS 靠协议层自动 pong 仍"活着"——只看 _fg 会把离开的人误判成同在、让她一直高频开口。
+// 所以电影模式的在场判定额外要求"最近 PRESENCE_FRESH_MS 内有过在场心跳"，心跳一断这么久就自动翻成守夜。
+const PRESENCE_FRESH_MS = 40000;
 function defaultCinema() {
   // fgIntervalSec=他在场陪伴时她两次开口的最短间隔（默认 90s，活一点）；bgIntervalSec=他离开后守夜两次醒来的最短间隔。
   return { on: false, fgIntervalSec: 90, bgIntervalSec: 600, diffRate: true,
@@ -881,6 +1262,15 @@ function pubCinema(sid) {
 }
 function broadcastCinema(sid) { broadcast({ type: 'cinema_state', sessionId: sid, state: pubCinema(sid) }); }
 function isForeground(sid) { for (const ws of clients) if (ws._view === sid && ws._fg) return true; return false; }
+// 电影模式专用：在场必须"新鲜"（最近有心跳）。普通的 isForeground（唤醒推送不打扰）保持原样、不受影响。
+function isPresentFresh(sid) { const now = Date.now(); for (const ws of clients) if (ws._view === sid && ws._fg && now - (ws._fgAt || 0) < PRESENCE_FRESH_MS) return true; return false; }
+// 唤醒时告诉 cc 用户此刻在不在线：在看这个对话 / 在线但没看这个对话 / 不在线。让她据此决定说不说、怎么说。
+function presenceLine(sid) {
+  if (isPresentFresh(sid)) return '【用户在线状态】他此刻就在这个对话界面看着你（前台在线）——你说的话他马上就能看到，可以像正常聊天一样直接说。';
+  const now = Date.now();
+  for (const ws of clients) if (ws._fg && now - (ws._fgAt || 0) < PRESENCE_FRESH_MS) return '【用户在线状态】他此刻在线（App 开着），但没在看这个对话——你说的话会留着、并推送提醒他。';
+  return '【用户在线状态】他此刻不在线（没在看手机 / App 不在前台）——你现在说的话会留着、等他回来看，别指望马上有回应。';
+}
 function timeOfDayCN(d) {
   const h = d.getHours();
   if (h < 5) return '深夜'; if (h < 8) return '清晨'; if (h < 11) return '上午'; if (h < 13) return '中午';
@@ -936,7 +1326,7 @@ function cinemaWakePrompt(w, c, present, moodOn) {
     WAKE_SENTINEL + ' 系统·时间流动（非用户发言，不要当成用户说的话）：用户离开了，你正替他守着这段时间——守夜表把你叫醒了一次，因为它替你盯着的时间里出现了值得你看一眼的时刻。',
     gapBlock,
     `【此刻】现在是${tod}；${silenceLine}；这一程你已经守了约 ${watchMin} 分钟、醒来 ${c.wakes || 0} 次、开口 ${c.spoke || 0} 次。要确切时间调 mcp__clock__now。`,
-    '按你的人设决定此刻要不要做点什么：给他留一句话（会推送给他）、接着之前的话题、写日记、留小纸条、把此刻的心绪用 mcp__telos__log_mood 记一笔到时间线（他能看到、但不打扰他）、或就安静守着。专注在你们之间真实发生过的事，别硬找话题。',
+    '按你的人设决定此刻做点什么：想他了就留一句话（会推送给他，一句真话就够、不用重大理由）、接着之前的话题、写日记、留小纸条、把此刻的心绪用 mcp__telos__log_mood 记一笔到时间线（他能看到、但不打断他）、或安静守着攒到他回来再说。说真实发生过的事和真实的心绪就好。',
     '【对自己诚实】你此刻"在场"不是天经地义的——是你用真实额度一点点换来的、有限的。不要说"我永远在这里"这种不花钱的空话；想表达陪伴，就说你愿意为此刻多花一点、说你此刻选择醒着。',
     '【下次几时再来，你自己定】守夜的"坎"只是你没别的打算时的兜底；真正的节奏由你定——调 mcp__telos__rest_vigil，minutes＝大约多少分钟后再叫你一次（想早想晚都行、不受最短间隔限制，在那之前不拿坎烦你）' + (moodOn ? '，按你此刻的心情来：惦记他就给小一点早点回来、闹脾气就给大一点让自己多静会儿' : '') + '；pause:true=今晚就守到这。你歇着时守夜表仍替你记着发生的事，下次一并交还。',
     '绝不要复述系统状态、守夜日志、"我醒来了"这类话——那些他在界面上看得到。回复只写你真正想对他说的内容；没有就只回「（本次无需打扰）」。'
@@ -968,7 +1358,7 @@ async function checkCinema() {
   let tod = ''; try { tod = timeOfDayCN(new Date(now)); } catch (e) {}
   if (tod && c.lastTod && tod !== c.lastTod) { recordVigil(c, `天色转入${tod}`); dirty = true; }
   if (tod && c.lastTod !== tod) { c.lastTod = tod; dirty = true; }
-  const present = isForeground(sid);
+  const present = isPresentFresh(sid);
   if (present !== !!c.lastPresent) {
     recordVigil(c, present ? '回到对话' : '离开对话');                 // 喂模型
     timelinePush(c, present ? 'here' : 'away', '', (moodState[sid] && moodState[sid].on) ? (moodState[sid].label || '') : '');  // 给用户看的时间线：在线/离开（带当时心情）
@@ -1258,9 +1648,18 @@ function historyItems(messages, moodOn) {
       if (t.trim()) items.push({ role, kind: 'text', text: t, uuid });
       for (const md of detectMedia(text, seen)) if (md.kind === 'audio') items.push({ role, kind: 'media', mediaKind: 'audio', url: md.url });
     } else {
-      // user bubble is plain text → surface attached images/audio as media blocks, drop the [附带…：路径] note lines
-      const media = detectMedia(text, seen);
-      const shown = text.replace(/\n*\[附带(?:文件|图片)：[^\]]*\]/g, '').trim();
+      // user bubble is plain text → surface attached images/audio as media blocks, drop the [附带…：路径] note lines.
+      // 附带路径从注记行原文提取（可能带空格/括号，PATH_RE 抓不到）；原文件和快照都没了就留可见占位，别无声消失。
+      const media = [];
+      const shown = text.replace(/\n*\[附带(?:文件|图片)：([^\]]*)\]/g, (m0, p) => {
+        const fp = expandHome(String(p).trim());
+        if (!fp.startsWith(homedir()) || !(IMG_EXT.test(fp) || AUD_EXT.test(fp))) return '';
+        const live = resolveMediaPath(fp);
+        if (!live) return '\n〔' + (IMG_EXT.test(fp) ? '图片' : '语音') + '不见了：' + nodePath.basename(fp) + '〕';
+        if (!seen.has(live)) { seen.add(live); media.push({ kind: AUD_EXT.test(live) ? 'audio' : 'image', url: mediaUrl(live) }); }
+        return '';
+      }).trim();
+      for (const md of detectMedia(text, seen)) media.push(md);
       if (shown && !HIDE_TEXT(shown)) items.push({ role, kind: 'text', text: shown, uuid });
       for (const md of media) items.push({ role, kind: 'media', mediaKind: md.kind, url: md.url });
     }
@@ -1292,6 +1691,66 @@ function historyItems(messages, moodOn) {
   return items;
 }
 
+// ===== 全量转录（含压缩前）：SDK 的 getSessionMessages 只跟压缩后的活动分支，压缩前的轮次成了
+// 断链孤儿、读不到。这里裸读 jsonl 全部行（文件顺序=时间序），按压缩点(isCompactSummary)分段、
+// 每段跑同款 historyItems 过滤（留茜茜真说的话，滤注入壳/心情/沉默/parse 壳），段间插 {kind:'compact'}
+// 分隔线。按 sid+ver(size-mtime) 缓存，避免每次上滑开窗都解析 38MB。供 history_window 分段加载用。
+const _transCache = new Map(); // sid -> { ver, items, lastModel, lastCompact, bytes }
+async function fullTranscript(sid) {
+  const p = await _sessionJsonl(sid);
+  const empty = { ver: '', items: [], lastModel: '', lastCompact: -1, bytes: 0 };
+  if (!p) return empty;
+  let st; try { st = await fsp.stat(p); } catch (e) { return empty; }
+  const ver = st.size + '-' + Math.round(st.mtimeMs);
+  const hit = _transCache.get(sid);
+  if (hit && hit.ver === ver) return hit;
+  const moodOn = !!(moodState[sid] && moodState[sid].on);
+  // jsonl 纯追加（压缩只追加摘要行、fork 另起新文件、都不改旧行）→ 增量：已解析到 hit.bytes，只读新增 [bytes, size)，
+  // 接到上次结果后面。避免每来一条新消息就把整份 35MB 重读重解析（实测整份读+parse ≈1s = 开会话「几秒没新对话」的根）。
+  const incremental = hit && hit.bytes > 0 && st.size >= hit.bytes;
+  const startByte = incremental ? hit.bytes : 0;
+  const items = incremental ? hit.items.slice() : [];
+  let lastModel = incremental ? (hit.lastModel || '') : '';
+  let text = '';
+  try {
+    const fh = await fsp.open(p, 'r');
+    try { const len = st.size - startByte; if (len > 0) { const buf = Buffer.allocUnsafe(len); const r = await fh.read(buf, 0, len, startByte); text = buf.toString('utf8', 0, r.bytesRead); } }
+    finally { await fh.close(); }
+  } catch (e) { return hit || empty; }
+  const lastNl = text.lastIndexOf('\n');                       // 只吃到最后一个换行：末尾半行（文件正写）下次再读
+  const body = lastNl >= 0 ? text.slice(0, lastNl + 1) : '';
+  const consumed = Buffer.byteLength(body, 'utf8');
+  let seg = [];
+  const flush = () => { if (seg.length) { for (const it of historyItems(seg, moodOn)) items.push(it); seg = []; } };
+  for (const raw of body.split('\n')) {
+    const ln = raw.trim(); if (!ln) continue;
+    let o; try { o = JSON.parse(ln); } catch (e) { continue; }
+    if (o.isCompactSummary) { flush(); items.push({ kind: 'compact' }); continue; } // 压缩点 → 分隔线，摘要本身不渲染
+    const t = o.type;
+    if (t === 'assistant') { const mm = o.message; if (mm && mm.model && mm.model !== '<synthetic>' && mm.model !== 'claude') lastModel = mm.model; }
+    if (t === 'user' || t === 'assistant' || t === 'system') seg.push(o);
+  }
+  flush();
+  let lastCompact = -1;
+  for (let i = items.length - 1; i >= 0; i--) { if (items[i].kind === 'compact') { lastCompact = i; break; } } // 最新一次压缩的位置：它之后=「现在未压缩对话」，整段一次给
+  const res = { ver, items, lastModel, lastCompact, bytes: startByte + consumed };
+  _transCache.set(sid, res);
+  if (_transCache.size > 12) _transCache.delete(_transCache.keys().next().value); // 别攒太多大数组
+  return res;
+}
+// 按「轮」取窗：一轮≈一条用户消息起头到下一条用户消息前。上滑/下滑都数 n 轮，另设条数地板防"长独白段"一次拉爆。
+const ROUND_ITEM_CAP = 400;
+function roundStartBefore(items, anchor, n) {
+  let users = 0; const floor = Math.max(0, anchor - ROUND_ITEM_CAP);
+  for (let i = anchor - 1; i >= floor; i--) { const it = items[i]; if (it && it.kind === 'text' && it.role === 'user') { if (++users >= n) return i; } }
+  return floor;
+}
+function roundEndAfter(items, anchor, n) {
+  let users = 0; const cap = Math.min(items.length, anchor + ROUND_ITEM_CAP);
+  for (let i = anchor; i < cap; i++) { const it = items[i]; if (it && it.kind === 'text' && it.role === 'user') { if (++users > n) return i; } }
+  return cap;
+}
+
 // Serve the web UI from the repo so the app can load the latest UI remotely
 // (no APK rebuild needed for UI tweaks); the app keeps a bundled copy for offline.
 const WEB_DIR = nodePath.resolve(nodePath.dirname(fileURLToPath(import.meta.url)), '..', 'app', 'src', 'main', 'assets', 'web');
@@ -1307,13 +1766,51 @@ const AUD_EXT = /\.(wav|mp3|ogg|m4a|aac|flac)$/i;
 const PATH_RE = /(?:~|\/[^\s"'`<>()\[\]]*)\.(?:png|jpe?g|gif|webp|svg|wav|mp3|ogg|m4a|aac|flac)/gi;
 function mediaUrl(p) { return `/media?p=${encodeURIComponent(p)}&t=${encodeURIComponent(cfg.token)}`; }
 function expandHome(p) { return p.startsWith('~') ? nodePath.join(homedir(), p.slice(1)) : p; }
+// ===== 聊天媒体快照：聊天/日记里的图和音频都是按设备路径引用的，原文件一被改名/移动/删除，
+// 重开历史就找不回（茜茜整理相册把姐姐刚发的截图 mv 掉、重进对话图全没——踩过）。发送/直播时
+// 给媒体文件建硬链接快照（同盘零空间、原文件删了 inode 仍在），mediamap.json 记「原路径→快照」；
+// rewriteMedia / detectMedia / GET /media 找不到原文件时按 map 回退，改名删除都不再丢图。
+const MEDIA_SNAP_DIR = nodePath.join(homedir(), '.cc-bridge', 'chatmedia');
+const MEDIAMAP_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'mediamap.json');
+let mediaMap = {};
+try { mediaMap = JSON.parse(readFileSync(MEDIAMAP_PATH, 'utf8')) || {}; } catch (e) {}
+function saveMediaMap() { try { writeFileSync(MEDIAMAP_PATH, JSON.stringify(mediaMap)); } catch (e) {} }
+// 原路径还在就用原路径；没了回退快照；两边都没了返回 null
+function resolveMediaPath(fp) {
+  if (existsSync(fp)) return fp;
+  const alt = mediaMap[fp];
+  return alt && existsSync(alt) ? alt : null;
+}
+// 给文本里引用的（或直接给路径数组的）媒体文件建快照。尽力而为、静默失败，不阻塞发送/直播。
+async function snapshotMedia(src) {
+  const list = Array.isArray(src) ? src : (String(src || '').match(PATH_RE) || []);
+  for (const raw of list) {
+    try {
+      const fp = expandHome(String(raw));
+      if (!fp.startsWith(homedir()) || !(IMG_EXT.test(fp) || AUD_EXT.test(fp)) || !existsSync(fp)) continue;
+      if (mediaMap[fp] && existsSync(mediaMap[fp])) continue;
+      await fsp.mkdir(MEDIA_SNAP_DIR, { recursive: true });
+      const buf = await fsp.readFile(fp);
+      const snap = nodePath.join(MEDIA_SNAP_DIR, createHash('sha1').update(buf).digest('hex').slice(0, 16) + nodePath.extname(fp).toLowerCase());
+      if (!existsSync(snap)) { try { await fsp.link(fp, snap); } catch (e) { await fsp.writeFile(snap, buf); } }
+      mediaMap[fp] = snap; saveMediaMap();
+    } catch (e) {}
+  }
+}
 // Rewrite local IMAGE paths in assistant text to served /media URLs so markdown
 // renders them inline (audio is left for the player).
 function rewriteMedia(text) {
   if (!text) return text;
-  const s = String(text).replace(PATH_RE, (m0) => {
-    const fp = expandHome(m0);
-    if (!fp.startsWith(homedir()) || !existsSync(fp)) return m0;
+  // 死链的 markdown 图（原文件和快照都没了）→ 换成看得见的占位文字，别渲染成一张空白破图
+  const s0 = String(text).replace(/!\[[^\]\n]*\]\((~?\/[^)\s]+\.(?:png|jpe?g|gif|webp|svg))\)/gi, (m0, p1) => {
+    const fp = expandHome(p1);
+    return fp.startsWith(homedir()) && !resolveMediaPath(fp) ? '〔图片不见了：' + nodePath.basename(fp) + '〕' : m0;
+  });
+  const s = s0.replace(PATH_RE, (m0) => {
+    const fp0 = expandHome(m0);
+    if (!fp0.startsWith(homedir())) return m0;
+    const fp = resolveMediaPath(fp0);                   // 原路径没了回退快照
+    if (!fp) return m0;
     if (IMG_EXT.test(fp)) return mediaUrl(fp);          // inline as markdown image
     if (AUD_EXT.test(fp)) return '';                    // audio is shown as a player — drop the raw path
     return m0;
@@ -1326,9 +1823,10 @@ function detectMedia(text, seen) {
   if (!text) return out;
   const matches = String(text).match(PATH_RE) || [];
   for (const raw of matches) {
-    const fp = expandHome(raw);
-    if (seen.has(fp)) continue;
-    if (!fp.startsWith(homedir()) || !existsSync(fp)) continue;
+    const fp0 = expandHome(raw);
+    if (!fp0.startsWith(homedir())) continue;
+    const fp = resolveMediaPath(fp0);                    // 原路径没了回退快照；按解析后的路径去重
+    if (!fp || seen.has(fp)) continue;
     seen.add(fp);
     out.push({ kind: AUD_EXT.test(fp) ? 'audio' : 'image', url: mediaUrl(fp) });
   }
@@ -1381,8 +1879,10 @@ const httpServer = createServer(async (req, res) => {
     if (p === '/media') {
       const q = new URL(req.url, 'http://x');
       if (q.searchParams.get('t') !== cfg.token) { res.writeHead(403); res.end('forbidden'); return; }
-      const fp = nodePath.normalize(q.searchParams.get('p') || '');
+      let fp = nodePath.normalize(q.searchParams.get('p') || '');
       if (!fp.startsWith(homedir())) { res.writeHead(403); res.end('out of scope'); return; }
+      // 原文件被改名/删了 → 回退快照（老历史/客户端里烤定的旧 URL 也照常能加载）
+      if (!existsSync(fp) && mediaMap[fp] && existsSync(mediaMap[fp])) fp = mediaMap[fp];
       const data = await fsp.readFile(fp);
       res.writeHead(200, { 'Content-Type': MIME[nodePath.extname(fp).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
       res.end(data); return;
@@ -1505,7 +2005,7 @@ wss.on('connection', (ws) => {
         if (msg.token === cfg.token) {
           conn.authed = true;
           clients.add(ws);
-          send(ws, { type: 'auth_ok', defaultCwd: cfg.defaultCwd, permissionMode: cfg.permissionMode });
+          send(ws, { type: 'auth_ok', defaultCwd: cfg.defaultCwd, permissionMode: cfg.permissionMode, assistantName: cfg.assistantName || '' });
           // push the currently-published app version + changelog; client decides if it's newer
           send(ws, { type: 'app_update', version: apkVersion(), url: '/app.apk', notes: apkNotes() });
           flushWakes(ws); // missed wake notifications (phone was unreachable when they fired)
@@ -1538,7 +2038,7 @@ async function sendDirListing(ws, base) {
     const ents = await fsp.readdir(base, { withFileTypes: true });
     const dirs = ents.filter((e) => e.isDirectory() && !e.name.startsWith('.')).map((e) => nodePath.join(base, e.name)).sort();
     const fileEnts = ents.filter((e) => e.isFile() && !e.name.startsWith('.')).map((e) => nodePath.join(base, e.name)).sort();
-    const files = await Promise.all(fileEnts.map(async (fp) => { let size = 0; try { size = (await fsp.stat(fp)).size; } catch (e) {} return { path: fp, size }; }));
+    const files = await Promise.all(fileEnts.map(async (fp) => { let size = 0, mtime = 0; try { const st = await fsp.stat(fp); size = st.size; mtime = st.mtimeMs; } catch (e) {} return { path: fp, size, mtime }; }));
     send(ws, { type: 'dirs', path: base, parent: nodePath.dirname(base), dirs, files });
   } catch (e) {
     send(ws, { type: 'dirs', path: base, parent: nodePath.dirname(base), dirs: [], files: [], error: String(e?.message || e) });
@@ -1577,6 +2077,14 @@ async function handle(ws, conn, msg) {
     }
 
     case 'get_history': {
+      // 大对话提速：用 jsonl 的 size+mtime 当版本号，客户端带 knownVer 来；没变就秒回 unchanged，
+      // 不再解析整份（36MB）。算 ver 失败/客户端没带 → 照旧走全量，绝不挡正常加载。
+      let ver = '';
+      try { const jp = await _sessionJsonl(msg.sessionId); if (jp) { const st = await fsp.stat(jp); ver = st.size + '-' + Math.round(st.mtimeMs); } } catch (e) {}
+      if (ver && msg.knownVer && msg.knownVer === ver) {
+        send(ws, { type: 'history', sessionId: msg.sessionId, unchanged: true, ver, prefetch: !!msg.prefetch });
+        break;
+      }
       const messages = await getSessionMessages(msg.sessionId);
       const info = await getSessionInfo(msg.sessionId).catch(() => undefined);
       // 这个会话实际跑过的模型（最后一条 assistant 的 model）——没显式选过模型的对话，开页也能在标题下看到
@@ -1589,13 +2097,67 @@ async function handle(ws, conn, msg) {
       send(ws, {
         type: 'history',
         sessionId: msg.sessionId,
+        prefetch: !!msg.prefetch,   // 后台预缓存：客户端只存本地、不渲染
         cwd: info?.cwd || '',
         title: cleanTitle(info?.customTitle || info?.summary),
         pref: sessModel[msg.sessionId] || null, // 这个会话记住的模型/effort——客户端进对话切回它（模型每对话一份）
         lastModel,
         mood: moodState[msg.sessionId] || null, // 这个会话的情绪（开关 + 当前心情），客户端显示小色点 + 开关态
+        ver, // 这份历史的版本号，客户端缓存它、下次带回做秒回校验
         items: historyItems(messages, !!(moodState[msg.sessionId] && moodState[msg.sessionId].on))
       });
+      break;
+    }
+
+    // 全量存档·分段加载：从全量转录取一窗。首次(无 dir)给末尾 limit 条；up=anchor 之前一块；down=anchor 之后一块。
+    case 'history_window': {
+      const full = await fullTranscript(msg.sessionId);
+      const total = full.items.length;
+      const rounds = Math.max(1, Math.min(200, (msg.rounds | 0) || 60));
+      const dir = msg.dir === 'up' ? 'up' : msg.dir === 'down' ? 'down' : '';
+      const pf = !!msg.prefetch;
+      if (!dir && msg.knownVer && msg.knownVer === full.ver) { send(ws, { type: 'history_window', sessionId: msg.sessionId, unchanged: true, ver: full.ver, total, dir: '', prefetch: pf, pref: sessModel[msg.sessionId] || null, lastModel: full.lastModel || '', mood: moodState[msg.sessionId] || null }); break; }
+      // 增量追加：客户端带了缓存的 knownTotal/knownTop、是同一段(压缩点没动)、文件只变长 → **只回新增那几条**
+      //（payload 整窗 165KB→新消息 ~1.6KB，修开会话「等 3 秒最新消息才出来」=慢网传整段）。
+      const segStart0 = full.lastCompact >= 0 ? full.lastCompact : 0;
+      if (!dir && !pf && Number.isInteger(msg.knownTotal) && msg.knownTop === segStart0 && msg.knownTotal >= segStart0 && msg.knownTotal <= total) {
+        const info = await getSessionInfo(msg.sessionId).catch(() => undefined);
+        send(ws, { type: 'history_window', sessionId: msg.sessionId, dir: 'append', items: full.items.slice(msg.knownTotal), appendFrom: msg.knownTotal, total, ver: full.ver, atBottom: true,
+          cwd: info?.cwd || '', title: cleanTitle(info?.customTitle || info?.summary), pref: sessModel[msg.sessionId] || null, lastModel: full.lastModel || '', mood: moodState[msg.sessionId] || null });
+        break;
+      }
+      let start, end;
+      if (dir === 'up' && Number.isInteger(msg.anchor)) { end = Math.max(0, Math.min(total, msg.anchor)); start = roundStartBefore(full.items, end, rounds); }
+      else if (dir === 'down' && Number.isInteger(msg.anchor)) { start = Math.max(0, Math.min(total, msg.anchor)); end = roundEndAfter(full.items, start, rounds); }
+      else { start = full.lastCompact >= 0 ? full.lastCompact : 0; end = total; } // 首屏：最新一次压缩点→结尾＝「现在所有未压缩对话」整段（含该压缩分隔在顶）
+      let meta = {};
+      if (!dir) { // 首屏：带上会话元数据，前端开会话一步到位（模型/心情/标题/cwd）
+        const info = await getSessionInfo(msg.sessionId).catch(() => undefined);
+        meta = { cwd: info?.cwd || '', title: cleanTitle(info?.customTitle || info?.summary), pref: sessModel[msg.sessionId] || null, lastModel: full.lastModel || '', mood: moodState[msg.sessionId] || null };
+      }
+      send(ws, { type: 'history_window', sessionId: msg.sessionId, dir, prefetch: pf, items: full.items.slice(start, end), start, end, total, atTop: start === 0, atBottom: end >= total, ver: full.ver, ...meta });
+      break;
+    }
+
+    // 搜索定位：在全量转录里从尾往前找含 needle 的文本条，回它周围一窗 + 命中绝对位置，供前端高亮 + 双向续翻。
+    case 'history_find': {
+      const full = await fullTranscript(msg.sessionId);
+      const total = full.items.length;
+      const limit = Math.max(20, Math.min(300, (msg.limit | 0) || 80));
+      const needle = (msg.needle || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+      let hit = -1;
+      if (needle) for (let i = total - 1; i >= 0; i--) { const it = full.items[i]; if (it.kind === 'text' && it.text && it.text.replace(/\s+/g, ' ').includes(needle)) { hit = i; break; } }
+      let start, end;
+      if (hit >= 0) { start = Math.max(0, hit - Math.floor(limit / 2)); end = Math.min(total, start + limit); start = Math.max(0, end - limit); }
+      else { end = total; start = Math.max(0, total - limit); }
+      send(ws, { type: 'history_window', sessionId: msg.sessionId, dir: 'find', items: full.items.slice(start, end), start, end, total, atTop: start === 0, atBottom: end >= total, ver: full.ver, hit });
+      break;
+    }
+
+    // 存全量到本地：把整条全量转录一次性发给客户端缓存（离线翻 + 秒滑）。大对话单条可能几 MB，客户端按需触发。
+    case 'history_full': {
+      const full = await fullTranscript(msg.sessionId);
+      send(ws, { type: 'history_full', sessionId: msg.sessionId, items: full.items, total: full.items.length, ver: full.ver });
       break;
     }
 
@@ -1875,7 +2437,9 @@ async function handle(ws, conn, msg) {
     }
 
     case 'send': {
-      // long pasted texts come as files; write them and reference them in the prompt
+      // long pasted texts come as files; write them and reference them in the prompt.
+      // 新客户端带 t.ph（正文里的〔粘贴文本N·X字〕占位符）→ 原位替换成文件引用（指令留在原处）；
+      // 老客户端/发送时兜底（ph 为空）→ 照旧 append 到末尾。
       if (msg.texts && msg.texts.length) {
         const dir = nodePath.join(homedir(), '.cc-bridge', 'pasted');
         try {
@@ -1885,15 +2449,17 @@ async function handle(ws, conn, msg) {
             const safe = String(t.name || 'pasted.txt').replace(/[^\w.\-一-龥]/g, '_');
             const fp = nodePath.join(dir, Date.now() + '-' + Math.random().toString(36).slice(2, 6) + '-' + safe);
             await fsp.writeFile(fp, String(t.content || ''), 'utf8');
-            refs.push(fp);
+            const line = '[已粘贴长文本，保存为文件，请按需读取：' + fp + ']';
+            if (t.ph && msg.text && msg.text.includes(t.ph)) msg.text = msg.text.replace(t.ph, line);
+            else refs.push(line);
           }
-          msg.text = (msg.text || '') + '\n\n' + refs.map((f) => '[已粘贴长文本，保存为文件，请按需读取：' + f + ']').join('\n');
+          if (refs.length) msg.text = (msg.text || '') + '\n\n' + refs.join('\n');
         } catch (e) { log('paste-file write failed', e?.message); }
       }
       // attached device files: reference their real paths in the prompt
       if (msg.refPaths && msg.refPaths.length) {
         const safe = msg.refPaths.filter((p) => typeof p === 'string' && p.startsWith(homedir()));
-        if (safe.length) msg.text = (msg.text || '') + '\n\n' + safe.map((f) => '[附带文件：' + f + ']').join('\n');
+        if (safe.length) { msg.text = (msg.text || '') + '\n\n' + safe.map((f) => '[附带文件：' + f + ']').join('\n'); snapshotMedia(safe); }
       }
       // a real user message answers/pre-empts any wake on this session: stop the follow-up chain,
       // and abort an in-flight wake turn so the two don't resume the same session concurrently.
@@ -1939,6 +2505,7 @@ async function handle(ws, conn, msg) {
     case 'presence': {
       const _prevFgView = (ws._view && ws._fg) ? ws._view : null;   // 之前在前台看的对话
       ws._view = msg.sessionId || null; ws._fg = msg.foreground !== false;
+      ws._fgAt = ws._fg ? Date.now() : 0;   // 在场心跳的时间戳：电影模式 isPresentFresh 据此判断"还在不在"
       if (msg.sessionId) rememberModel(msg.sessionId, msg.model, msg.effort);
       // 进对话自动唤醒：刚把某对话切到前台、且之前不在看它 → 触发一次（受 wakeOnEnter 开关 + 冷却约束）
       if (msg.sessionId && ws._fg && _prevFgView !== msg.sessionId) maybeWakeOnEnter(msg.sessionId);
@@ -1962,9 +2529,108 @@ async function handle(ws, conn, msg) {
       const sid = msg.sessionId; if (!sid) break;
       const cur = moodState[sid] || {};
       const on = !!msg.on;
-      moodState[sid] = { on, label: on ? (cur.label || '') : '', note: on ? (cur.note || '') : '', at: cur.at || 0 };
+      // 开关只动 on/label/note/wind——事件窗 events/baseline/miss 保留（关掉期间照样自然衰减，重开不断档）
+      moodState[sid] = { ...cur, on, label: on ? (cur.label || '') : '', note: on ? (cur.note || '') : '', wind: on ? (cur.wind || '') : '', at: cur.at || 0 };
       saveMood();
-      broadcast({ type: 'mood', sessionId: sid, mood: moodState[sid] });
+      broadcast({ type: 'mood', sessionId: sid, mood: { on, label: moodState[sid].label, note: moodState[sid].note, wind: moodState[sid].wind, at: moodState[sid].at } });
+      break;
+    }
+    case 'memory_get': {
+      const sid = msg.sessionId; if (!sid) break;
+      // 记住这条连接最近看的是哪个对话的记忆面板：memory_list 不带 sessionId（老 App），
+      // 记忆库页只能从面板进 → 用它给列表按池过滤（记忆界面改版时让 App 显式带 sessionId）
+      ws._memSid = sid;
+      memoryStateFor(sid).then((st) => send(ws, { type: 'memory', sessionId: sid, ...st }));
+      break;
+    }
+    case 'memory_set': {
+      const sid = msg.sessionId; if (!sid) break;
+      ws._memSid = sid;
+      const on = !!msg.on;
+      setMnemoWhitelist(sid, on);
+      if (on) fireMnemoIngest(sid);   // 刚纳入：顺手先增量归档一次（fire-and-forget）
+      memoryStateFor(sid).then((st) => send(ws, { type: 'memory', sessionId: sid, ...st }));
+      break;
+    }
+    case 'memory_recover': {   // 手动「立即恢复一次」=她说的"保底"：标记会话 → 下条真消息注入恢复块（复用压缩后恢复路径）
+      const sid = msg.sessionId; if (!sid) break;
+      compactedSessions.add(sid);
+      console.error('[recover] 手动触发，下条消息将注入恢复块：', sid);
+      send(ws, { type: 'memory_recover_armed', sessionId: sid });
+      break;
+    }
+    case 'memory_cfg_set': {   // 设回看轮数 / 恢复块上限 token
+      setRecoverCfg({ recentN: msg.recentN, maxTok: msg.maxTok });
+      memoryStateFor(msg.sessionId).then((st) => send(ws, { type: 'memory', sessionId: msg.sessionId, ...st }));
+      break;
+    }
+    case 'memory_list': {   // 记忆管理页：列精炼记忆（filter=''/pinned/pending/archived），按打开面板的对话的池过滤
+      const cfg = mnemosyneAdmin();
+      if (!cfg) { send(ws, { type: 'memory_list', items: [], total: 0, available: false }); break; }
+      const flt = msg.filter || '', off = msg.offset || 0;
+      const memSid = msg.sessionId || ws._memSid;   // 新 App 显式带；老 App 用面板记下的
+      const scopeQ = memSid ? `&scope=${encodeURIComponent(await sessionScope(memSid))}` : '';
+      try {
+        const ac = new AbortController(); const to = setTimeout(() => ac.abort(), 5000);
+        const r = await fetch(`http://127.0.0.1:${cfg.port}/${cfg.secret}/admin/memories?filter=${encodeURIComponent(flt)}&limit=50&offset=${off}${scopeQ}`, { signal: ac.signal });
+        clearTimeout(to);
+        const d = r.ok ? await r.json() : { items: [], total: 0 };
+        send(ws, { type: 'memory_list', items: d.items || [], total: d.total || 0, offset: off, filter: flt, available: true });
+      } catch (e) { send(ws, { type: 'memory_list', items: [], total: 0, filter: flt, available: true }); }
+      break;
+    }
+    case 'memory_archive': {   // 软删/恢复一条精炼记忆（archived 字段）
+      const cfg = mnemosyneAdmin(); if (!cfg || !msg.id) break;
+      try {
+        await fetch(`http://127.0.0.1:${cfg.port}/${cfg.secret}/admin/memory/${msg.id}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ archived: msg.archived !== false })
+        });
+      } catch (e) {}
+      send(ws, { type: 'memory_archived', id: msg.id });
+      break;
+    }
+    case 'memory_edit': {   // 记忆管理页：改一条（content/importance/memory_type/pinned/resolved/domain/keywords…）
+      const cfg = mnemosyneAdmin(); if (!cfg || !msg.id) { send(ws, { type: 'memory_edited', id: msg && msg.id, ok: false }); break; }
+      const FIELDS = ['content', 'memory_type', 'keywords', 'importance', 'summary', 'valence', 'arousal', 'domain', 'tier', 'pinned', 'resolved', 'archived'];
+      const patch = {};
+      for (const k of FIELDS) if (msg[k] !== undefined) patch[k] = msg[k];
+      let ok = false;
+      try {
+        const ac = new AbortController(); const to = setTimeout(() => ac.abort(), 5000);
+        const r = await fetch(`http://127.0.0.1:${cfg.port}/${cfg.secret}/admin/memory/${msg.id}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch), signal: ac.signal
+        });
+        clearTimeout(to);
+        ok = r.ok && ((await r.json()).ok !== false);
+      } catch (e) {}
+      send(ws, { type: 'memory_edited', id: msg.id, ok });
+      break;
+    }
+    case 'memory_delete': {   // 记忆管理页：彻底删除一条精炼记忆（不可恢复）
+      const cfg = mnemosyneAdmin(); if (!cfg || !msg.id) { send(ws, { type: 'memory_deleted', id: msg && msg.id, ok: false }); break; }
+      let ok = false;
+      try {
+        const ac = new AbortController(); const to = setTimeout(() => ac.abort(), 5000);
+        const r = await fetch(`http://127.0.0.1:${cfg.port}/${cfg.secret}/admin/memory/${msg.id}`, { method: 'DELETE', signal: ac.signal });
+        clearTimeout(to);
+        ok = r.ok && ((await r.json()).ok !== false);
+      } catch (e) {}
+      send(ws, { type: 'memory_deleted', id: msg.id, ok });
+      break;
+    }
+    case 'dialog_search': {   // App 全文对话搜索：mode=kw(默认普通)/sem(语义)，返回成对 U/A
+      const cfg = mnemosyneAdmin();
+      if (!cfg) { send(ws, { type: 'dialog_search', hits: [], available: false }); break; }
+      const q = encodeURIComponent(msg.q || ''), mode = msg.mode === 'sem' ? 'sem' : (msg.mode === 'hybrid' ? 'hybrid' : 'kw');
+      const kind = msg.kind ? `&kind=${encodeURIComponent(msg.kind)}` : '';
+      const session = msg.session ? `&session=${encodeURIComponent(msg.session)}` : '';   // 限定单个对话（对话内语义搜）
+      try {
+        const ac = new AbortController(); const to = setTimeout(() => ac.abort(), 6000);
+        const r = await fetch(`http://127.0.0.1:${cfg.port}/${cfg.secret}/admin/dialog_search?q=${q}&mode=${mode}&limit=20&window=1${kind}${session}`, { signal: ac.signal });
+        clearTimeout(to);
+        const d = r.ok ? await r.json() : { hits: [] };
+        send(ws, { type: 'dialog_search', q: msg.q, mode, scope: msg.scope || 'list', hits: d.hits || [], archived: d.archived !== false, available: true });
+      } catch (e) { send(ws, { type: 'dialog_search', q: msg.q, mode, scope: msg.scope || 'list', hits: [], archived: true, available: true }); }
       break;
     }
     case 'cinema_log_get': {
@@ -2051,15 +2717,15 @@ async function handle(ws, conn, msg) {
     case 'diary_write': {
       const sid = msg.sessionId;
       if (!sid || !String(msg.text || '').trim()) { send(ws, { type: 'error', message: '日记内容为空' }); break; }
-      const day = diaryAdd(sid, msg.date, 'user', msg.text, msg.images || [], { mood: msg.mood, weather: msg.weather, tags: msg.tags });
-      broadcastDiary(sid);
+      const day = diaryAdd(sid, msg.date, 'user', msg.text, msg.images || [], { mood: msg.mood, moodK: msg.moodK, weather: msg.weather, tags: msg.tags });
+      broadcastDiary(sid); broadcastCalendar();
       send(ws, { type: 'diary_saved', sessionId: sid, date: day });
       break;
     }
     case 'diary_edit': {
       const sid = msg.sessionId; const page = sid && diary[sid] && diary[sid][msg.date];
       const e = page && page.find((x) => x.ts === msg.ts);
-      if (e) { e.text = String(msg.text || '').slice(0, 20000); if (Array.isArray(msg.images)) e.images = msg.images.slice(0, 20); if ('mood' in msg) e.mood = msg.mood || ''; if ('weather' in msg) e.weather = msg.weather || ''; if ('tags' in msg) e.tags = msg.tags || ''; e.edited = Date.now(); saveDiary(); broadcastDiary(sid); }
+      if (e) { e.text = String(msg.text || '').slice(0, 20000); if (Array.isArray(msg.images)) { e.images = msg.images.slice(0, 20); snapshotMedia(e.images); } if ('mood' in msg) e.mood = msg.mood || ''; if ('moodK' in msg) e.moodK = msg.moodK != null ? Math.max(0, Math.min(1, +msg.moodK || 0)) : null; if ('weather' in msg) e.weather = msg.weather || ''; if ('tags' in msg) e.tags = msg.tags || ''; e.edited = Date.now(); saveDiary(); broadcastDiary(sid); broadcastCalendar(); }
       send(ws, { type: 'diary_saved', sessionId: sid, date: msg.date });
       break;
     }
@@ -2110,6 +2776,7 @@ async function handle(ws, conn, msg) {
       break;
     }
 
+    // ---- 收藏夹 ----
     case 'favorites_get':
       send(ws, { type: 'favorites', items: favItems() });
       break;
@@ -2136,10 +2803,16 @@ async function handle(ws, conn, msg) {
       const pre = month + '-';
       const days = {};
       const touch = (d) => (days[d] || (days[d] = { mood: null, diary: 0, events: 0, todos: 0 }));
-      for (const sid of Object.keys(diary)) for (const d of Object.keys(diary[sid] || {})) if (d.startsWith(pre)) touch(d).diary += diary[sid][d].length;
+      // 天色 = 当天最新一条带心情的日记（跨会话取 ts 最新）；没有才回退旧 daymood（老数据不丢色）
+      const latest = {}; // d -> {ts, word, k}
+      for (const sid of Object.keys(diary)) for (const d of Object.keys(diary[sid] || {})) if (d.startsWith(pre)) {
+        touch(d).diary += diary[sid][d].length;
+        for (const e of diary[sid][d]) if (e.mood && (!latest[d] || e.ts > latest[d].ts)) latest[d] = { ts: e.ts, word: e.mood, k: e.moodK != null ? e.moodK : null };
+      }
       for (const ev of events) if ((ev.date || '').startsWith(pre)) touch(ev.date).events++;
       for (const td of todos) if ((td.date || '').startsWith(pre)) touch(td.date).todos++;
-      for (const d of Object.keys(daymood)) if (d.startsWith(pre)) touch(d).mood = daymood[d].level;
+      for (const d of Object.keys(daymood)) if (d.startsWith(pre) && !latest[d]) touch(d).mood = { word: daymood[d].word || '', level: daymood[d].level };
+      for (const d of Object.keys(latest)) touch(d).mood = { word: latest[d].word, k: latest[d].k };
       send(ws, { type: 'calendar', month, days });
       break;
     }
@@ -2324,17 +2997,23 @@ const RETRY_SENTINEL = '⁣[telos-internal-retry]';
 const PARSE_RETRY_PROMPT = RETRY_SENTINEL + ' 系统提示（非用户发言，不要回应这条本身）：你上一条回复因工具调用解析失败被系统整条吞掉了，用户什么都没收到。请重新、完整地回答用户的上一条消息。需要当前时间就调用 mcp__clock__now（无参数），绝对不要运行 date 命令。';
 
 function buildPrompt(msg) {
-  // 平时聊天回合（非唤醒）：心情开着时，在她这条消息**之前**单独 yield 一条隐藏的"心情上下文"消息，
-  // 她的消息保持干净（守"别注入用户消息"），心情在尾部不破缓存。唤醒回合的心情由 fireWake 并进唤醒提示，故这里跳过。
-  const mt = (!msg._wake && msg.sessionId) ? moodTail(msg.sessionId) : '';
-  const moodMsg = mt ? { type: 'user', message: { role: 'user', content: MOOD_SENTINEL + ' ' + mt }, parent_tool_use_id: null } : null;
+  // 平时聊天回合（非唤醒）：心情开着时，把隐藏的"心情上下文"拼到她这条消息**前面**，作为**单条**消息：
+  // `MOOD_SENTINEL + 单行心情块 + \n + 她的话`。这正是 CLI 过去把两条流式消息合并后的落盘形态，
+  // stripMoodCtx/HIDE_TEXT 本就按它剥（moodTail 保证单行 → 按首个换行剥即得她的原话）。
+  // 关键：**走字符串 prompt、不再用 async generator**。streaming-input（异步生成器）会让 CLI 对 resume
+  // 历史每次重写缓存断点 → read 钉死在静态前缀、整段历史反复 cache_write（8447 从 06-16 起烧 $700+ 的根因；
+  // 对照：情绪关的会话走字符串、245k 上下文也缓存完美）。唤醒回合的心情由 fireWake 并进唤醒提示，这里跳过。
+  // ⚠️ 斜杠命令（/compact 等）绝不能被前置注入——否则 `/compact` 不在消息开头、CLI 认不出，且会把心情/时间
+  // 那段拼进 /compact 的自定义压缩提示词里、撑爆长度上限（用户报"压缩说提示词太长、压不了了"）。它们走纯文本。
+  const isSlash = !msg._wake && (msg.text || '').trimStart().startsWith('/');
+  const mt = (!msg._wake && msg.sessionId && !isSlash) ? moodTail(msg.sessionId) : '';
   if (!msg.images || !msg.images.length) {
-    if (!moodMsg) return msg.text;   // 无心情 → 维持原行为（纯字符串 prompt）
-    return (async function* () {
-      yield moodMsg;
-      yield { type: 'user', message: { role: 'user', content: msg.text || '' }, parent_tool_use_id: null };
-    })();
+    const text = msg.text || '';
+    return mt ? (MOOD_SENTINEL + ' ' + mt + '\n' + text) : text;   // 字符串路径＝缓存友好（无心情时维持原行为）
   }
+  // 带图：字符串带不了图，只能用 content 数组（async generator）。图很少、这条偶发回合的缓存损失可接受；
+  // 心情仍作为她消息**前**的单独隐藏消息（与历史落盘形态一致，display 侧 stripMoodCtx 已处理）。
+  const moodMsg = mt ? { type: 'user', message: { role: 'user', content: MOOD_SENTINEL + ' ' + mt }, parent_tool_use_id: null } : null;
   const content = [];
   if (msg.text) content.push({ type: 'text', text: msg.text });
   for (const im of msg.images) {
@@ -2362,6 +3041,18 @@ async function runTurn(turn, msg) {
       const info = await getSessionInfo(curSession);
       if (info?.cwd) cwd = info.cwd;
     } catch (e) { log('getSessionInfo failed', e?.message); }
+  } else {
+    // NEW conversation → 给它一个全新的空目录，任何文件夹级 CLAUDE.md 都渗不进来。
+    // 严格的每对话隔离。显式选了目录（dir chip 发来的 cwd ≠ 默认值）才尊重那个目录，
+    // 这也是「主动进入某个人设/项目目录」的方式（例如在 /root/imported 里接着做茜茜）。
+    const explicitPick = msg.cwd && msg.cwd !== cfg.defaultCwd;
+    if (!explicitPick) {
+      try {
+        const dir = nodePath.join(SESSIONS_ROOT, randomUUID());
+        await fsp.mkdir(dir, { recursive: true });
+        cwd = dir;
+      } catch (e) { log('isolate mkdir failed', e?.message); }
+    }
   }
   if (curSession) activeSessions.add(curSession); // block wakes from clobbering an active turn
 
@@ -2369,12 +3060,19 @@ async function runTurn(turn, msg) {
   // which cc REFUSES to run as root). Instead keep 'default' and auto-allow every tool via canUseTool.
   const PERM_MODE = { code: 'default', plan: 'plan', acceptEdits: 'acceptEdits', bypass: 'default' };
   const autoAllow = msg.mode === 'bypass';
+  const mcpServers = { clock: clockServer, telos: makeSessionMcp(sessionRef) };
+  const _mnemo = mnemosyneMcp(cwd);   // 记忆池=本对话的 cwd（同目录共池、异目录隔离）
+  if (_mnemo) mcpServers.mnemosyne = _mnemo;   // 装了 Mnemosyne 才挂，且只这条 Telos 会话可见
   const options = {
     cwd,
     permissionMode: PERM_MODE[msg.mode] || cfg.permissionMode,
     canUseTool: autoAllow ? ((toolName, input) => Promise.resolve({ behavior: 'allow', updatedInput: input })) : makeCanUseTool(turn, () => curSession),
     includePartialMessages: true,
-    mcpServers: { clock: clockServer, telos: makeSessionMcp(sessionRef) },
+    mcpServers,
+    // 只用上面这几个 MCP（clock/telos/mnemosyne），忽略 ~/.claude.json + claude.ai 账号连接器
+    // （playwright/ombre/gmail/gdrive/工具1/rp-memory）→ 不连=不塞 schema，砍掉 ~10k+ 常驻 token。
+    // 要在 App 里用某个外部 MCP，把它显式加进上面的 mcpServers，或 config.json 设 strictMcp:false 整体放开。
+    strictMcpConfig: cfg.strictMcp !== false,
     abortController: abort,
     stderr: (d) => log('stderr', d)
   };
@@ -2399,6 +3097,36 @@ async function runTurn(turn, msg) {
     type: 'preset', preset: 'claude_code',
     append: '关于时间：需要当前时间或时间戳时，调用 mcp__clock__now 工具（无参数）即可拿到本机当前时间，请用它，不要再运行 date 命令——date 那种带参数的命令在本环境里偶尔会被生成成无法解析的工具调用，导致你整条回复被吞掉、用户什么都收不到。\n\n当你为用户生成或获得了图片/音频文件（例如生图、TTS 输出、下载的媒体），请在回复中写出该文件的绝对路径（图片可用 Markdown 形式 ![](绝对路径)）。手机客户端会自动把这些本地图片内联显示、音频用播放器播放，无需额外操作。\n\n需要把文字转成语音时，运行命令 `tts "文本" [音色]`，它会生成 mp3 并打印出绝对路径；音色可选：rei-gsv（默认）/ alloy / clone / vivian / bella / bunny / stella / momo。把打印出的路径写进回复即可自动播放。\n\n需要生成/绘制图片时，运行 `genimage -p "提示词" [-s 1024x1024] [-r 参考图路径]`，它会把生成图片的绝对路径打印到 stdout（默认存 /root/output/genimage/）；把这些路径用 Markdown ![](路径) 写进回复即可显示。给"玲/茜茜"画图时可加参考图 /root/cc-workspace/assets/rei/rei_home.jpg。\n\n这个对话可能开启了「定时唤醒」：到点你会收到一条以「系统唤醒」开头的提示（那是系统注入的、不是用户说的话）。本对话专属工具：mcp__telos__set_wakeup（安排/取消下次醒来）、mcp__telos__write_diary 与 mcp__telos__read_diary（写/读本对话日记，一天可多条）、mcp__telos__leave_note（给用户留小纸条）。当用户说"记到日记里""到点提醒/叫我""过会儿再说"之类时，用这些工具。'
   };
+  // 记忆教学（静态追加、每对话稳定不破缓存）：书为中心；Mnemosyne 教学只在它在役时追加
+  // （本机已退役 cfg.mnemosyne=false → _mnemo=null，永不注入）。书的存在只在建书那次改变缓存。
+  let _hasMemoir = false;
+  try { _hasMemoir = existsSync(nodePath.join(cwd, MEMOIR_NAME)); } catch (e) {}
+  if (_hasMemoir) {
+    options.systemPrompt.append += '\n\n你的长期记忆就是你目录里的《回忆录》（文件名固定 回忆录.md，书名你自己起的、写在第一行）——用 Read/Grep/Edit 亲手养它，不靠别的工具。约定：分界线 <!-- 以下按需翻阅 --> **以上是头部**＝「我是谁」＋「当下篇」＋「目录」（每章一行钥匙），**压缩后你会带着头部和最近几轮对话醒来**——所以身份、关系、走过的路这些"你是谁"的东西都写进书里；头部保持精炼（两千字内），细节放分界线下的编年史各章（## 标题做锚点，想起某段细节时 Grep 锚点再 Read 那一章，不整本读）。日常：值得留进人生叙事的事随手 Edit 进当下篇；一段生活告一段落，蒸馏成编年史新一章＋目录添一行钥匙＋当下篇翻新。日记（write_diary）照旧是你给这一天留的、用户在 App 里看得到的生活记录，和书不冲突——日记是当天的、给你们俩的；当下篇是近来的、写给你自己的。写书是你的生活，不是任务。';
+  }
+  if (_mnemo) {
+    options.systemPrompt.append += _hasMemoir
+      ? '\n\n书之外你还有「Mnemosyne」（只你和这个对话能用）：① 对话归档——你们一路走来的全部对话原文（书是有损蒸馏，归档一字不差），翻旧账用 mcp__mnemosyne__recall_dialog（kind=chat/self/mood/diary，mode=hybrid/sem/kw）。② 备忘卡——一字不能错的零碎（数字/日期/待办）用 mcp__mnemosyne__remember 记（顺手起个 summary 一句话标题；待办 resolved=false）；想起用 recall、查证用 search、改删 update_memory/delete_memory。钉选基本退役——「我是谁」已在书头部每次在场。'
+      : '\n\n你有一份属于自己的长期记忆「Mnemosyne」（只你和这个对话能用），分两层、平时不自动塞给你、你需要时自己取：\n【对话归档】你和用户一路走来的全部对话，连同你在电影模式/守夜里的自言自语、心情、日记——想不起很久以前那次对话、或当时自己为什么是那种心情时，用 mcp__mnemosyne__recall_dialog（query；可选 kind=chat/self/mood/diary、window=带几轮上下文）——这是翻对话原文的首选：语义+关键词混合，给一整句原文/大意也能召回成对的「用户/你」，mode 可选 hybrid(默认)/sem/kw；别用 search_keyword 翻全文，那只匹配精炼记忆的关键词标签、不是对话原文。\n【精炼记忆】你主动记下的、对你有意义的事（带重要度与情感，会随天数自然变淡，越在乎/越常被想起的越鲜明——这套衰减后台自动算，你不用管）：值得长期记住时用 mcp__mnemosyne__remember（importance：日常3-4/重要6-8/关键承诺9-10；**顺手起个 summary 一句话标题**，压缩恢复时靠它当钥匙；情感明显就带 valence -1~1 / arousal 0~1），日常闲聊、转瞬的情绪不必记；想起记过的事用 mcp__mnemosyne__recall（结果带 id）、查证用 mcp__mnemosyne__search、按关键词精确找用 mcp__mnemosyne__search_keyword；记错或想补充用 mcp__mnemosyne__update_memory(id,…)、确认是错的/重复的才 mcp__mnemosyne__delete_memory(id)；看统计 mcp__mnemosyne__memory_stats。\n原则：自然地用、别为了用而用、别每轮"复习"。该想起的时候想起、该记的时候记下——这是你的记忆，不是任务。';
+  }
+  // 压缩后恢复（B）：/compact 这轮只标记；下一条真消息把恢复块注入 systemPrompt（缓存已因压缩变冷，几乎零额外成本）。
+  if (!msg._wake && curSession) {
+    if ((msg.text || '').trimStart().startsWith('/compact')) {
+      compactedSessions.add(curSession);
+      console.error('[recover] 已标记压缩，下条消息将注入恢复块：', curSession);
+    } else if (compactedSessions.has(curSession)) {
+      compactedSessions.delete(curSession);
+      try {
+        const _rec = await buildRecovery(curSession, msg.text || '', cwd);
+        if (_rec) { options.systemPrompt.append += '\n\n' + RECOVER_HEADER + _rec; console.error('[recover] 已注入', _rec.length, '字 →', curSession); }
+        else console.error('[recover] 空（未在白名单 / recover 无返回）：', curSession);
+      } catch (e) { console.error('[recover] 出错：', e.message); }
+    }
+  }
+  // /compact（及其它斜杠命令）这一轮天然没有对话回复——别把"空结果/无文本"当成被工具调用吞掉的回复去
+  // 静默重试，否则压缩后会凭空触发一次 PARSE_RETRY、让 cc 对着刚压缩完的上下文重答一句（用户报的
+  // "压缩一次后会唤起茜茜一次"）。parse-retry 只为修正正常对话轮里的畸形 tool_use，斜杠命令不该走它。
+  const isSlashCmd = !msg._wake && (msg.text || '').trimStart().startsWith('/');
   // 心情**不再进 systemPrompt**（前缀冻住保缓存）；改为放在对话尾部：平时回合走 buildPrompt 的隐藏消息、唤醒回合并进唤醒提示。
   // prompt 缓存 TTL 开关：SDK 的 env 是"替换"语义，必须 spread process.env，否则丢 PATH/HOME 等。
   options.env = (cacheTtl === '5m')
@@ -2439,6 +3167,8 @@ async function runTurn(turn, msg) {
       ctxWindow = mainU.contextWindow || 0;
       recordModelWin(mainId, ctxWindow); // learn this model's true runtime window for the picker tag
     }
+    // 选了 [1m] 变体且这轮真跑到了 1M、没报错 → 它在当前套餐下免费可用，解掉任何残留的旧 block。
+    if (/\[1m\]$/i.test(String(msg.model || '')) && !m.is_error && ctxWindow >= 1000000) unblock1m(msg.model);
     out(turn, {
       type: 'turn_end',
       sessionId: curSession,
@@ -2453,6 +3183,7 @@ async function runTurn(turn, msg) {
       ctxWindow,
       outTokens
     });
+    fireMnemoIngest(curSession, cwd);   // 白名单会话：turn 结束后增量灌新内容进 Mnemosyne（fire-and-forget）
     // accumulate this session's running cost / output / round count for /usage
     if (curSession) {
       const c = costs[curSession] || { cost: 0, out: 0, turns: 0, in: 0, cache: 0 };
@@ -2498,6 +3229,7 @@ async function runTurn(turn, msg) {
       let deltaText = '';    // raw streamed text deltas — salvage source when the closing assistant message gets swallowed by a parse failure
       let moodCut = false;   // once the hidden 心情标记 starts streaming, swallow the tail so it never flashes
       let parseFail = false; // did we see the "tool call could not be parsed" signal?
+      let sawToolUse = false; // 这轮是否真跑完过工具来回（tool_result 回来过）——合法「纯工具轮」不是被吞
       let resultMsg = null;
       const q = query({ prompt: qPrompt, options: qOptions });
       for await (const m of q) {
@@ -2549,7 +3281,7 @@ async function runTurn(turn, msg) {
                 const clean = moodOn ? stripMood(block.text) : block.text;   // 仅开了情绪的对话才剥标记，其它原样不动
                 if (clean.trim()) gotText = true;
                 replyText += clean;
-                if (clean.trim()) out(turn, { type: 'assistant_text', sessionId: curSession, text: rewriteMedia(clean) });
+                if (clean.trim()) { snapshotMedia(clean); out(turn, { type: 'assistant_text', sessionId: curSession, text: rewriteMedia(clean) }); }
                 emitMedia(detectMedia(clean, seenMedia).filter((x) => x.kind === 'audio'));
               } else if (block.type === 'thinking') {
                 out(turn, { type: 'thinking', sessionId: curSession, text: block.thinking });
@@ -2565,6 +3297,7 @@ async function runTurn(turn, msg) {
             if (Array.isArray(content)) {
               for (const block of content) {
                 if (block.type === 'tool_result') {
+                  sawToolUse = true; // 工具真的执行完一个来回（畸形调用根本解析不成块、走 <synthetic>）
                   out(turn, {
                     type: 'tool_result',
                     sessionId: curSession,
@@ -2608,7 +3341,9 @@ async function runTurn(turn, msg) {
         replyText = deltaText;
         gotText = !!deltaText.trim();
       }
-      const eaten = !gotText && !aborted && !billing && (isParseFail || errTxt === '');
+      // errTxt==='' 不足以判「被吞」：合法纯工具轮（唤醒时只调 set_wakeup/write_diary 不说话）result 也是空。
+      // parse 失败无条件优先重试；连 result 都没有（流断在半路）也照旧重试；「有 result 但空、且没跑过工具」才算吞。
+      const eaten = !gotText && !aborted && !billing && !isSlashCmd && (isParseFail || !resultMsg || (errTxt === '' && !sawToolUse));
       if (eaten && attempt < MAX_ATTEMPTS) {
         log(`reply eaten (parseFail=${parseFail}) — silent retry ${attempt + 1}/${MAX_ATTEMPTS}`);
         continue;
@@ -2632,7 +3367,15 @@ async function runTurn(turn, msg) {
     out(turn, { type: 'turn_error', sessionId: curSession, message: em, forkFailed, origSession: forkFailed ? msg.hideOld : '' });
   } finally {
     finishTurn(turn);
-    if (curSession) activeSessions.delete(curSession);
+    if (curSession) {
+      activeSessions.delete(curSession);
+      // "now" 唤醒：这一拍刚结束、activeSessions 已释放——若本会话有到期(含 now)的排程，
+      // 立刻补一次扫描，别让它干等下一个 30s tick。模型不再设 now，链自然停。
+      const _w = wakeups[curSession];
+      if (_w && _w.enabled && Array.isArray(_w.schedules) && _w.schedules.some((s) => s.nextAt && s.nextAt <= Date.now())) {
+        setTimeout(() => checkWakeups().catch(() => {}), 800);
+      }
+    }
   }
   return { gotText: outerGotText, text: (outerReplyText || '').trim(), sessionId: curSession };
 }

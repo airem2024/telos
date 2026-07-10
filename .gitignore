@@ -45,3 +45,9 @@ server/apk_notes.txt
 
 # signing key — never in the public repo; CI restores from secret SIGNING_KEYSTORE_B64
 *.keystore
+server/modelcache.json
+server/mood.json
+server/cachettl.json
+server/mediamap.json
+server/recover.json
+server/folders.json

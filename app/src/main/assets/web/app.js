@@ -17,7 +17,7 @@ let APP_VERSION = '1.1.1';
 try { if (window.Android && Android.appVersion) APP_VERSION = Android.appVersion() || APP_VERSION; } catch (e) {}
 const PREF_DEFAULTS = {
   fontSize: 1, fontFamily: 'client', showModel: true, showTokens: true,
-  interruptOnLeave: false, autoScroll: true, pasteAsFile: true, pasteThreshold: 1200, timezone: '',
+  interruptOnLeave: false, autoScroll: true, pasteAsFile: true, pasteThreshold: 800, timezone: '',
   haptics: true, genHaptic: false, updateNotify: true, showStatusBar: true, discFx: true, discBlink: false,
   autoCleanup: true, wakePush: true, compactPrompt: '',
   theme: 'gray', accent: 'slate', foldersCollapsed: false, autoOpenLast: false
@@ -1533,6 +1533,11 @@ function updateExpandBtn() {
 function openCompose() { $('composeText').value = $('composer').value; $('composeOver').classList.add('show'); setTimeout(() => $('composeText').focus(), 60); }
 function closeCompose(save) {
   if (save) { $('composer').value = $('composeText').value; resizeComposer(); updateSend(); }
+  // 写作页里粘的长文被取消 → 占位符没落回输入框，把对应的孤儿附件一并清掉（老路径无 ph 的不动）
+  if (!save && state.pendingTexts.some((p) => p.ph && !$('composer').value.includes(p.ph))) {
+    state.pendingTexts = state.pendingTexts.filter((p) => !p.ph || $('composer').value.includes(p.ph));
+    renderAttachStrip(); updateSend();
+  }
   $('composeOver').classList.remove('show');
   if (save) setTimeout(() => $('composer').focus(), 60);
 }
@@ -3549,26 +3554,33 @@ function sendMessage() {
       let n = at.userMsgEl.nextSibling; while (n) { const nx = n.nextSibling; n.remove(); n = nx; }
       at.userMsgEl.remove();
       const c = $('composer'); if (at.draft) { c.value = at.draft; resizeComposer(); c.focus(); }
+      if (at.pendTexts && at.pendTexts.length) { state.pendingTexts = at.pendTexts; renderAttachStrip(); }
       at.rolledBack = true; at.done = true; buzz(12);
     }
     state.busy = false; updateSend();
     return;
   }
   if (state.pendingFiles.some((f) => f.status === 'uploading')) { toast('还有文件在上传…'); return; }
-  const c = $('composer'); const text = c.value.trim();
+  const c = $('composer'); let text = c.value.trim();
+  const origText = text;
   const files = state.pendingFiles.filter((f) => f.status === 'ready' && f.path);
   const texts = state.pendingTexts.slice();
   if ((!text && !files.length && !texts.length) || !state.authed) return;
+  // 发送时兜底：输入法剪贴板/手打的长文不触发粘贴事件 → 正文（不含占位符）仍超阈值就整条转文件
+  if (P('pasteAsFile')) {
+    const bare = texts.reduce((s, t) => (t.ph ? s.replace(t.ph, '') : s), text);
+    if (bare.length > P('pasteThreshold')) { texts.push({ name: '长文-' + (texts.length + 1) + '.txt', content: text, ph: '' }); text = ''; }
+  }
   closePlus(); removeSuggestions();
   const thumbs = files.filter((f) => f.isImage && f.url).map((f) => ({ url: f.url }));
   const fileNotes = files.filter((f) => !(f.isImage && f.url)).map((f) => '📎 ' + f.name)
-    .concat(texts.map((t) => '📄 ' + t.name));
-  const userShown = text + (fileNotes.length ? (text ? '\n\n' : '') + fileNotes.join('\n') : '');
+    .concat(texts.filter((t) => !t.ph).map((t) => '📄 ' + t.name));
+  const userShown = origText + (fileNotes.length ? (origText ? '\n\n' : '') + fileNotes.join('\n') : '');
   const ub = addUser(userShown, null, thumbs);
-  state.activeTurn = { id: genId(), lastI: 0, done: false, spoke: false, userMsgEl: ub ? ub.parentElement : null, draft: text };
+  state.activeTurn = { id: genId(), lastI: 0, done: false, spoke: false, userMsgEl: ub ? ub.parentElement : null, draft: origText, pendTexts: state.pendingTexts.slice() };
   const msg = { type: 'send', text, mode: state.mode, turnId: state.activeTurn.id };
   if (files.length) msg.refPaths = files.map((f) => f.path);
-  if (texts.length) msg.texts = texts.map((t) => ({ name: t.name, content: t.content }));
+  if (texts.length) msg.texts = texts.map((t) => ({ name: t.name, content: t.content, ph: t.ph || '' }));
   if (state.currentSession) msg.sessionId = state.currentSession; else if (state.cwd) msg.cwd = state.cwd;
   if (state.model) msg.model = state.model;
   if (state.effort) msg.effort = state.effort;
@@ -3599,7 +3611,10 @@ function renderAttachStrip() {
     t.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
     const nm = el('span', 'atfile-n'); nm.textContent = p.name + ' · ' + p.content.length + '字'; t.appendChild(nm);
     const x = el('button', 'athumb-x'); x.textContent = '×';
-    x.addEventListener('click', () => { state.pendingTexts.splice(i, 1); renderAttachStrip(); updateSend(); });
+    x.addEventListener('click', () => {
+      if (p.ph) { const ca = $('composer'), ct = $('composeText'); ca.value = ca.value.replace(p.ph, ''); if (ct) ct.value = ct.value.replace(p.ph, ''); resizeComposer(); }
+      state.pendingTexts.splice(i, 1); renderAttachStrip(); updateSend();
+    });
     t.appendChild(x); strip.appendChild(t);
   });
 }
@@ -3780,15 +3795,24 @@ function boot() {
 
   const c = $('composer');
   c.addEventListener('input', () => { resizeComposer(); updateSend(); updateExpandBtn(); });
-  // long paste -> attach as a text file (if enabled)
-  c.addEventListener('paste', (e) => {
+  // 长文粘贴 → 光标处留一个占位符，正文发送时由 bridge 存成文件、原位替换成文件引用（指令留在外面）
+  const handleLongPaste = (e, ta) => {
     if (!P('pasteAsFile')) return;
     const txt = (e.clipboardData || window.clipboardData).getData('text');
     if (!txt || txt.length <= P('pasteThreshold')) return;
     e.preventDefault();
-    state.pendingTexts.push({ name: '粘贴文本-' + (state.pendingTexts.length + 1) + '.txt', content: txt });
-    renderAttachStrip(); updateSend(); buzz(12); toast('已作为文件附上（' + txt.length + ' 字）');
-  });
+    const n = state.pendingTexts.length + 1;
+    const ph = '〔粘贴文本' + n + '·' + txt.length + '字〕';
+    state.pendingTexts.push({ name: '粘贴文本-' + n + '.txt', content: txt, ph });
+    const s = ta.selectionStart != null ? ta.selectionStart : ta.value.length;
+    const epos = ta.selectionEnd != null ? ta.selectionEnd : s;
+    ta.value = ta.value.slice(0, s) + ph + ta.value.slice(epos);
+    ta.selectionStart = ta.selectionEnd = s + ph.length;
+    if (ta === c) resizeComposer();
+    renderAttachStrip(); updateSend(); buzz(12); toast('长文已收起（' + txt.length + ' 字），发送时存为文件');
+  };
+  c.addEventListener('paste', (e) => handleLongPaste(e, c));
+  $('composeText').addEventListener('paste', (e) => handleLongPaste(e, $('composeText')));
   c.addEventListener('focus', () => { state.composerFocused = true; closePlus(); updateExpandBtn(); });
   c.addEventListener('blur', () => { state.composerFocused = false; updateExpandBtn(); });
   $('sendBtn').addEventListener('click', sendMessage);

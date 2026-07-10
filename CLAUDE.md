@@ -42,7 +42,7 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
 - 构建会 `sed` 把版本号写进 `app/build.gradle.kts`：`versionCode = <run_number>`、
   `versionName = 1.1.<run_number>`（每次自增，桌面图标/名字才会刷新——固定 versionCode 会被
   launcher 缓存住）。
-- **签名**：密钥库 `app/telos.keystore` **不提交**（gitignored）；CI 从 secret `SIGNING_KEYSTORE_B64`(base64) 恢复，本地放到 `app/` 即可。**密码不再写进 `build.gradle.kts`**——读 gitignored
+- **签名**：密钥库 `app/telos.keystore`（提交在仓库）。**密码不再写进 `build.gradle.kts`**——读 gitignored
   `app/keystore.properties` 或 env `SIGNING_STORE_PASSWORD`/`SIGNING_KEY_PASSWORD`/`SIGNING_KEY_ALIAS`；
   两者都缺 → 回退 Gradle 默认 debug key（仍能出包）。CI 复现稳定签名要设对应 secrets（值见 `CLAUDE.local.md`）。
   **必须固定签名**，否则升级「签名冲突」；换签名/换包名那次用户要先卸载再装。
@@ -117,7 +117,12 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
   返回 `five_hour`/`seven_day`/`seven_day_opus`/`seven_day_sonnet`（各 `{utilization, resets_at}`，本订阅
   opus 那条常为 null）+ `extra_usage`（信用 `used_credits`/`monthly_limit`）。**本会话花费**：SDK 的
   `total_cost_usd` 是**单轮**的，bridge 在每个 `turn_end` 按 sessionId 累加进 `costs.json`（gitignored）
-  报会话累计（cost/out/turns）。**活跃天数**：listSessions 的 lastModified 去重计天（Asia/Tokyo）。
+  报会话累计（cost/out/turns）；另按 sessionId 之外的 `_days`（按天）/`_archived`（删除会话先折进来，
+  累计不回退）两个聚合键报 `totals`（累计$/会话数/轮次）+`today`。**用量页只显账号口径**，
+  「本会话」只在对话内的搜索窄条显示（列表屏的 currentSession 是「上一个打开的对话」，
+  显示成本会话会和对话里重复——用户报过）。**活跃天数**：`activedays.json` 持久化、只增不减
+  （启动时从全部会话 jsonl 消息时间戳一次性回填；turn_end + listSessions mtime 并集保鲜）。
+  旧实现拿 mtime 去重计天，续聊老会话/自动清理会让天数倒退（12→11，用户报过）。
   两个入口：① 左滑搜索框顶部一行窄条（`usageStrip`，每次 openSearch 拉一次，点 `us-line` 展开本会话明细）；
   ② 抽屉「用量」(`drUsage`) → 全屏 `#usageFull` 只读「终端风格」`<pre>`（`renderUsageFull` 用 `ubar()` 画进度条，
   数据同上、非真 PTY）。
@@ -199,6 +204,35 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
   （`userB`/`.bubimgs`，点开灯箱），其余才走 `addMedia`（cc 侧大图/播放器）——曾经全走 addMedia，
   重开后用户自己的图变成 cc 侧大图（用户报过）。聊天附件本就是**按路径**给 cc(`refPaths`→`[附带文件：路径]`，
   Read 按需看)、**不是 base64 内联**，所以图片不会永久塞爆上下文。
+- **媒体快照(路径失效兜底)**：按路径引用的死穴是路径是活的——cc 整理相册把用户刚发的截图 `mv` 改名，
+  重进对话图全没、连标识都不剩（踩过）。修法：发送(`refPaths`)/直播(`assistant_text`)/日记(`diaryAdd`/`diary_edit`)
+  时对媒体文件建**硬链接快照**（`~/.cc-bridge/chatmedia/<内容hash>.<ext>`，同盘零空间、原文件删了 inode 仍在），
+  `mediamap.json`(gitignored)记「原路径→快照」；`rewriteMedia`/`detectMedia`/`GET /media` 找不到原文件时按 map 回退
+  （/media 兜底让客户端里烤定的旧 URL 也能继续加载）。真丢了(无快照)不再无声消失：assistant 的死链 markdown 图
+  和 user 的附带行都换成可见占位「〔图片不见了：文件名〕」。附带路径改从 `[附带…：]` 注记行**原文提取**——
+  带空格/括号的文件名 `PATH_RE` 抓不到（`屏幕截图(1024).png` 当年就从没显示过）。改完 bridge 记得重启，
+  `_transCache` 里烤着旧解析结果。
+- **记忆分池(按目录隔离)**：Mnemosyne 记忆池按**对话的 cwd** 隔离——同目录共池、异目录互相看不见（新对话
+  默认各自独立空目录=独立池；「克隆为新窗口」同目录=同池；显式选目录=进那个人设/项目的池）。实现：bridge 挂
+  MCP 时把 cwd 拼在地址上（`mnemosyneMcp(cwd)` → `?scope=`），streamable-http 每个 POST 原样带 query、
+  SDK 把 Request 塞进 `ctx.request_context.request`，工具端 `_scope(ctx)` 读出来——模型看不到也改不了自己的池。
+  ingest/recover/面板统计同样带 scope；对话向量不存 scope（跟 `dialog_sessions.scope` 走，挪池=改一行）；
+  **记忆库页也按池**——老 App 的 `memory_list` 不带 sessionId，桥用 `ws._memSid`（这条连接最近 memory_get
+  的对话）兜底过滤（用户报过「从别的对话进记忆库还看得到茜茜的」）；App 列表搜索页仍全库。
+  scope 参数**缺失**（≠空串）回落 config 的
+  `legacy_default_scope`（旧 bridge 兼容垫片）。目录在磁盘上改名/搬家会孤儿化旧池，用
+  `POST /admin/rescope?from=&to=` 接回。机制详见 `mnemosyne/README.md`。
+- **Mnemosyne 已退役（2026-07）**：`server/config.json` 设 `"mnemosyne": false` 一票关停（工具不挂、教学不注入、
+  恢复只剩下面的书头部+最近对话；面板变恢复面板、回看轮数存 `server/recover.json`）。服务已 disable、
+  数据保留——复活=改回 true + `systemctl enable --now mnemosyne` + 重启桥。分池/钥匙化等机制代码都在，只是不走。
+- **回忆录(文件即记忆)**：`<cwd>/回忆录.md`（文件名固定＝桥找得到；书名她自己写第一行）——模型的长期
+  自我叙事，她用 Read/Grep/Edit 亲手养，不加任何新工具。约定：分界线 `<!-- 以下按需翻阅 -->` 以上是头部
+  （我是谁/当下篇/目录钥匙），**压缩恢复只注入头部**（`memoirHead()`，6000 字封顶带截断提醒）——书写多厚
+  恢复都是恒定大小；细节在线下编年史各章（`##` 标题锚点，Grep 再 Read 那一章，行号会漂、锚点不会）。
+  有书就注入、**不看 Mnemosyne 白名单**（新人设的书天然生效）。**记忆教学两变体**（按书的存在切换，
+  每对话稳定→缓存只在建书那次破一次）：有书=「叙事进书、原文靠归档、零碎记卡」（remember 降为备忘卡、
+  钉选退役、recall_dialog=地面真相）；没书=旧 Mnemosyne 教学。恢复块顺序＝回忆录头部→[Mnemosyne 在役时]钉选**钥匙**(summary 优先,分段子预算+溢出索引)→最近 N 轮(**所有对话**都有,不看白名单)。
+  `remember` 工具带 `summary`(一句话标题≤50字)＝钥匙来源。
 - **踩坑**：表单**绝不要用 `<input type=datetime-local>` / `<select>`**——安卓 WebView 会弹**系统原生选择器**(丑且
   违和)。唤醒配置全自定义控件：`.seg` 分段(只一次/每天/每隔) + `.wkscroll` 时/分横滑 chip(分钟 0–59) + 日期 chip
   (今天/明天/后天/未来 60 天)。
@@ -235,9 +269,9 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
   必有预检），否则上传/手动检查更新全是「网络错误」。最迷惑的是 **WS 和 `<img>` 不受 CORS 限制**——
   聊天/图片全正常、只有 JS 发的 HTTP 挂，看着像服务器没事。原生侧
   `allowUniversalAccessFromFileURLs = true` 兜底（随下个 APK 生效）。
-- **静态 UI 必须 `Cache-Control: no-store`**。`no-cache` 会被 CDN（如 Cloudflare）改写成
-  `max-age=14400` → 手机端拿 4 小时旧 UI，前端热更像「没生效」。bridge 静态文件发
-  `no-store, must-revalidate`。
+- **静态 UI 必须 `Cache-Control: no-store`**。`no-cache` 会被 Cloudflare 改写成
+  `max-age=14400`（边缘还缓存，`cf-cache-status` 可见）→ 手机端拿 4 小时旧 UI，
+  前端热更像「没生效」。bridge 静态文件已改发 `no-store, must-revalidate`（CF 回 BYPASS）。
 - **硬件返回键 = rootFlag 契约**。原生 `onBackPressed` 在 rootFlag=true 时直接退 App、
   不问 JS。rootFlag 必须等于「在 list/setup 屏**且无任何浮层**」——由 `overlayUp()`+
   `syncAtRoot()` 统一计算（show/各 open 入口同步 + 300ms interval 兜底）。曾经只在
