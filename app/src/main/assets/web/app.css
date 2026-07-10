@@ -154,7 +154,7 @@ input, textarea {
 /* ---------- chat ---------- */
 /* 悬浮方圆框顶栏：只包住按键+标题，消息从毛玻璃后滑过；模糊比输入框(20px)低、更清晰 */
 .chatbar {
-  position: absolute; top: calc(var(--safe-top) + 8px); left: 12px; right: 12px; z-index: 6;
+  position: absolute; top: calc(var(--safe-top) + 3px); left: 12px; right: 12px; z-index: 6;
   display: flex; align-items: center; gap: 2px; padding: 4px 6px;
   background: color-mix(in srgb, var(--surface) 72%, transparent);
   -webkit-backdrop-filter: blur(10px) saturate(1.4);
@@ -169,7 +169,7 @@ input, textarea {
 }
 .model .chev { font-size: 13px; color: var(--muted); }
 
-.thread { flex: 1; overflow-y: auto; padding: calc(var(--safe-top) + 68px) 16px 150px; } /* 顶栏悬浮后自己补 top（底部由 syncDockPad 动态管） */
+.thread { flex: 1; overflow-y: auto; padding: calc(var(--safe-top) + 63px) 16px 150px; } /* 顶栏悬浮后自己补 top（底部由 syncDockPad 动态管） */
 .msg { margin: 10px 0; }
 .msg.user { display: flex; justify-content: flex-end; }
 .msg.user .bubble {

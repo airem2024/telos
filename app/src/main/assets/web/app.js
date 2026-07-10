@@ -720,7 +720,7 @@ function appendDelta(text) { const t = ensureLive(); t.textContent += text; scro
 function finalizeText(full) { const t = ensureLive(); t.classList.remove('cursor', 'text'); t.classList.add('md'); t.innerHTML = md(full); state.live = null; scrollThreadAuto(); }
 function finalizeLive() { if (state.live) { state.live.classList.remove('cursor'); state.live = null; } }
 function addAssistantText(full) { const m = el('div', 'msg assistant'); const t = el('div', 'md'); t.innerHTML = md(full); m.appendChild(t); rt().appendChild(m); }
-function addThinking(text) { finalizeLive(); const d = el('div', 'thinking'); const inner = el('div', 'md'); inner.innerHTML = md(text); d.appendChild(inner); d.addEventListener('click', () => d.classList.toggle('collapsed')); rt().appendChild(d); scrollThreadAuto(); }
+function addThinking(text) { finalizeLive(); const d = el('div', 'thinking collapsed'); const inner = el('div', 'md'); inner.innerHTML = md(text); d.appendChild(inner); d.addEventListener('click', () => d.classList.toggle('collapsed')); rt().appendChild(d); scrollThreadAuto(); }
 
 /* ---- animated "thinking" status line, Claude Code style ---- */
 const SL_FRAMES = ['·', '✢', '✳', '∗', '✻', '✽', '✻', '∗', '✳', '✢'];
