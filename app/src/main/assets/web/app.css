@@ -1295,3 +1295,85 @@ input[type=datetime-local] { width: 100%; padding: 11px 12px; border-radius: 12p
 #diaryWrite.readonly .dwimg .x { display: none; }
 #diaryWrite.readonly .dwitem { pointer-events: none; opacity: .85; }
 #diaryWrite.readonly #dwText { background: transparent; }
+
+/* ============ 回忆录 · 电子书阅读器 ============ */
+#bookPage { background: color-mix(in srgb, var(--bg) 88%, var(--surface-2) 12%); }
+.bookbar { background: transparent; }
+.booktitle { font-family: var(--serif); font-size: 19px; font-weight: 700; letter-spacing: .02em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bookfind { display: none; align-items: center; gap: 6px; padding: 2px 12px 10px; }
+.bookfind.show { display: flex; }
+.bookfind input { flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 8px 12px; font: inherit; font-size: 15px; color: var(--text); outline: none; }
+.bf-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 34px; text-align: center; }
+.bf-nav { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  width: 34px; height: 34px; flex: none; color: var(--text); font-size: 14px; }
+.bookscroll { position: relative; flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.bookbody { max-width: 620px; margin: 0 auto; padding: 8px 26px calc(var(--safe-bottom) + 110px);
+  font-family: var(--serif); font-size: 16.5px; line-height: 2.05; color: var(--text);
+  overflow-wrap: break-word; }
+.bookbody h1 { font-family: var(--serif); font-size: 27px; text-align: center; font-weight: 700;
+  margin: 46px 0 10px; line-height: 1.5; }
+.bookbody h2 { font-family: var(--serif); font-size: 20px; font-weight: 700; margin: 54px 0 18px; line-height: 1.6; }
+.bookbody h2::before { content: ''; display: block; width: 34px; height: 2px; margin: 0 0 14px;
+  background: color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 2px; }
+.bookbody h3 { font-family: var(--serif); font-size: 17px; font-weight: 700; margin: 30px 0 10px; }
+.bookbody p { margin: 0 0 14px; }
+.bookbody ul, .bookbody ol { padding-left: 22px; margin: 0 0 14px; }
+.bookbody li { margin: 5px 0; }
+.bookbody blockquote { border-left: 2px solid var(--hair); margin: 14px 0; padding: 2px 0 2px 14px; color: var(--muted); }
+.bookbody hr { border: none; border-top: 1px solid var(--hair); margin: 34px 18%; }
+.bookbody code { font-family: var(--mono); font-size: 13.5px; background: var(--surface-2); border-radius: 5px; padding: 1px 5px; }
+.bookcut { display: flex; align-items: center; justify-content: center; gap: 12px;
+  margin: 48px 0; color: var(--muted); font-size: 13px; letter-spacing: .35em; text-indent: .35em; }
+.bookcut span { letter-spacing: 0; text-indent: 0; font-size: 12px; opacity: .65; }
+.bookempty { text-align: center; color: var(--muted); padding: 32vh 20px 0; font-family: var(--serif);
+  font-size: 16px; line-height: 2.3; }
+.bookempty span { font-size: 13px; opacity: .85; }
+mark.bkm { background: color-mix(in srgb, var(--accent) 24%, transparent); color: inherit; border-radius: 3px; padding: 0 1px; }
+mark.bkm.cur { background: color-mix(in srgb, var(--accent) 52%, transparent); }
+.bookfoot { position: absolute; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 10px;
+  padding: 20px 18px calc(var(--safe-bottom) + 10px); font-size: 12px; color: var(--muted);
+  background: linear-gradient(to top, color-mix(in srgb, var(--bg) 88%, var(--surface-2) 12%) 45%, transparent);
+  pointer-events: none; font-variant-numeric: tabular-nums; }
+.bookfoot #bookFootCh { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 72%;
+  font-family: var(--serif); }
+.bookprog { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; }
+.bookprog div { height: 100%; width: 0; background: color-mix(in srgb, var(--accent) 62%, transparent);
+  border-radius: 0 2px 2px 0; transition: width .15s linear; }
+/* 目录整页：像书的目录——纸色底、居中栏、纯衬线行（不是卡片列表），当前章淡高亮 */
+#bookToc { background: color-mix(in srgb, var(--bg) 88%, var(--surface-2) 12%); }
+#bookToc .topbar { background: transparent; }
+.btoc-col { max-width: 620px; margin: 0 auto; padding: 2px 8px; }
+.btoc-part { font-size: 12px; color: var(--muted); letter-spacing: .3em; text-indent: .1em; margin: 22px 10px 8px; }
+.btoc-row { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--text);
+  font-family: var(--serif); font-size: 16px; line-height: 1.55; padding: 11px 12px; border-radius: 12px; }
+.btoc-row:active { background: var(--surface-2); }
+
+/* ---- 文件编辑扩展：整页编辑层 / 纯文本视图 / 文件选择行 ---- */
+.bookbar .booktitle { margin-left: 8px; }
+#bookPage.editing .bookscroll, #bookPage.editing .bookfoot, #bookPage.editing .bookprog, #bookPage.editing .bookfind { display: none; }
+.bookedit { display: none; flex: 1; min-height: 0; }
+.bookedit.show { display: flex; }
+.bookedit textarea { flex: 1; width: 100%; border: none; outline: none; resize: none; background: transparent;
+  padding: 8px 18px calc(var(--safe-bottom) + 24px); font-family: var(--mono); font-size: 13.5px;
+  line-height: 1.85; color: var(--text); }
+.bookplain { font-family: var(--mono); font-size: 13px; line-height: 1.8; white-space: pre-wrap;
+  word-break: break-word; margin: 0; }
+/* 文件编辑选择页：分组标签 + 卡片容器（细分隔线）+ 图标两行式（区分与列表感） */
+.fpick-part { font-size: 12px; color: var(--muted); letter-spacing: .18em; margin: 18px 6px 8px; }
+.fpick-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; }
+.fpick-row { display: flex; align-items: center; gap: 12px; width: 100%; background: none; border: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  color: var(--text); font: inherit; padding: 12px 14px; text-align: left; }
+.fpick-row:last-child { border-bottom: none; }
+.fpick-row:active { background: var(--surface-2); }
+.fpick-ico { flex: none; width: 38px; height: 38px; border-radius: 11px; display: flex; align-items: center;
+  justify-content: center; background: var(--surface-2); color: var(--muted); }
+.fpick-ico.book { background: var(--accent-weak); color: var(--accent); }
+.fpick-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.fpick-line1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.fpick-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15.5px; font-weight: 500; }
+.fpick-tag { flex: none; font-size: 11px; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 7px; padding: 1px 7px; }
+.fpick-meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }

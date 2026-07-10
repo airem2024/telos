@@ -74,7 +74,7 @@ const EFFORTS = [
 ];
 
 /* ============ navigation ============ */
-const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'stickies', 'diaryWrite', 'favorites', 'cinema', 'cinemaLog', 'memMgr', 'memEdit'];
+const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'stickies', 'diaryWrite', 'favorites', 'cinema', 'cinemaLog', 'memMgr', 'memEdit', 'bookPage', 'fpick', 'bookToc'];
 function show(name) {
   SCREENS.forEach((s) => $(s).classList.toggle('active', s === name));
   state.screen = name;
@@ -177,6 +177,13 @@ window.onAndroidBack = () => {
   if (state.screen === 'diaryWrite') { if (document.querySelector('.dwpicker')) { closeDwPicker(); return; } show('diary'); return; }
   if (state.screen === 'cinemaLog') { show('cinema'); return; }
   if (state.screen === 'cinema') { cinemaBack(); return; }
+  if (state.screen === 'bookPage') {
+    if ($('bookPage').classList.contains('editing')) { bookEditClose(false); return; }
+    if ($('bookFind').classList.contains('show')) { toggleBookFind(false); return; }
+    show(state.bookBack || (state.currentSession ? 'chat' : 'list')); return;
+  }
+  if (state.screen === 'fpick') { show(state.fpickBack || (state.currentSession ? 'chat' : 'list')); return; }
+  if (state.screen === 'bookToc') { show('bookPage'); return; }
   if (state.screen === 'memEdit') { if (document.querySelector('.mepicker')) { closeMemTypePicker(); return; } show('memMgr'); return; }
   if (state.screen === 'memMgr') { show(state.currentSession ? 'chat' : 'list'); return; }
   if (state.screen === 'stickies') { show('diary'); return; }
@@ -409,7 +416,9 @@ function handle(m) {
     case 'history': if (m.prefetch) onPrefetchHistory(m); else renderHistory(m); break;
     case 'history_window': onHistoryWindow(m); break;
     case 'history_full': onHistoryFull(m); break;
-    case 'dirs': renderDirs(m); break;
+    case 'dirs':
+      if (state.fpickWait && m.path === state.fpickWait) { state.fpickWait = null; renderFilePick(m); break; }
+      renderDirs(m); break;
     case 'turn_start': state.busy = true; state.turnTools = []; state.toolRow = null; startStatus(); updateSend(); break;
     case 'session_init':
       if (state.expectFork || !state.currentSession) state.currentSession = m.sessionId;
@@ -423,8 +432,11 @@ function handle(m) {
     case 'tool_use': addTool(m); break;
     case 'tool_result': updateTool(m); break;
     case 'media': addMedia(m.kind, m.url); break;
-    case 'file': if (state.editingClaude && m.path === state.claudePath) { $('claudeText').value = m.content || ''; openScrim('claudeScrim'); } break;
-    case 'file_saved': toast('CLAUDE.md 已保存'); break;
+    case 'file':
+      if (state.bookWait && m.path === state.bookWait) { renderBook(m); break; }
+      if (state.editingClaude && m.path === state.claudePath) { $('claudeText').value = m.content || ''; openScrim('claudeScrim'); }
+      break;
+    case 'file_saved': toast('已保存'); break;
     case 'import_list':
       if (!m.ok) { toast('读取失败：' + (m.error || '')); break; }
       openImportScreen(m.path, m.items || []); break;
@@ -1574,6 +1586,277 @@ function setClaudePreview(on) {
   else { ta.style.display = 'block'; pv.style.display = 'none'; btn.textContent = '预览'; }
 }
 
+/* ============ 文件编辑 · 电子书阅读器 ============
+ * 工作目录里的文本文件在这里像电子书一样翻和改：先在「文件编辑」抽屉里选文件，
+ * md 走衬线书排版（章节目录抽屉/页内搜索/阅读进度），其它文本走等宽 pre；✎ 切整页编辑。
+ * 手势与全 App 同语言：左滑=搜索、右滑=返回（无返回箭头）。纯前端，走现成 read_file/write_file。 */
+const FPICK_EXT = /\.(md|txt|json|jsonl|ya?ml|toml|ini|conf|cfg|log|csv|js|mjs|cjs|ts|py|sh|html?|css|xml)$/i;
+function openFilePick() {
+  const dir = (state.cwd || state.defaultCwd || '').replace(/\/$/, '');
+  if (!dir) { toast('未知工作目录'); return; }
+  state.fpickWait = dir;
+  state.fpickBack = state.screen;
+  $('filePickSub').textContent = '';
+  $('filePickBody').innerHTML = '<div class="cl-empty">读取中…</div>';
+  show('fpick');
+  wsend({ type: 'list_dirs', path: dir });
+}
+function renderFilePick(m) {
+  const box = $('filePickBody'); box.innerHTML = '';
+  const files = (m.files || []).filter((f) => FPICK_EXT.test(f.path));
+  $('filePickSub').textContent = files.length ? files.length + ' 个文本文件' : '';
+  if (!files.length) { box.innerHTML = '<div class="cl-empty">这个目录里还没有可编辑的文本文件。</div>'; return; }
+  const fmtSz = (s) => s > 1048576 ? (s / 1048576).toFixed(1) + ' MB' : s > 1024 ? Math.round(s / 1024) + ' KB' : (s || 0) + ' B';
+  const fmtDt = (t) => {
+    if (!t) return '';
+    const d = new Date(t), n = new Date();
+    if (d.toDateString() === n.toDateString()) return '今天 ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    if (d.getFullYear() === n.getFullYear()) return (d.getMonth() + 1) + '月' + d.getDate() + '日';
+    return d.getFullYear() + '年' + (d.getMonth() + 1) + '月';
+  };
+  // 图标按文件身份区分：书(回忆录) / 指令(CLAUDE.md) / md / 代码 / 纯文本
+  const kindOf = (nm) => nm === '回忆录.md' ? 'book' : nm === 'CLAUDE.md' ? 'gear'
+    : /\.md$/i.test(nm) ? 'md' : /\.(js|mjs|cjs|ts|py|sh|json|jsonl|ya?ml|toml|xml|html?|css)$/i.test(nm) ? 'code' : 'txt';
+  const FICO = {
+    book: '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>',
+    gear: '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
+    md: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/>',
+    code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+    txt: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'
+  };
+  const isTop = (f) => { const nm = f.path.split('/').pop(); return nm === '回忆录.md' || nm === 'CLAUDE.md'; };
+  const groups = [
+    ['常用', files.filter(isTop).sort((a) => a.path.endsWith('回忆录.md') ? -1 : 1)],
+    ['其他文本', files.filter((f) => !isTop(f)).sort((a, b) => (b.mtime || 0) - (a.mtime || 0))],
+  ];
+  for (const [label, list] of groups) {
+    if (!list.length) continue;
+    const lab = el('div', 'fpick-part'); lab.textContent = label; box.appendChild(lab);
+    const card = el('div', 'fpick-card');
+    for (const f of list) {
+      const name = f.path.split('/').pop();
+      const k = kindOf(name);
+      const row = el('button', 'fpick-row');
+      const ico = el('span', 'fpick-ico' + (k === 'book' ? ' book' : '')); ico.innerHTML = _sv(FICO[k], 18); row.appendChild(ico);
+      const main = el('span', 'fpick-main');
+      const l1 = el('span', 'fpick-line1');
+      const nm = el('span', 'fpick-name'); nm.textContent = name; l1.appendChild(nm);
+      const tag = name === '回忆录.md' ? '书' : name === 'CLAUDE.md' ? '指令' : '';
+      if (tag) { const t = el('span', 'fpick-tag'); t.textContent = tag; l1.appendChild(t); }
+      main.appendChild(l1);
+      const meta = el('span', 'fpick-meta');
+      meta.textContent = fmtSz(f.size) + (f.mtime ? ' · ' + fmtDt(f.mtime) : '');
+      main.appendChild(meta);
+      row.appendChild(main);
+      row.addEventListener('click', () => openBook(f.path));   // state.screen='fpick' → 阅读页返回会回到这
+      card.appendChild(row);
+    }
+    box.appendChild(card);
+  }
+}
+function openBook(path) {
+  if (!path) {
+    const dir = (state.cwd || state.defaultCwd || '').replace(/\/$/, '');
+    if (!dir) { toast('未知工作目录'); return; }
+    path = dir + '/回忆录.md';
+  }
+  state.bookWait = path;
+  if (state.screen !== 'bookPage') state.bookBack = state.screen;
+  wsend({ type: 'read_file', path });
+}
+function renderBook(m) {
+  state.bookWait = null;
+  state.bookPath = m.path;
+  state.bookRaw = m.exists ? (m.content || '') : '';
+  const body = $('bookBody');
+  bookFindClear();
+  if ($('bookPage').classList.contains('editing')) bookEditClose(false);
+  const name = (m.path || '').split('/').pop();
+  const isMd = /\.md$/i.test(name);
+  const text = state.bookRaw;
+  let title = name || '文件';
+  if (isMd) { const tm = text.match(/^#\s+(.+?)\s*$/m); if (tm) title = tm[1].replace(/^《/, '').replace(/》$/, ''); }
+  $('bookBarTitle').textContent = title;
+  if (!text.trim()) {
+    body.innerHTML = name === '回忆录.md'
+      ? '<div class="bookempty">这个对话还没有《回忆录》。<br><span>书是她自己养的——让她动笔就有了。</span></div>'
+      : '<div class="bookempty">（空文件）<br><span>点右上的笔开始写。</span></div>';
+    state.bookToc = [];
+  } else if (isMd) {
+    // 分界线注释 → 可见的装饰分隔（也是目录里「头部/编年史」的分界）
+    const shown = text.replace(/<!--\s*以下按需翻阅\s*-->/, '\n\n<div class="bookcut"><span>❦</span>以下按需翻阅<span>❦</span></div>\n\n');
+    body.innerHTML = md(shown);
+    const toc = [];
+    let after = false;
+    body.querySelectorAll('h1, h2, div.bookcut').forEach((h, i) => {
+      if (h.classList && h.classList.contains('bookcut')) { after = true; return; }
+      h.id = 'bk' + i;
+      if (h.tagName === 'H1') return;   // 扉页书名不进目录
+      toc.push({ id: h.id, text: h.textContent, part: after ? '编年史' : '头部' });
+    });
+    state.bookToc = toc;
+  } else {
+    const pre = document.createElement('pre'); pre.className = 'bookplain'; pre.textContent = text;
+    body.innerHTML = ''; body.appendChild(pre);
+    state.bookToc = [];
+  }
+  show('bookPage');
+  $('bookScroll').scrollTop = 0;
+  bookOnScroll();
+}
+/* ---- 整页编辑（✎ 进、保存/✕ 出；保存走 write_file，成功 toast 由 file_saved 统一发） ---- */
+function bookEditOpen() {
+  if (state.bookWait || !state.bookPath) return;
+  $('bookEditTa').value = state.bookRaw || '';
+  $('bookPage').classList.add('editing');
+  $('bookEdit').classList.add('show');
+  $('bookEditBtn').style.display = 'none'; $('bookTocBtn').style.display = 'none';
+  $('bookEditSave').style.display = ''; $('bookEditCancel').style.display = '';
+}
+function bookEditClose(save) {
+  if (save) {
+    const txt = $('bookEditTa').value;
+    wsend({ type: 'write_file', path: state.bookPath, content: txt });
+    state.bookRaw = txt;
+  }
+  $('bookPage').classList.remove('editing');
+  $('bookEdit').classList.remove('show');
+  $('bookEditBtn').style.display = ''; $('bookTocBtn').style.display = '';
+  $('bookEditSave').style.display = 'none'; $('bookEditCancel').style.display = 'none';
+  if (save) renderBook({ exists: true, content: state.bookRaw, path: state.bookPath });
+}
+/* ---- 手势（与对话屏同语言）：右滑=返回、左滑=呼出书内搜索 ---- */
+function initBookSwipe() {
+  const sc = $('bookScroll');
+  let sx = 0, sy = 0, dir = null, active = false, W = 0;
+  sc.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { active = false; return; }
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; dir = null; active = true; W = window.innerWidth;
+  }, { passive: true });
+  sc.addEventListener('touchmove', (e) => {
+    if (!active || dir) return;
+    const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
+    if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+    dir = Math.abs(dx) > Math.abs(dy) * 1.3 ? (dx > 0 ? 'back' : 'search') : 'scroll';
+  }, { passive: true });
+  sc.addEventListener('touchend', (e) => {
+    if (!active) return; active = false;
+    const dx = e.changedTouches[0].clientX - sx;
+    const TRIG = Math.min(120, W * 0.32);
+    if (dir === 'back' && dx > TRIG) { buzz(14); show(state.bookBack || (state.currentSession ? 'chat' : 'list')); }
+    else if (dir === 'search' && -dx > TRIG) { buzz(14); toggleBookFind(true); }
+    dir = null;
+  });
+}
+function bookCurrentChapter() {
+  const y = $('bookScroll').scrollTop + 90;
+  let cur = null;
+  for (const t of state.bookToc || []) {
+    const h = document.getElementById(t.id);
+    if (!h) continue;
+    if (h.offsetTop <= y) cur = t.id; else break;
+  }
+  return cur;
+}
+let _bookRaf = null;
+function bookOnScroll() {
+  if (_bookRaf) return;
+  _bookRaf = requestAnimationFrame(() => {
+    _bookRaf = null;
+    const sc = $('bookScroll');
+    const max = sc.scrollHeight - sc.clientHeight;
+    const pct = max > 2 ? Math.min(1, sc.scrollTop / max) : 1;
+    $('bookProgFill').style.width = (pct * 100).toFixed(1) + '%';
+    $('bookFootPct').textContent = Math.round(pct * 100) + '%';
+    const t = (state.bookToc || []).find((x) => x.id === bookCurrentChapter());
+    $('bookFootCh').textContent = t ? t.text : '';
+  });
+}
+function bookJump(id) {
+  const h = document.getElementById(id); if (!h) return;
+  $('bookScroll').scrollTo({ top: Math.max(0, h.offsetTop - 64), behavior: 'smooth' });
+}
+function openBookToc() {
+  const box = $('bookTocBody'); box.innerHTML = '';
+  const toc = state.bookToc || [];
+  const nCh = toc.filter((t) => t.part === '编年史').length;
+  $('bookTocSub').textContent = ($('bookBarTitle').textContent || '') + (nCh ? ' · ' + nCh + ' 章' : '');
+  if (!toc.length) {
+    box.innerHTML = '<div class="cl-empty">还没有章节。</div>';
+    show('bookToc'); return;
+  }
+  // 书的目录就该像书：纯衬线素排，不做卡片、不做"当前章"高亮（用户：就只是一个目录）
+  const col = el('div', 'btoc-col'); box.appendChild(col);
+  let part = '';
+  toc.forEach((t) => {
+    if (t.part !== part) {
+      part = t.part;
+      const lab = el('div', 'btoc-part'); lab.textContent = part; col.appendChild(lab);
+    }
+    const row = el('button', 'btoc-row');
+    row.textContent = t.text;
+    row.addEventListener('click', () => {
+      show('bookPage');
+      requestAnimationFrame(() => bookJump(t.id));   // 回到阅读页、排版就位后再跳
+    });
+    col.appendChild(row);
+  });
+  show('bookToc');
+  box.scrollTop = 0;
+}
+/* ---- 页内搜索：TreeWalker 抓文本节点、splitText 包 <mark>，上下键循环跳 ---- */
+function bookFindClear() {
+  $('bookBody').querySelectorAll('mark.bkm').forEach((mk) => {
+    const p = mk.parentNode; if (!p) return;
+    p.replaceChild(document.createTextNode(mk.textContent), mk); p.normalize();
+  });
+  state.bookHits = []; state.bookHitI = -1;
+  $('bookFindCount').textContent = '';
+}
+function bookFindRun(q) {
+  bookFindClear();
+  q = (q || '').trim();
+  if (!q) return;
+  const ql = q.toLowerCase();
+  const walker = document.createTreeWalker($('bookBody'), NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  const hits = [];
+  outer: for (const nd of nodes) {
+    let node = nd, idx;
+    while (node && (idx = node.textContent.toLowerCase().indexOf(ql)) >= 0) {
+      const hit = node.splitText(idx);
+      const rest = hit.splitText(q.length);
+      const mk = document.createElement('mark');
+      mk.className = 'bkm'; mk.textContent = hit.textContent;
+      hit.parentNode.replaceChild(mk, hit);
+      hits.push(mk);
+      node = rest;
+      if (hits.length >= 500) break outer;   // 疯狂短词兜底
+    }
+  }
+  state.bookHits = hits;
+  if (!hits.length) { $('bookFindCount').textContent = '0'; return; }
+  bookFindGoto(0);
+}
+function bookFindGoto(i) {
+  const hits = state.bookHits || []; if (!hits.length) return;
+  i = ((i % hits.length) + hits.length) % hits.length;
+  if (state.bookHitI >= 0 && hits[state.bookHitI]) hits[state.bookHitI].classList.remove('cur');
+  state.bookHitI = i;
+  hits[i].classList.add('cur');
+  $('bookFindCount').textContent = (i + 1) + '/' + hits.length;
+  const sc = $('bookScroll');
+  sc.scrollTo({ top: Math.max(0, hits[i].offsetTop - sc.clientHeight * 0.35), behavior: 'smooth' });
+}
+function toggleBookFind(on) {
+  const bar = $('bookFind');
+  const want = on != null ? on : !bar.classList.contains('show');
+  bar.classList.toggle('show', want);
+  if (want) setTimeout(() => $('bookFindInput').focus(), 60);
+  else { $('bookFindInput').value = ''; bookFindClear(); $('bookFindInput').blur(); }
+}
+
 /* ============ ⋮ menu (reveals top-down, collapses bottom-up) ============ */
 function openMenu() {
   const mb = $('menuback'), mp = $('menuPop');
@@ -1627,18 +1910,35 @@ function openMemory() {
 }
 function onMemory(m) {
   if (m.sessionId && m.sessionId !== state.currentSession) return;
-  state.mem = { available: !!m.available, on: !!m.on, stats: m.stats || null, recentN: m.recentN, maxTok: m.maxTok };
+  state.mem = { available: !!m.available, on: !!m.on, stats: m.stats || null, recentN: m.recentN, maxTok: m.maxTok,
+                book: !!m.book, memoir: !!m.memoir };
   renderMemory();
 }
 function renderMemory() {
   const sw = $('memOn'), sub = $('memSub'), reco = $('memReco'); if (!sw) return;
   const mem = state.mem;
+  const swRow = sw.closest('.wkrow'), tokRow = $('memMaxTok') && $('memMaxTok').closest('.memreco-row'), mgrBtn = $('memMgrOpen');
   if (!mem) { sw.classList.remove('on'); sub.textContent = '读取中…'; if (reco) reco.style.display = 'none'; return; }
   if (!mem.available) {
     sw.classList.remove('on'); sw.disabled = true; sw.style.opacity = '.4';
     sub.textContent = '服务器没装记忆模块';
     if (reco) reco.style.display = 'none'; return;
   }
+  if (mem.book) {
+    // 书时代：记忆=《回忆录》，这里只剩「恢复」——回看轮数 + 立即恢复
+    if (swRow) swRow.style.display = 'none';
+    if (tokRow) tokRow.style.display = 'none';
+    if (mgrBtn) mgrBtn.style.display = 'none';
+    sub.textContent = mem.memoir ? '恢复＝回忆录头部＋最近对话' : '恢复＝最近对话（这个对话还没有书）';
+    if (reco) {
+      reco.style.display = '';
+      if (document.activeElement !== $('memRecentN')) $('memRecentN').value = (mem.recentN != null ? mem.recentN : 8);
+    }
+    return;
+  }
+  if (swRow) swRow.style.display = '';
+  if (tokRow) tokRow.style.display = '';
+  if (mgrBtn) mgrBtn.style.display = '';
   sw.disabled = false; sw.style.opacity = '';
   sw.classList.toggle('on', mem.on);
   const s = mem.stats || {}; let mems = 0; if (s.memories) for (const k in s.memories) mems += (s.memories[k].count || 0);
@@ -3324,6 +3624,7 @@ function boot() {
 
   // in-conversation search (Enter to search; tap blank to close)
   initChatSwipe();
+  initBookSwipe();
   initSelBar();
   // 各独立页统一右滑返回；电影模式页另加左滑进入时间线
   initPageSwipe('cinema', { onBack: () => cinemaBack(), onLeft: openCinemaLog, under: () => (state.cinemaReturn === 'chat' && state.currentSession) ? 'chat' : 'list' });
@@ -3406,7 +3707,20 @@ function boot() {
   $('mDelete').addEventListener('click', () => { closeMenu(); openPrompt('输入「删除」确认', '', (v) => { if (v === '删除') { wsend({ type: 'delete', sessionId: state.currentSession }); goList(); } else toast('已取消'); }); });
   // 工具类下放到「＋」面板（编辑 CLAUDE.md / 记忆 / MCP 服务器）；复制目录路径并进文件管理
   $('atMemory').addEventListener('click', () => { closePlus(); openMemory(); });
-  $('atClaude').addEventListener('click', () => { closePlus(); openClaudeMd(); });
+  $('atFiles').addEventListener('click', () => { closePlus(); openFilePick(); });
+  $('fpickBack').addEventListener('click', () => show(state.fpickBack || (state.currentSession ? 'chat' : 'list')));
+  $('bookTocBack').addEventListener('click', () => show('bookPage'));
+  $('bookTocBtn').addEventListener('click', openBookToc);
+  $('bookEditBtn').addEventListener('click', bookEditOpen);
+  $('bookEditSave').addEventListener('click', () => bookEditClose(true));
+  $('bookEditCancel').addEventListener('click', () => bookEditClose(false));
+  $('bookFindPrev').addEventListener('click', () => bookFindGoto(state.bookHitI - 1));
+  $('bookFindNext').addEventListener('click', () => bookFindGoto(state.bookHitI + 1));
+  $('bookFindClose').addEventListener('click', () => toggleBookFind(false));
+  let _bfT;
+  $('bookFindInput').addEventListener('input', (e) => { clearTimeout(_bfT); _bfT = setTimeout(() => bookFindRun(e.target.value), 220); });
+  $('bookFindInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); bookFindGoto(state.bookHitI + 1); } });
+  $('bookScroll').addEventListener('scroll', bookOnScroll, { passive: true });
   $('atMcp').addEventListener('click', () => { closePlus(); openMcp(); });
   $('dirCopy').addEventListener('click', () => { navigator.clipboard && navigator.clipboard.writeText(state.dirPath || ''); buzz(12); toast('已复制当前路径'); });
 

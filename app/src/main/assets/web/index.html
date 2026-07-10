@@ -99,7 +99,7 @@
         <div class="morelist">
           <button class="moreitem" id="atDiary"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span>日记 / 便签夹</span></button>
           <button class="moreitem" id="atMemory"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v8c0 1.66 3.58 3 8 3s8-1.34 8-3v-8"/></svg><span>记忆</span></button>
-          <button class="moreitem" id="atClaude"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/></svg><span>编辑 CLAUDE.md</span></button>
+          <button class="moreitem" id="atFiles"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg><span>文件编辑</span></button>
           <button class="moreitem" id="atMcp"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>MCP 服务器</span></button>
           <button class="moreitem" id="atCompact"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg><span>压缩历史</span></button>
         </div>
@@ -589,6 +589,51 @@
     </div>
     <div class="memmgr-filters" id="memMgrFilters"></div>
     <div class="pad" id="memMgrBody" style="padding-top:2px;padding-bottom:calc(var(--safe-bottom) + 40px);overflow-y:auto;"></div>
+  </div>
+
+  <!-- 回忆录 · 电子书阅读器（整页） -->
+  <div id="bookPage" class="screen">
+    <div class="topbar bookbar">
+      <div class="booktitle" id="bookBarTitle">回忆录</div>
+      <div class="spacer"></div>
+      <button class="iconbtn" id="bookEditBtn" title="编辑"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg></button>
+      <button class="iconbtn" id="bookTocBtn" title="目录"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3.6" y1="6" x2="4.4" y2="6"/><line x1="3.6" y1="12" x2="4.4" y2="12"/><line x1="3.6" y1="18" x2="4.4" y2="18"/></svg></button>
+      <button class="dwsave" id="bookEditSave" style="display:none">保存</button>
+      <button class="iconbtn" id="bookEditCancel" style="display:none">✕</button>
+    </div>
+    <div class="bookfind" id="bookFind">
+      <input id="bookFindInput" placeholder="在书里找…" autocapitalize="off" autocomplete="off" spellcheck="false"/>
+      <span class="bf-count" id="bookFindCount"></span>
+      <button class="bf-nav" id="bookFindPrev">↑</button>
+      <button class="bf-nav" id="bookFindNext">↓</button>
+      <button class="bf-nav" id="bookFindClose">✕</button>
+    </div>
+    <div class="bookscroll" id="bookScroll"><div class="bookbody md" id="bookBody"></div></div>
+    <div class="bookedit" id="bookEdit"><textarea id="bookEditTa" autocapitalize="off" spellcheck="false"></textarea></div>
+    <div class="bookfoot"><span id="bookFootCh"></span><span class="spacer"></span><span id="bookFootPct"></span></div>
+    <div class="bookprog"><div id="bookProgFill"></div></div>
+  </div>
+
+  <!-- 回忆录目录（整页，用户不要弹窗） -->
+  <div id="bookToc" class="screen">
+    <div class="topbar">
+      <button class="iconbtn" id="bookTocBack">‹</button>
+      <div class="h2" style="font-family:var(--serif);font-size:22px;font-weight:700;">目录</div>
+      <div class="spacer"></div>
+      <div class="psub" id="bookTocSub" style="margin-right:6px;"></div>
+    </div>
+    <div class="pad" id="bookTocBody" style="overflow-y:auto;padding-top:4px;padding-bottom:calc(var(--safe-bottom) + 40px);"></div>
+  </div>
+
+  <!-- 文件编辑：整页选文件 → 进阅读/编辑页（用户不要弹窗） -->
+  <div id="fpick" class="screen">
+    <div class="topbar">
+      <button class="iconbtn" id="fpickBack">‹</button>
+      <div class="h2" style="font-family:var(--serif);font-size:22px;font-weight:700;">文件编辑</div>
+      <div class="spacer"></div>
+      <div class="psub" id="filePickSub" style="margin-right:6px;"></div>
+    </div>
+    <div class="pad" id="filePickBody" style="overflow-y:auto;padding-top:4px;padding-bottom:calc(var(--safe-bottom) + 40px);"></div>
   </div>
 
   <!-- 总日历（全局：日程/待办/心情色/日记 + 右滑便签栏） -->
