@@ -18,9 +18,40 @@ import {
   createSdkMcpServer
 } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { loadConfig } from './config.js';
+import { loadConfig, CONFIG_PATH } from './config.js';
 
 const cfg = loadConfig();
+
+// ---- API 逃生舱（订阅通路不可用时，用户在 App 设置里就能自己切走）----
+// env 是每轮临时拼的 → 改完 cfg.api 下一条消息就生效，不用重启桥。
+let lastApiKeySource = ''; // 最近一轮 cc 实际用的计费通路（init 消息的 apiKeySource；'none'=订阅）
+function applyApiEnv(env) {
+  // 关着时主动清掉，防 shell 残留的 ANTHROPIC_API_KEY 悄悄把计费劫走
+  delete env.ANTHROPIC_API_KEY; delete env.ANTHROPIC_AUTH_TOKEN; delete env.ANTHROPIC_BASE_URL;
+  const a = cfg.api;
+  if (a && a.enabled) {
+    if (a.key) env.ANTHROPIC_API_KEY = a.key;
+    if (a.authToken) env.ANTHROPIC_AUTH_TOKEN = a.authToken;
+    if (a.baseUrl) env.ANTHROPIC_BASE_URL = a.baseUrl;
+  }
+}
+function saveApiConfig(a) {
+  try {
+    const c = existsSync(CONFIG_PATH) ? JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) : {};
+    c.api = a;
+    writeFileSync(CONFIG_PATH, JSON.stringify(c, null, 2));
+    return true;
+  } catch (e) { return false; }
+}
+// key 只回尾四位给 App，全文不出服务器
+function apiInfo() {
+  const a = cfg.api || {};
+  return {
+    type: 'api_info', enabled: !!a.enabled, baseUrl: a.baseUrl || '',
+    keyTail: a.key ? a.key.slice(-4) : '', tokenTail: a.authToken ? a.authToken.slice(-4) : '',
+    source: lastApiKeySource
+  };
+}
 
 // Mnemosyne（可选长期记忆 DLC）：装了就从 ~/mnemosyne-data/config.json 读端口+secret，
 // 每轮 query 时挂成 Telos 作用域的 http MCP；没装/读不到就当它不存在、bridge 照常跑。
@@ -515,6 +546,52 @@ function moodMigrate(ms) {
   }
   return ms;
 }
+// 主导词：平静是底不是波、不和波抢显示词——非平静里最强且 ≥0.25 的优先，全都弱才轮到平静
+function moodDomWord(cur) {
+  const es = Object.entries(cur).sort((a, b) => b[1] - a[1]);
+  const wave = es.find(([w, k]) => w !== '平静' && k >= 0.25);
+  return wave ? wave[0] : (es.length ? es[0][0] : '');
+}
+function moodTrim(ms, now) {
+  now = now || Date.now();
+  ms.events = (ms.events || []).filter((ev) => Object.entries(ev.comps || {}).some(([w, k0]) => k0 * Math.pow(0.5, (now - ev.ts) / ((MOOD_HALF_H[w] || 8) * 3600e3)) >= 0.05));
+  if (ms.events.length > 12) ms.events = ms.events.slice(-12);
+}
+// 收一拍新事件进窗，三步：
+// 1) 同类 90 分钟内合并刷新——每拍都写是现实，同一份情绪连报两拍是「延续」不是「两件事」，取大不叠加；
+//    超 90 分钟才算真叠加（下午论文的闷 + 晚上下雨的闷，照旧饱和叠）。
+// 2) 静波互压——平静与波是一根轴的两端：新波按强度压存量平静（波打破静），新平静也按强度放下存量波
+//    （「被接住了」就是落地）。开心×低落这类波-波对立仍共存不抵消——那是并存的两股波，静才是波的缺席。
+// 3) 入窗修剪。
+function moodAbsorb(ms, comps, trigger, now) {
+  now = now || Date.now();
+  for (const w of Object.keys(comps)) {
+    for (const ev of ms.events) {
+      if (now - ev.ts < 90 * 60e3 && ev.comps && ev.comps[w] != null) {
+        const kNow = ev.comps[w] * Math.pow(0.5, (now - ev.ts) / ((MOOD_HALF_H[w] || 8) * 3600e3));
+        comps[w] = Math.max(comps[w], kNow);
+        delete ev.comps[w];
+      }
+    }
+  }
+  const waveK = Math.max(0, ...Object.entries(comps).filter(([w]) => w !== '平静').map(([, k]) => k));
+  const calmK = comps['平静'] || 0;
+  for (const ev of ms.events) {
+    if (!ev.comps) continue;
+    if (waveK > 0 && ev.comps['平静'] != null) ev.comps['平静'] *= 1 - waveK;
+    if (calmK > 0) for (const w of Object.keys(ev.comps)) if (w !== '平静') ev.comps[w] *= 1 - calmK;
+  }
+  ms.events.push({ ts: now, comps, trigger });
+  moodTrim(ms, now);
+}
+// 见面落地：想念是关于「不在场」的情绪，人回来了就放下大半（何时算「回来」由调用方判断）
+function moodRelease(ms, now) {
+  now = now || Date.now();
+  let hit = false;
+  for (const ev of ms.events || []) if (ev.comps && ev.comps['想念']) { ev.comps['想念'] *= 0.35; hit = true; }
+  if (hit) moodTrim(ms, now);
+  return hit;
+}
 // 数字 → 自然语言。**必须单行**（moodTail 整块单行是硬约束，stripMoodCtx 按首个换行剥用户原话）
 function renderMoodCur(ms, tz, now) {
   now = now || Date.now();
@@ -579,17 +656,12 @@ function recordMood(sid, rawText) {
     if (p.label) ms.miss = (ms.miss || 0) + 1; // 认不出成分：计一次失格，连续 3 拍 moodTail 会带纠偏
   } else {
     ms.miss = 0;
-    if (Object.keys(comps).length) {
-      ms.events.push({ ts: now, comps, trigger: (p.note || '').replace(/\s+/g, ' ').slice(0, 80) });
-      // 修剪窗口：衰到没影（全成分 <0.05）的出窗 + 总数封顶 12
-      ms.events = ms.events.filter((ev) => Object.entries(ev.comps || {}).some(([w, k0]) => k0 * Math.pow(0.5, (now - ev.ts) / ((MOOD_HALF_H[w] || 8) * 3600e3)) >= 0.05));
-      if (ms.events.length > 12) ms.events = ms.events.slice(-12);
-    }
+    if (Object.keys(comps).length) moodAbsorb(ms, comps, (p.note || '').replace(/\s+/g, ' ').slice(0, 80), now);
   }
   // label = 合成后的主导词（App 色点/时间线继续吃词表词，前端零改动）；解析不出时兜底沿用/原文
-  const dom = Object.entries(moodComposite(ms, moodEventsNow(ms, now))).sort((a, b) => b[1] - a[1])[0];
+  const dom = moodDomWord(moodComposite(ms, moodEventsNow(ms, now)));
   ms.on = true;
-  ms.label = dom ? dom[0] : (p.label || ms.label || '');
+  ms.label = dom || (p.label || ms.label || '');
   if (p.note) ms.note = p.note;
   // 发条链不断：这拍没写发条就沿用上一拍的（可能略过时，但比丢了强——她自己会核对眼下真实排程）
   if (p.wind) ms.wind = p.wind;
@@ -602,6 +674,22 @@ function recordMood(sid, rawText) {
   if (c && c.on && ms.label && ms.label !== prevLabel) {
     timelinePush(c, 'mood', ms.label); saveWakeups(); broadcastCinema(sid);
   }
+}
+// 用户真人消息到达：记录在场时刻；刚结束 ≥30 分钟的离开 → 想念落地、显示词当场跟上（不用等她开口提）
+function moodOnUserMsg(sid) {
+  const ms = sid && moodState[sid];
+  if (!ms || !ms.on) return;
+  const now = Date.now();
+  const away = now - (ms.lastSeen || 0);
+  ms.lastSeen = now;
+  if (away >= 30 * 60e3 && Array.isArray(ms.events) && moodRelease(ms, now)) {
+    const dom = moodDomWord(moodComposite(ms, moodEventsNow(ms, now)));
+    if (dom && dom !== ms.label) {
+      ms.label = dom;
+      broadcast({ type: 'mood', sessionId: sid, mood: { on: true, label: ms.label, note: ms.note || '', wind: ms.wind || '', at: ms.at || now } });
+    }
+  }
+  saveMood();
 }
 
 // ---- per-session diary: one page per day, many entries (user / cc each their own) ----
@@ -2357,6 +2445,41 @@ async function handle(ws, conn, msg) {
       await sendDirListing(ws, msg.dir || nodePath.dirname(fp));
       break;
     }
+    case 'paths_op': {
+      // 文件多选批量操作：op=delete|move|copy，paths=数组，dest=目标目录（move/copy 用）。
+      // 目标重名自动加 " (n)"（和 /upload 同规矩）；move 跨设备回退 copy+rm。
+      const op = msg.op;
+      const dest = nodePath.normalize(msg.dest || '');
+      const paths = (Array.isArray(msg.paths) ? msg.paths : []).map((p) => nodePath.normalize(p || ''));
+      const inHome = (p) => p.startsWith(homedir()) && p !== homedir();
+      const freeName = (dir, name) => {
+        const ext = nodePath.extname(name), stem = nodePath.basename(name, ext);
+        let fp = nodePath.join(dir, name), n = 1;
+        while (existsSync(fp)) fp = nodePath.join(dir, stem + ' (' + (n++) + ')' + ext);
+        return fp;
+      };
+      let done = 0, fail = 0;
+      for (const p of paths) {
+        // 不许把目录挪/拷进自己肚子里
+        if (!inHome(p) || (op !== 'delete' && (!inHome(dest) || dest === p || dest.startsWith(p + '/')))) { fail++; continue; }
+        try {
+          if (op === 'delete') await fsp.rm(p, { recursive: true, force: true });
+          else if (op === 'move' && nodePath.dirname(p) === dest) { done++; continue; } // 原地移动=没事做（别改出 " (1)" 名）
+          else {
+            const np = freeName(dest, nodePath.basename(p));
+            if (op === 'copy') await fsp.cp(p, np, { recursive: true });
+            else if (op === 'move') {
+              try { await fsp.rename(p, np); }
+              catch (e) { if (e.code === 'EXDEV') { await fsp.cp(p, np, { recursive: true }); await fsp.rm(p, { recursive: true, force: true }); } else throw e; }
+            } else { fail++; continue; }
+          }
+          done++;
+        } catch (e) { fail++; }
+      }
+      send(ws, { type: 'paths_done', op, done, fail });
+      await sendDirListing(ws, msg.dir || (op === 'delete' ? (paths[0] ? nodePath.dirname(paths[0]) : cfg.defaultCwd) : dest));
+      break;
+    }
 
     case 'model_list': {
       const models = await listModels();
@@ -2399,6 +2522,44 @@ async function handle(ws, conn, msg) {
         writeFileSync(path, JSON.stringify(d, null, 2));
         send(ws, { type: 'mcp_config_saved' });
       } catch (e) { send(ws, { type: 'error', message: '配置无效或保存失败: ' + e.message }); }
+      break;
+    }
+
+    case 'api_get':
+      send(ws, apiInfo());
+      break;
+    case 'api_set': {
+      const a = { ...(cfg.api || {}) };
+      if (typeof msg.enabled === 'boolean') a.enabled = msg.enabled;
+      if (typeof msg.key === 'string') a.key = msg.key.trim();
+      if (typeof msg.authToken === 'string') a.authToken = msg.authToken.trim();
+      if (typeof msg.baseUrl === 'string') a.baseUrl = msg.baseUrl.trim().replace(/\/+$/, '');
+      cfg.api = a;
+      if (!saveApiConfig(a)) { send(ws, { type: 'error', message: 'API 配置保存失败' }); break; }
+      send(ws, apiInfo());
+      break;
+    }
+    case 'api_test': {
+      // 拿表单里正填的值（没填的落回已存的）发一个 1 token 最小请求，当场报通/不通
+      const a = cfg.api || {};
+      const key = typeof msg.key === 'string' && msg.key.trim() ? msg.key.trim() : a.key;
+      const tok = typeof msg.authToken === 'string' && msg.authToken.trim() ? msg.authToken.trim() : a.authToken;
+      const base = (typeof msg.baseUrl === 'string' && msg.baseUrl.trim() ? msg.baseUrl.trim() : a.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '');
+      if (!key && !tok) { send(ws, { type: 'api_test_result', ok: false, message: '先填 API Key 或 Bearer Token' }); break; }
+      const headers = { 'content-type': 'application/json', 'anthropic-version': '2023-06-01' };
+      if (key) headers['x-api-key'] = key; else headers.authorization = 'Bearer ' + tok;
+      const ac = new AbortController(); const tt = setTimeout(() => ac.abort(), 15000);
+      try {
+        const r = await fetch(base + '/v1/messages', {
+          method: 'POST', headers, signal: ac.signal,
+          body: JSON.stringify({ model: msg.model || 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] })
+        });
+        const body = await r.text();
+        if (r.ok) send(ws, { type: 'api_test_result', ok: true, message: '通了（HTTP ' + r.status + '）' });
+        else send(ws, { type: 'api_test_result', ok: false, message: 'HTTP ' + r.status + '：' + body.slice(0, 300) });
+      } catch (e) {
+        send(ws, { type: 'api_test_result', ok: false, message: '连不上：' + (e && e.name === 'AbortError' ? '15 秒超时' : (e.message || String(e))) });
+      } finally { clearTimeout(tt); }
       break;
     }
 
@@ -2468,6 +2629,7 @@ async function handle(ws, conn, msg) {
         if (wt) { try { wt.abort.abort(); } catch (e) {} }
         const w = wakeups[msg.sessionId];
         if (w) { w.lastUserMsgAt = Date.now(); w.followupAt = null; saveWakeups(); }
+        moodOnUserMsg(msg.sessionId); // 见面落地：离开 ≥30 分钟后回来，想念放下大半
         rememberModel(msg.sessionId, msg.model, msg.effort); // wake will resume with this model (esp. [1m])
       }
       const turn = newTurn(msg.turnId, ws); conn.turn = turn;
@@ -2529,10 +2691,11 @@ async function handle(ws, conn, msg) {
       const sid = msg.sessionId; if (!sid) break;
       const cur = moodState[sid] || {};
       const on = !!msg.on;
-      // 开关只动 on/label/note/wind——事件窗 events/baseline/miss 保留（关掉期间照样自然衰减，重开不断档）
-      moodState[sid] = { ...cur, on, label: on ? (cur.label || '') : '', note: on ? (cur.note || '') : '', wind: on ? (cur.wind || '') : '', at: cur.at || 0 };
+      // 开关只闸不清：off 仅停止注入（moodTail 按 on 闸门），label/note/发条/事件窗全保留——
+      // 来回拨零损失（曾经 off 会把发条清空，模型给下一拍自己的计划被 UI 拨一下就丢了）。前端色点按 on 显隐。
+      moodState[sid] = { ...cur, on };
       saveMood();
-      broadcast({ type: 'mood', sessionId: sid, mood: { on, label: moodState[sid].label, note: moodState[sid].note, wind: moodState[sid].wind, at: moodState[sid].at } });
+      broadcast({ type: 'mood', sessionId: sid, mood: { on, label: moodState[sid].label || '', note: moodState[sid].note || '', wind: moodState[sid].wind || '', at: moodState[sid].at || 0 } });
       break;
     }
     case 'memory_get': {
@@ -3132,6 +3295,7 @@ async function runTurn(turn, msg) {
   options.env = (cacheTtl === '5m')
     ? { ...process.env, FORCE_PROMPT_CACHING_5M: '1' }      // p4e() 最先看这个、命中即 5 分钟
     : { ...process.env, ENABLE_PROMPT_CACHING_1H: '1' };    // 1 小时（默认）
+  applyApiEnv(options.env); // API 逃生舱开着就走 API 计费（热生效，见文件头）
 
   out(turn, { type: 'turn_start', sessionId: curSession });
 
@@ -3183,6 +3347,37 @@ async function runTurn(turn, msg) {
       ctxWindow,
       outTokens
     });
+    // 编辑重发要消息 id：现场气泡没有（历史重载才有）→ 轮结束后把她这条消息的 uuid 补给客户端。
+    // 只读 jsonl 尾部 512KB；从后往前找第一条非隐藏的真用户消息（工具回执/心情/唤醒/重试都跳过）。
+    if (curSession && !msg._wake) {
+      const sidNow = curSession;
+      _sessionJsonl(sidNow).then(async (p) => {
+        if (!p) return;
+        const st = await fsp.stat(p);
+        const start = Math.max(0, st.size - 524288);
+        const fh = await fsp.open(p, 'r');
+        const buf = Buffer.alloc(st.size - start);
+        await fh.read(buf, 0, buf.length, start);
+        await fh.close();
+        const lines = buf.toString('utf8').trimEnd().split('\n');
+        if (start > 0) lines.shift(); // 掐掉开头的半行
+        const hid = (t) => !t || !t.trim() || t.includes(RETRY_SENTINEL) || t.includes(WAKE_SENTINEL) || t.includes(MOOD_SENTINEL);
+        for (let i = lines.length - 1; i >= 0; i--) {
+          let o; try { o = JSON.parse(lines[i]); } catch (e) { continue; }
+          if (o.type !== 'user' || o.isMeta || !o.message) continue;
+          const c = o.message.content;
+          let txt = '';
+          if (typeof c === 'string') txt = c;
+          else if (Array.isArray(c)) {
+            if (c.some((b) => b && b.type === 'tool_result')) continue;
+            txt = c.filter((b) => b && b.type === 'text').map((b) => b.text).join('\n');
+          }
+          if (hid(txt)) continue;
+          out(turn, { type: 'user_uuid', sessionId: sidNow, uuid: o.uuid });
+          break;
+        }
+      }).catch(() => {});
+    }
     fireMnemoIngest(curSession, cwd);   // 白名单会话：turn 结束后增量灌新内容进 Mnemosyne（fire-and-forget）
     // accumulate this session's running cost / output / round count for /usage
     if (curSession) {
@@ -3236,6 +3431,7 @@ async function runTurn(turn, msg) {
         switch (m.type) {
           case 'system':
             if (m.subtype === 'init') {
+              lastApiKeySource = m.apiKeySource || ''; // 'none'=订阅；App 的 API 页拿它显示真实通路
               curSession = m.session_id;
               sessionRef.id = curSession;
               if (curSession) activeSessions.add(curSession);

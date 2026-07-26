@@ -18,6 +18,9 @@ const defaults = {
   // 'default' consults canUseTool (phone popup) for tools that need permission;
   // 'acceptEdits' / 'bypassPermissions' also possible
   permissionMode: 'default',
+  // API 逃生舱：enabled 时给 cc 注入 ANTHROPIC_* env 走 API 计费（订阅通路不可用时的备胎）。
+  // key=官方 API key；authToken=中转站 Bearer；baseUrl 空=官方。App 设置→连接→API 里改，热生效。
+  api: { enabled: false, key: '', authToken: '', baseUrl: '' },
   debug: false
 };
 

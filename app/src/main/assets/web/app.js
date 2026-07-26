@@ -74,11 +74,12 @@ const EFFORTS = [
 ];
 
 /* ============ navigation ============ */
-const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'stickies', 'diaryWrite', 'favorites', 'cinema', 'cinemaLog', 'memMgr', 'memEdit', 'bookPage', 'fpick', 'bookToc'];
+const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'stickies', 'diaryWrite', 'favorites', 'cinema', 'cinemaLog', 'memMgr', 'memEdit', 'bookPage', 'fpick', 'bookToc', 'apiPage'];
 function show(name) {
   SCREENS.forEach((s) => $(s).classList.toggle('active', s === name));
   state.screen = name;
   if (name !== 'chat' && typeof hideSelBar === 'function') hideSelBar();   // 离开对话屏收起选词浮条
+  if (name !== 'chat' && typeof cancelEdit === 'function') cancelEdit();   // 离开对话＝取消「编辑中」
   syncAtRoot();
   if (typeof updateCinemaBar === 'function') updateCinemaBar();
   sendPresence(); // tell bridge which conversation I'm on (for wake-push 不打扰)
@@ -96,14 +97,14 @@ function overlayUp() {
 // close path (animated, swiped, future additions) converges without per-call-site bookkeeping.
 function syncAtRoot() { try { window.Android && Android.setAtRoot((state.screen === 'list' || state.screen === 'setup') && !overlayUp()); } catch (e) {} }
 setInterval(syncAtRoot, 300);
-const SCRIMS = ['permScrim', 'modelScrim', 'promptScrim', 'toolsScrim', 'modeScrim', 'sessScrim', 'folderScrim', 'claudeScrim', 'folderActScrim', 'pathActScrim', 'mcpScrim', 'mcpCfgScrim', 'memScrim', 'connScrim', 'wakeScrim', 'stickyScrim', 'compactScrim'];
+const SCRIMS = ['permScrim', 'modelScrim', 'promptScrim', 'toolsScrim', 'modeScrim', 'sessScrim', 'folderScrim', 'claudeScrim', 'folderActScrim', 'pathActScrim', 'mcpScrim', 'mcpCfgScrim', 'memScrim', 'connScrim', 'wakeScrim', 'stickyScrim', 'compactScrim', 'confirmScrim', 'msgActScrim'];
 const DRAG_SCRIMS = ['modelScrim', 'toolsScrim', 'modeScrim', 'claudeScrim', 'mcpCfgScrim', 'compactScrim'];
 function anyOverlay() { return SCRIMS.some((s) => $(s).classList.contains('show')) || $('menuPop').classList.contains('show'); }
 function openScrim(id) {
   const s = $(id); s._openedAt = Date.now(); s.classList.add('show'); if (s._open) s._open();
   syncAtRoot();
   // briefly block taps so a quick release after a long-press doesn't fall through onto an item
-  const sheet = s.querySelector('.sheet'); if (sheet) { sheet.style.pointerEvents = 'none'; clearTimeout(s._peT); s._peT = setTimeout(() => { sheet.style.pointerEvents = ''; }, 350); }
+  const sheet = s.querySelector('.sheet, .cdlg'); if (sheet) { sheet.style.pointerEvents = 'none'; clearTimeout(s._peT); s._peT = setTimeout(() => { sheet.style.pointerEvents = ''; }, 350); }
 }
 function closeScrim(id) { const s = $(id); if (s._close) s._close(); else s.classList.remove('show'); syncAtRoot(); }
 function closeOverlays() { SCRIMS.forEach(closeScrim); closeMenu(); }
@@ -189,9 +190,10 @@ window.onAndroidBack = () => {
   if (state.screen === 'stickies') { show('diary'); return; }
   if (state.screen === 'diary') { diaryBack(); return; }
   if (state.screen === 'import') show(state.importReturn || 'files');
-  else if (state.screen === 'files') closeFiles();
+  else if (state.screen === 'files') { if (state.fmSel) exitFmSel(); else closeFiles(); }
   else if (state.screen === 'chat') goListAnimated();
   else if (state.screen === 'setSub') show('settings');
+  else if (state.screen === 'apiPage') show('settings');
   else if (state.screen === 'settings') show('list');
 };
 
@@ -416,8 +418,27 @@ function handle(m) {
     case 'history': if (m.prefetch) onPrefetchHistory(m); else renderHistory(m); break;
     case 'history_window': onHistoryWindow(m); break;
     case 'history_full': onHistoryFull(m); break;
+    case 'paths_done': {
+      const verb = { delete: '已删除', move: '已移动', copy: '已复制' }[m.op] || '完成';
+      toast(verb + ' ' + m.done + ' 项' + (m.fail ? '，' + m.fail + ' 项失败' : ''));
+      break;
+    }
+    case 'api_info': renderApiInfo(m); break;
+    case 'api_test_result': {
+      const o = $('apiTestOut'); o.className = 'apitest ' + (m.ok ? 'ok' : 'err'); o.textContent = m.message || '';
+      break;
+    }
+    case 'user_uuid': {
+      // 现场发的气泡补上消息 id → 不用退出重进就能点「编辑重发」
+      const t = state.activeTurn;
+      if (m.sessionId === state.currentSession && t && t.userMsgEl) {
+        const b = t.userMsgEl.querySelector('.bubble');
+        if (b && !b._uuid) bindUserBubble(b, m.uuid, t.draft || '');
+      }
+      break;
+    }
     case 'dirs':
-      if (state.fpickWait && m.path === state.fpickWait) { state.fpickWait = null; renderFilePick(m); break; }
+      if (state.fpickWait && m.path === state.fpickWait) { state.fpickWait = null; state.fpickDir = m.path; renderFilePick(m); break; }
       renderDirs(m); break;
     case 'turn_start': state.busy = true; state.turnTools = []; state.toolRow = null; startStatus(); updateSend(); break;
     case 'session_init':
@@ -617,9 +638,7 @@ function selectAllVisible() {
 function deleteSelected() {
   if (!state.selected.size) return;
   const n = state.selected.size;
-  openPrompt('输入「删除」确认删除选中的 ' + n + ' 个会话（不可恢复）', '', (v) => {
-    if (v === '删除') { wsend({ type: 'delete_many', ids: [...state.selected] }); exitSelect(); } else toast('已取消');
-  });
+  openConfirm('删除 ' + n + ' 个对话？', '不可恢复', () => { wsend({ type: 'delete_many', ids: [...state.selected] }); exitSelect(); });
 }
 function togglePin(s) { wsend({ type: 'pin', sessionId: s.id, pinned: !s.pinned }); toast(s.pinned ? '已取消置顶' : '已置顶'); }
 function openSessActions(s) {
@@ -693,20 +712,39 @@ function addUser(text, uuid, images) {
   }
   if (text) { const tx = el('div'); tx.textContent = text; b.appendChild(tx); }
   m.appendChild(b);
-  if (uuid) { b.classList.add('editable'); b.addEventListener('click', () => editMessage(uuid, text)); }
+  bindUserBubble(b, uuid || null, text);
   rt().appendChild(m); scrollThread();
   return b;
 }
+// 自己的气泡：轻点=编辑重发（有 uuid 才行——现场发的先没有，turn 结束后 user_uuid 事件补上）；
+// 长按=弹窗菜单。长按会撞安卓原生选词 → 用户气泡关掉原生选择（全文复制在菜单里）。
+function bindUserBubble(b, uuid, text) {
+  b._uuid = uuid; b._raw = text || '';
+  if (b._ubound) return;
+  b._ubound = true;
+  b.classList.add('editable');
+  b.addEventListener('click', () => { if (b._uuid) editMessage(b._uuid, b._raw); });
+  bindHold(b, () => openMsgActions(b));
+}
+function openMsgActions(b) {
+  state.msgTarget = b;
+  $('msgEdit').style.display = b._uuid ? '' : 'none';
+  openScrim('msgActScrim');
+}
+// 编辑重发＝「编辑中」模式（主流聊天 App 的编辑交互）：原文进输入框、输入框上方亮「编辑中」条，
+// 发送=从那条消息 fork 重跑；✕ 或离开对话取消。
 function editMessage(uuid, current) {
-  if (!state.currentSession) return;
-  openPrompt('编辑并重发', current, (text) => {
-    if (!text || text === current) return;
-    state.forkFrom = state.currentSession; state.expectFork = true; clearThread(); addUser(text);
-    state.activeTurn = { id: genId(), lastI: 0, done: false };
-    const msg = { type: 'edit_resend', sessionId: state.currentSession, targetUuid: uuid, text, mode: state.mode, turnId: state.activeTurn.id };
-    if (state.model) msg.model = state.model; if (state.effort) msg.effort = state.effort;
-    wsend(msg);
-  });
+  if (!state.currentSession || !uuid) return;
+  state.editTarget = uuid;
+  $('editStrip').classList.add('show');
+  const c = $('composer'); c.value = current || '';
+  resizeComposer(); updateSend();
+  c.focus();
+}
+function cancelEdit() {
+  if (!state.editTarget) return;
+  state.editTarget = null; $('editStrip').classList.remove('show');
+  const c = $('composer'); c.value = ''; resizeComposer(); updateSend();
 }
 function regenerate() {
   if (!state.currentSession) { toast('新会话无需重新生成'); return; }
@@ -822,7 +860,13 @@ function endTurn(m) {
   }
   scrollThreadAuto();
   wsend({ type: 'list_sessions' });
-  if (state.expectFork) { state.expectFork = false; wsend({ type: 'history_window', sessionId: state.currentSession, limit: 60 }); }
+  if (state.expectFork) {
+    state.expectFork = false;
+    const sid = state.currentSession;
+    // fork 刚收尾时 jsonl 可能还没写全（真踩过：history 只回用户消息 total=1，把现场已渲染的回复整个刷没）
+    // → 缓 1 秒再拉，且期间没切走才渲染
+    setTimeout(() => { if (state.currentSession === sid) wsend({ type: 'history_window', sessionId: sid, limit: 60 }); }, 1000);
+  }
 }
 
 function toolArgSummary(name, input) {
@@ -1369,11 +1413,11 @@ function openFileManager(mode) {
   $('dirPick').style.display = 'none';
   $('fmProgress').innerHTML = ''; wsend({ type: 'list_dirs', path: state.dirPath }); show('files');
 }
-function closeFiles() { show(state.filesReturn || 'list'); }
+function closeFiles() { if (state.fmSel) exitFmSel(); show(state.filesReturn || 'list'); }
 function renderDirs(m) {
-  state.dirPath = m.path; $('dirCurrent').textContent = m.path;
+  state.dirPath = m.path; state._lastDirs = m; $('dirCurrent').textContent = m.path;
   const list = $('dirList'); list.innerHTML = '';
-  // toolbar: upload + new folder (upload only in manager modes)
+  // toolbar: upload + new folder (upload only in manager modes) + paste (剪贴板有东西时)
   const bar = el('div', 'dirtool');
   if (state.dirMode === 'attach' || state.dirMode === 'browse') {
     const up = el('button', 'btn btn-ghost'); up.textContent = '⬆ 上传到这里';
@@ -1382,10 +1426,24 @@ function renderDirs(m) {
   }
   const nf = el('button', 'btn btn-ghost'); nf.textContent = '＋ 新建文件夹';
   nf.addEventListener('click', () => openPrompt('新建文件夹', '', (name) => { if (name) wsend({ type: 'mkdir', dir: state.dirPath, name }); }));
-  bar.appendChild(nf); list.appendChild(bar);
-  if (m.parent && m.parent !== m.path) { const up = el('div', 'diritem up'); up.innerHTML = '<span class="ico">' + ICON.up + '</span>'; up.appendChild(document.createTextNode(' ..')); up.addEventListener('click', () => wsend({ type: 'list_dirs', path: m.parent })); list.appendChild(up); }
+  bar.appendChild(nf);
+  if (state.fmClip && state.fmClip.paths.length) {
+    // 剪贴板有货 → 工具栏一个粘贴符号（点=贴到当前目录，长按=清空）
+    const pc = el('button', 'pastebtn');
+    pc.innerHTML = '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>';
+    pc.addEventListener('click', () => {
+      const c = state.fmClip; if (!c) return;
+      state.fmClip = null;
+      wsend({ type: 'paths_op', op: c.op, paths: c.paths, dest: state.dirPath, dir: state.dirPath });
+    });
+    bindHold(pc, () => { state.fmClip = null; rerenderDirs(); toast('已清空剪贴板'); });
+    bar.appendChild(pc);
+  }
+  list.appendChild(bar);
+  if (m.parent && m.parent !== m.path) { const up = el('div', 'diritem up'); up.innerHTML = '<span class="ico">' + ICON.up + '</span>'; up.appendChild(document.createTextNode(' ..')); up.addEventListener('click', () => { if (!state.fmSel) wsend({ type: 'list_dirs', path: m.parent }); }); list.appendChild(up); }
   (m.dirs || []).forEach((d) => {
     const it = el('div', 'diritem'); it.innerHTML = '<span class="ico">' + ICON.folder + '</span>'; it.appendChild(document.createTextNode(' ' + d.split('/').pop()));
+    fmDecorate(it, d);
     bindEntry(it, () => wsend({ type: 'list_dirs', path: d }), d);
     list.appendChild(it);
   });
@@ -1396,11 +1454,29 @@ function renderDirs(m) {
       const ico = isImagePath(f) ? '<img class="fmthumb" src="' + mediaUrlC(f) + '" loading="lazy">' : '<span class="ico">' + ICON.doc + '</span>';
       it.innerHTML = ico + '<span class="fm-n"></span><span class="fm-sz">' + fmtBytes(size) + '</span>';
       it.querySelector('.fm-n').textContent = f.split('/').pop();
+      fmDecorate(it, f);
       bindEntry(it, () => onFileTap(f), f);
       list.appendChild(it);
     });
   }
   if (!(m.dirs || []).length && !(state.dirMode !== 'cwd' && (m.files || []).length)) { const e = el('div', 'diritem'); e.style.color = 'var(--muted)'; e.textContent = '（空）'; list.appendChild(e); }
+}
+function rerenderDirs() { if (state._lastDirs) renderDirs(state._lastDirs); }
+// 多选态：选中只用底色表示（不加勾选圈，保持行干净）
+function fmDecorate(it, path) {
+  if (state.fmSel && state.fmSel.has(path)) it.classList.add('sel');
+}
+function enterFmSel(path) {
+  state.fmSel = new Set(path ? [path] : []);
+  $('fmSelBar').classList.add('show'); updateFmSelBar(); rerenderDirs();
+}
+function exitFmSel() { state.fmSel = null; $('fmSelBar').classList.remove('show'); rerenderDirs(); }
+function updateFmSelBar() { $('fmSelN').textContent = (state.fmSel ? state.fmSel.size : 0) + ' 项'; }
+function fmClipFromSel(op) {
+  if (!state.fmSel || !state.fmSel.size) return;
+  state.fmClip = { op, paths: [...state.fmSel] };
+  const n = state.fmSel.size; exitFmSel();
+  toast((op === 'move' ? '已剪切 ' : '已复制 ') + n + ' 项，去目标目录粘贴');
 }
 function onFileTap(path) {
   if (state.dirMode === 'attach') fmAttach(path);
@@ -1422,11 +1498,19 @@ function fmDownload(path) {
   if (nativeDownload(url, path.split('/').pop())) return;
   const a = document.createElement('a'); a.href = url; a.download = path.split('/').pop(); document.body.appendChild(a); a.click(); a.remove();
 }
-// tap = action(), long-press = manage (rename/delete/download)
+// tap = action()（多选态改为勾选）, long-press = 弹窗菜单（多选态禁用）
 function bindEntry(node, onTap, path) {
   let lp = false, timer = null;
-  node.addEventListener('click', () => { if (lp) { lp = false; return; } onTap(); });
-  const start = () => { lp = false; timer = setTimeout(() => { lp = true; buzz(12); openPathActions(path); }, 500); };
+  node.addEventListener('click', () => {
+    if (lp) { lp = false; return; }
+    if (state.fmSel) {
+      if (state.fmSel.has(path)) state.fmSel.delete(path); else state.fmSel.add(path);
+      node.classList.toggle('sel', state.fmSel.has(path)); updateFmSelBar(); buzz(8);
+      return;
+    }
+    onTap();
+  });
+  const start = () => { if (state.fmSel) return; lp = false; timer = setTimeout(() => { lp = true; buzz(12); openPathActions(path); }, 500); };
   const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
   node.addEventListener('touchstart', start, { passive: true });
   node.addEventListener('touchend', cancel); node.addEventListener('touchmove', cancel);
@@ -1470,6 +1554,15 @@ function managerUpload(fileList) {
       .then(() => { row.remove(); if (state.dirPath === dir) wsend({ type: 'list_dirs', path: state.dirPath }); toast('已上传 ' + file.name); })
       .catch((e) => { row.querySelector('.fmp-s').textContent = '失败'; toast('上传失败：' + e.message); });
   });
+}
+
+/* ============ 居中确认弹窗：一次点击代替「输入删除确认」（各处删除共用） ============ */
+function openConfirm(title, sub, cb, okText) {
+  $('confirmTitle').textContent = title;
+  const s = $('confirmSub'); s.textContent = sub || ''; s.style.display = sub ? '' : 'none';
+  $('confirmYes').textContent = okText || '删除';
+  state.confirmCb = cb;
+  openScrim('confirmScrim');
 }
 
 /* ============ prompt sheet ============ */
@@ -1599,6 +1692,7 @@ const FPICK_EXT = /\.(md|txt|json|jsonl|ya?ml|toml|ini|conf|cfg|log|csv|js|mjs|c
 function openFilePick() {
   const dir = (state.cwd || state.defaultCwd || '').replace(/\/$/, '');
   if (!dir) { toast('未知工作目录'); return; }
+  state.fpickDir = dir;            // 每次从对话目录出发；页内可切到 home 里任何目录
   state.fpickWait = dir;
   state.fpickBack = state.screen;
   $('filePickSub').textContent = '';
@@ -1606,11 +1700,34 @@ function openFilePick() {
   show('fpick');
   wsend({ type: 'list_dirs', path: dir });
 }
+function fpickGo(dir) {
+  state.fpickWait = dir;
+  wsend({ type: 'list_dirs', path: dir });
+}
 function renderFilePick(m) {
   const box = $('filePickBody'); box.innerHTML = '';
   const files = (m.files || []).filter((f) => FPICK_EXT.test(f.path));
-  $('filePickSub').textContent = files.length ? files.length + ' 个文本文件' : '';
-  if (!files.length) { box.innerHTML = '<div class="cl-empty">这个目录里还没有可编辑的文本文件。</div>'; return; }
+  const short = (m.path || '').replace(/^\/(root|home\/[^/]+)/, '~');
+  $('filePickSub').textContent = short + (files.length ? ' · ' + files.length + ' 个文本文件' : '');
+  // 目录导航：.. + 子目录，普通横栏（和文件管理同款），能翻到 home 里任何文件夹
+  const navs = [];
+  if (m.parent && m.parent !== m.path) navs.push(['上一级', m.parent, true]);
+  (m.dirs || []).forEach((d) => navs.push([d.split('/').pop(), d, false]));
+  if (navs.length) {
+    const card = el('div', 'fpick-card');
+    navs.forEach(([nm, d, up]) => {
+      const row = el('button', 'fpick-row');
+      const ico = el('span', 'fpick-ico' + (up ? ' fpup' : ''));
+      ico.innerHTML = _sv(up ? '<polyline points="15 18 9 12 15 6"/>' : '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>', 18);
+      row.appendChild(ico);
+      const main = el('span', 'fpick-main'); const l1 = el('span', 'fpick-line1');
+      const n = el('span', 'fpick-name'); n.textContent = nm; l1.appendChild(n); main.appendChild(l1); row.appendChild(main);
+      row.addEventListener('click', () => fpickGo(d));
+      card.appendChild(row);
+    });
+    box.appendChild(card);
+  }
+  if (!files.length) { const e = el('div', 'cl-empty'); e.textContent = '这个目录里还没有可编辑的文本文件。'; box.appendChild(e); return; }
   const fmtSz = (s) => s > 1048576 ? (s / 1048576).toFixed(1) + ' MB' : s > 1024 ? Math.round(s / 1024) + ' KB' : (s || 0) + ' B';
   const fmtDt = (t) => {
     if (!t) return '';
@@ -2624,7 +2741,7 @@ function eventRow(ev) {
   mid.appendChild(tl);
   if (ev.note) { const nt = el('div', 'agnote'); nt.textContent = ev.note; mid.appendChild(nt); }
   let held = false;
-  bindHold(mid, () => { held = true; openPrompt('删除这条日程？输入「删除」确认', '', (v) => { if (v === '删除') wsend({ type: 'event_delete', id: ev.id }); }); });
+  bindHold(mid, () => { held = true; openConfirm('删除这条日程？', '', () => wsend({ type: 'event_delete', id: ev.id })); });
   mid.addEventListener('click', () => { if (held) { held = false; return; } editEvent(ev); });
   r.appendChild(mid); return r;
 }
@@ -2637,7 +2754,7 @@ function todoRow(td) {
   if (td.by === 'cc') { const tag = el('span', 'agby'); tag.textContent = state.aName; tl.appendChild(tag); }
   mid.appendChild(tl);
   let held = false;
-  bindHold(mid, () => { held = true; openPrompt('删除这条待办？输入「删除」确认', '', (v) => { if (v === '删除') wsend({ type: 'todo_delete', id: td.id }); }); });
+  bindHold(mid, () => { held = true; openConfirm('删除这条待办？', '', () => wsend({ type: 'todo_delete', id: td.id })); });
   mid.addEventListener('click', () => { if (held) { held = false; return; } editTodo(td); });
   r.appendChild(mid); return r;
 }
@@ -2721,7 +2838,7 @@ function renderFavCards(items) {
     const tx = el('div', 'fav-text'); tx.textContent = it.text;
     const sub = el('div', 'dcard-sub'); sub.textContent = (it.title || '（来源对话）') + '  ·  ' + favWhen(it.ts);
     card.append(tx, sub);
-    bindHold(card, () => { held = true; openPrompt('删除这条收藏？输入「删除」确认', '', (v) => { if (v === '删除') wsend({ type: 'favorites_delete', id: it.id }); }); });
+    bindHold(card, () => { held = true; openConfirm('删除这条收藏？', '', () => wsend({ type: 'favorites_delete', id: it.id })); });
     card.addEventListener('click', () => { if (held) { held = false; return; } if (it.sessionId) jumpToDialog(it.sessionId, it.text); else toast('这条没有来源对话'); });
     body.appendChild(card);
   });
@@ -2940,6 +3057,31 @@ function openConn() {
   $('set_url').value = LS.url; $('set_token').value = LS.token; $('set_cwd').value = LS.cwd;
   $('conn_status').textContent = state.connected ? (state.authed ? '已连接 · ' + (LS.url || '') : '连接中…') : '未连接';
   openScrim('connScrim');
+}
+/* ============ 设置 › API（订阅通路的逃生舱：key 存服务器 config，切换热生效） ============ */
+function openApi() {
+  $('apiTestOut').textContent = ''; $('apiTestOut').className = 'apitest';
+  $('api_key').value = ''; $('api_token').value = '';
+  show('apiPage');
+  wsend({ type: 'api_get' });
+}
+function renderApiInfo(m) {
+  state.apiInfo = m;
+  $('apiOn').classList.toggle('on', !!m.enabled);
+  $('api_key').placeholder = m.keyTail ? '已存 ····' + m.keyTail : '未设置';
+  $('api_token').placeholder = m.tokenTail ? '已存 ····' + m.tokenTail : '未设置';
+  if (document.activeElement !== $('api_base')) $('api_base').value = m.baseUrl || '';
+  const src = !m.source ? '尚无记录' : (m.source === 'none' ? '订阅额度' : 'API（' + m.source + '）');
+  $('apiStatus').textContent = '最近一轮实际走的通路：' + src;
+  $('apiClear').style.display = (m.keyTail || m.tokenTail) ? '' : 'none';
+  $('setApiDesc').textContent = m.enabled ? '开 · ' + (m.baseUrl ? '中转' : '官方') : '关 · 订阅额度';
+}
+function apiFields() {
+  const o = {};
+  if ($('api_key').value.trim()) o.key = $('api_key').value.trim();
+  if ($('api_token').value.trim()) o.authToken = $('api_token').value.trim();
+  o.baseUrl = $('api_base').value.trim();
+  return o;
 }
 function openSetSub(catId) {
   const cat = SET_CATS[catId]; if (!cat) return;
@@ -3562,6 +3704,21 @@ function sendMessage() {
   }
   if (state.pendingFiles.some((f) => f.status === 'uploading')) { toast('还有文件在上传…'); return; }
   const c = $('composer'); let text = c.value.trim();
+  // 「编辑中」模式：发送 = 从那条消息 fork 重跑（同文重发=从那里重新生成）
+  if (state.editTarget) {
+    if (!text || !state.currentSession || !state.authed) return;
+    const uuid = state.editTarget;
+    state.editTarget = null; $('editStrip').classList.remove('show');
+    closePlus(); removeSuggestions();
+    state.forkFrom = state.currentSession; state.expectFork = true; clearThread();
+    const eb = addUser(text);
+    state.activeTurn = { id: genId(), lastI: 0, done: false, spoke: false, userMsgEl: eb ? eb.parentElement : null, draft: text };
+    const emsg = { type: 'edit_resend', sessionId: state.currentSession, targetUuid: uuid, text, mode: state.mode, turnId: state.activeTurn.id };
+    if (state.model) emsg.model = state.model; if (state.effort) emsg.effort = state.effort;
+    wsend(emsg);
+    c.value = ''; resizeComposer(); updateSend();
+    return;
+  }
   const origText = text;
   const files = state.pendingFiles.filter((f) => f.status === 'ready' && f.path);
   const texts = state.pendingTexts.slice();
@@ -3687,12 +3844,12 @@ function boot() {
   $('pathDownload').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) fmDownload(p); });
   $('pathAttach').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) fmAttach(p); });
   $('pathRename').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) openPrompt('重命名', '', (name) => { if (name) wsend({ type: 'rename_path', old: p, name, dir: state.dirPath }); }, p.split('/').pop()); });
-  $('pathDelete').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) openPrompt('输入「删除」确认删除「' + p.split('/').pop() + '」（不可恢复）', '', (v) => { if (v === '删除') wsend({ type: 'delete_path', path: p, dir: state.dirPath }); else toast('已取消'); }); });
+  $('pathDelete').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) openConfirm('删除「' + p.split('/').pop() + '」？', '不可恢复', () => wsend({ type: 'delete_path', path: p, dir: state.dirPath })); });
   $('folderLeft').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) wsend({ type: 'move_folder', name: f, dir: 'left' }); });
   $('folderRight').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) wsend({ type: 'move_folder', name: f, dir: 'right' }); });
   $('folderRename').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) openPrompt('重命名文件夹', '', (name) => { if (name && name !== f) wsend({ type: 'rename_folder', old: f, name }); }, f); });
-  $('folderDelete').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) openPrompt('输入「删除」确认删除文件夹（里面的会话保留、只移出）', '', (v) => { if (v === '删除') wsend({ type: 'delete_folder', name: f }); else toast('已取消'); }); });
-  $('folderDeleteAll').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) openPrompt('输入「删除」连同「' + f + '」里的所有对话一起删除（不可恢复）', '', (v) => { if (v === '删除') wsend({ type: 'delete_folder', name: f, withSessions: true }); else toast('已取消'); }); });
+  $('folderDelete').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) openConfirm('删除文件夹「' + f + '」？', '里面的对话保留、只移出', () => wsend({ type: 'delete_folder', name: f })); });
+  $('folderDeleteAll').addEventListener('click', () => { const f = state.folderActTarget; closeScrim('folderActScrim'); if (f) openConfirm('删除「' + f + '」和里面的所有对话？', '不可恢复', () => wsend({ type: 'delete_folder', name: f, withSessions: true })); });
   $('claudeSave').addEventListener('click', saveClaudeMd);
   $('claudePrev').addEventListener('click', () => setClaudePreview($('claudeView').style.display === 'none'));
   $('compactSave').addEventListener('click', () => { setPref('compactPrompt', $('compactText').value); closeScrim('compactScrim'); toast('压缩提示词已保存'); });
@@ -3719,7 +3876,7 @@ function boot() {
   // 重命名从菜单挪到「点对话标题」
   $('chatTitle').addEventListener('click', () => { if (!state.currentSession) return; openPrompt('重命名会话', '', (name) => { if (name) wsend({ type: 'rename', sessionId: state.currentSession, title: name }); }, state.curTitle || ''); });
   $('chatSub').addEventListener('click', () => { const cs = $('chatSub'); if (cs.classList.contains('mood')) cs.classList.toggle('expanded'); });   // 点心情展开/收起看全
-  $('mDelete').addEventListener('click', () => { closeMenu(); openPrompt('输入「删除」确认', '', (v) => { if (v === '删除') { wsend({ type: 'delete', sessionId: state.currentSession }); goList(); } else toast('已取消'); }); });
+  $('mDelete').addEventListener('click', () => { closeMenu(); openConfirm('删除这个对话？', '不可恢复', () => { wsend({ type: 'delete', sessionId: state.currentSession }); goList(); }); });
   // 工具类下放到「＋」面板（编辑 CLAUDE.md / 记忆 / MCP 服务器）；复制目录路径并进文件管理
   $('atMemory').addEventListener('click', () => { closePlus(); openMemory(); });
   $('atFiles').addEventListener('click', () => { closePlus(); openFilePick(); });
@@ -3851,7 +4008,7 @@ function boot() {
   $('sessFolder').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openFolderPicker(s); });
   $('sessRename').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('重命名会话', '', (name) => { if (name) wsend({ type: 'rename', sessionId: s.id, title: name }); }, s.title || ''); });
   $('sessClone').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) { toast('复制中…'); wsend({ type: 'clone_session', sessionId: s.id, title: s.title || '' }); } });
-  $('sessDelete').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('输入「删除」确认删除', '', (v) => { if (v === '删除') wsend({ type: 'delete', sessionId: s.id }); else toast('已取消'); }); });
+  $('sessDelete').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openConfirm('删除「' + (s.title || '会话') + '」？', '不可恢复', () => wsend({ type: 'delete', sessionId: s.id })); });
   function savePrompt() {
     const inp = $('promptInput'); const raw = inp.value.trim();
     if (!raw && !state.promptAllowEmpty) return;     // 空内容不提交（→ 本就藏着）
@@ -3875,6 +4032,23 @@ function boot() {
   $('importAll').addEventListener('click', importToggleAll);
   $('importGo').addEventListener('click', doImport);
   $('setConnRow').addEventListener('click', openConn);
+  $('setApiRow').addEventListener('click', openApi);
+  $('apiBack').addEventListener('click', () => show('settings'));
+  $('apiOn').addEventListener('click', () => { const on = !(state.apiInfo && state.apiInfo.enabled); wsend({ type: 'api_set', enabled: on }); buzz(12); });
+  $('apiSave').addEventListener('click', () => { wsend({ type: 'api_set', ...apiFields() }); $('api_key').value = ''; $('api_token').value = ''; toast('已保存'); });
+  $('apiTest').addEventListener('click', () => { const o = $('apiTestOut'); o.className = 'apitest'; o.textContent = '测试中…'; wsend({ type: 'api_test', ...apiFields() }); });
+  $('apiClear').addEventListener('click', () => openConfirm('清除已存的密钥？', 'Key 和 Token 都会清掉', () => wsend({ type: 'api_set', key: '', authToken: '' }), '清除'));
+  $('confirmYes').addEventListener('click', () => { const cb = state.confirmCb; state.confirmCb = null; closeScrim('confirmScrim'); if (cb) cb(); });
+  $('msgEdit').addEventListener('click', () => { const b = state.msgTarget; closeScrim('msgActScrim'); if (b && b._uuid) editMessage(b._uuid, b._raw || ''); });
+  $('editX').addEventListener('click', cancelEdit);
+  $('msgCopy').addEventListener('click', () => { const b = state.msgTarget; closeScrim('msgActScrim'); if (b) copyText(b._raw || b.innerText || '', '已复制'); });
+  $('pathSelect').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) enterFmSel(p); });
+  $('pathCut').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) { state.fmClip = { op: 'move', paths: [p] }; rerenderDirs(); toast('已剪切，去目标目录粘贴'); } });
+  $('pathCopy').addEventListener('click', () => { const p = state.pathTarget; closeScrim('pathActScrim'); if (p) { state.fmClip = { op: 'copy', paths: [p] }; rerenderDirs(); toast('已复制，去目标目录粘贴'); } });
+  $('fmSelCut').addEventListener('click', () => fmClipFromSel('move'));
+  $('fmSelCopy').addEventListener('click', () => fmClipFromSel('copy'));
+  $('fmSelDel').addEventListener('click', () => { if (!state.fmSel || !state.fmSel.size) return; const ps = [...state.fmSel]; openConfirm('删除 ' + ps.length + ' 项？', '不可恢复', () => { wsend({ type: 'paths_op', op: 'delete', paths: ps, dir: state.dirPath }); exitFmSel(); }); });
+  $('fmSelX').addEventListener('click', exitFmSel);
   $('setAppearRow').addEventListener('click', () => openSetSub('appearance'));
   $('setChatRow').addEventListener('click', () => openSetSub('chat'));
   $('setHapticRow').addEventListener('click', () => openSetSub('haptics'));

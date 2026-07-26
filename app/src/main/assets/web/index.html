@@ -72,6 +72,7 @@
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 3.5A1.75 1.75 0 0 1 3.5 1.75h2.69c.46 0 .9.18 1.23.51l.82.82h4.51c.97 0 1.75.78 1.75 1.75v7.91c0 .97-.78 1.75-1.75 1.75H3.5a1.75 1.75 0 0 1-1.75-1.75V3.5z"/></svg>
         <span id="dirChipLabel"></span>
       </button>
+      <div class="editstrip" id="editStrip"><span>编辑中</span><button id="editX" aria-label="取消编辑">✕</button></div>
       <div class="attachstrip" id="attachStrip"></div>
       <input type="file" id="fileUp" multiple style="display:none">
       <input type="file" id="fileUpMgr" multiple style="display:none">
@@ -121,6 +122,11 @@
         <button class="setrow" id="setConnRow">
           <span class="sr-ic"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l3 8 4-16 3 8h4"/></svg></span>
           <span class="sr-body"><span class="sr-name">连接</span><span class="sr-desc" id="setConnDesc">未连接</span></span>
+          <span class="sr-chev">›</span>
+        </button>
+        <button class="setrow" id="setApiRow">
+          <span class="sr-ic"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span>
+          <span class="sr-body"><span class="sr-name">API</span><span class="sr-desc" id="setApiDesc">关 · 订阅额度</span></span>
           <span class="sr-chev">›</span>
         </button>
         <button class="setrow" id="setAppearRow">
@@ -185,6 +191,37 @@
     </div>
   </div>
 
+  <!-- settings › API（订阅通路的逃生舱） -->
+  <div id="apiPage" class="screen">
+    <div class="topbar">
+      <button class="iconbtn" id="apiBack">‹</button>
+      <div class="h2" style="font-family:var(--serif);font-size:22px;font-weight:700;">API</div>
+      <div class="spacer"></div>
+    </div>
+    <div class="pad" style="padding-top:6px;">
+      <div class="sub" id="apiStatus" style="margin-bottom:14px;">最近一轮实际走的通路：—</div>
+      <div class="setmenu" style="margin-bottom:16px;">
+        <div class="setitem togglerow"><span>走 API 计费</span><button class="switch" id="apiOn"><span class="knob"></span></button></div>
+      </div>
+      <div class="field">
+        <label>API Key</label>
+        <input id="api_key" class="mono" type="text" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="未设置">
+      </div>
+      <div class="field">
+        <label>Bearer Token</label>
+        <input id="api_token" class="mono" type="text" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="未设置">
+      </div>
+      <div class="field">
+        <label>中转地址</label>
+        <input id="api_base" class="mono" type="url" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="留空走官方">
+      </div>
+      <button class="btn btn-primary" id="apiSave">保存</button>
+      <button class="btn btn-ghost" id="apiTest" style="margin-top:8px;">测试</button>
+      <button class="btn btn-ghost" id="apiClear" style="margin-top:8px;display:none;">清除已存的密钥</button>
+      <div class="apitest" id="apiTestOut"></div>
+    </div>
+  </div>
+
   <!-- file manager (full screen, like the settings sub-page) -->
   <div id="files" class="screen">
     <div class="topbar">
@@ -200,6 +237,14 @@
       <div id="fmProgress"></div>
       <div class="dirlist" id="dirList"></div>
       <button class="btn btn-primary" id="dirPick" style="margin-top:14px;">用这个目录</button>
+    </div>
+    <div class="fmselbar" id="fmSelBar">
+      <span class="fsb-n" id="fmSelN">0 项</span>
+      <div class="spacer"></div>
+      <button id="fmSelCut">剪切</button>
+      <button id="fmSelCopy">复制</button>
+      <button class="danger" id="fmSelDel">删除</button>
+      <button id="fmSelX">取消</button>
     </div>
   </div>
 
@@ -276,13 +321,16 @@
   </div>
 
   <!-- file/dir long-press actions (in browser) -->
-  <div class="scrim" id="pathActScrim">
-    <div class="sheet">
-      <div class="sheethdr nodrag"><div class="ptitle mono" id="pathActTitle">…</div></div>
-      <div class="sheetbody">
-        <button class="actitem" id="pathImport">导入为对话（Claude 导出）</button>
+  <div class="scrim center" id="pathActScrim">
+    <div class="cdlg">
+      <div class="cd-head"><div class="cd-title mono" id="pathActTitle">…</div></div>
+      <div class="cd-list">
+        <button class="actitem" id="pathImport">导入为对话</button>
         <button class="actitem" id="pathDownload">下载到手机</button>
         <button class="actitem" id="pathAttach">附加到消息</button>
+        <button class="actitem" id="pathSelect">多选</button>
+        <button class="actitem" id="pathCut">剪切</button>
+        <button class="actitem" id="pathCopy">复制</button>
         <button class="actitem" id="pathRename">重命名</button>
         <button class="actitem danger" id="pathDelete">删除</button>
       </div>
@@ -363,10 +411,10 @@
   </div>
 
   <!-- folder (tab) long-press actions -->
-  <div class="scrim" id="folderActScrim">
-    <div class="sheet">
-      <div class="sheethdr nodrag"><div class="ptitle" id="folderActTitle">文件夹</div></div>
-      <div class="sheetbody">
+  <div class="scrim center" id="folderActScrim">
+    <div class="cdlg">
+      <div class="cd-head"><div class="cd-title" id="folderActTitle">文件夹</div></div>
+      <div class="cd-list">
         <button class="actitem" id="folderLeft">左移</button>
         <button class="actitem" id="folderRight">右移</button>
         <button class="actitem" id="folderRename">重命名文件夹</button>
@@ -377,10 +425,28 @@
   </div>
 
   <!-- session long-press actions -->
-  <div class="scrim" id="sessScrim">
-    <div class="sheet">
-      <div class="sheethdr nodrag"><div class="ptitle" id="sessTitle">会话</div></div>
-      <div class="sheetbody">
+  <!-- 删除确认（居中弹窗，替代「输入删除确认」） -->
+  <div class="scrim center" id="confirmScrim">
+    <div class="cdlg">
+      <div class="cd-head"><div class="cd-title" id="confirmTitle"></div><div class="cd-sub" id="confirmSub"></div></div>
+      <div class="cd-row"><button class="cd-btn" data-x>取消</button><button class="cd-btn danger" id="confirmYes">删除</button></div>
+    </div>
+  </div>
+
+  <!-- 自己消息长按 -->
+  <div class="scrim center" id="msgActScrim">
+    <div class="cdlg">
+      <div class="cd-list" style="padding-top:0;">
+        <button class="actitem" id="msgEdit">编辑重发</button>
+        <button class="actitem" id="msgCopy">复制全文</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="scrim center" id="sessScrim">
+    <div class="cdlg">
+      <div class="cd-head"><div class="cd-title" id="sessTitle">会话</div></div>
+      <div class="cd-list">
         <button class="actitem" id="sessPin">置顶</button>
         <button class="actitem" id="sessFolder">移到文件夹</button>
         <button class="actitem" id="sessSelect">选择</button>
