@@ -2057,6 +2057,7 @@ function newTurn(id, ws) {
   return turn;
 }
 function out(turn, obj) {
+  obj.turnId = turn.id;   // 客户端按 turn 路由事件（并发对话：不是当前对话的只记进度、不上屏）
   obj._i = ++turn.seq;
   turn.events.push(obj);
   if (turn.events.length > 6000) turn.events.shift();
@@ -2581,9 +2582,13 @@ async function handle(ws, conn, msg) {
       break;
     }
 
-    case 'interrupt':
-      if (conn.turn) try { conn.turn.abort.abort(); } catch {}
+    case 'interrupt': {
+      // 带 turnId 就只打断那一个（并发对话）——找不到宁可不动，回落会误伤别的对话；
+      // 老客户端不带 turnId → 沿用「最近一个 turn」
+      const t = msg.turnId ? turns.get(msg.turnId) : conn.turn;
+      if (t) try { t.abort.abort(); } catch {}
       break;
+    }
 
     case 'attach': {
       const turn = turns.get(msg.turnId);
@@ -3424,6 +3429,7 @@ async function runTurn(turn, msg) {
       let deltaText = '';    // raw streamed text deltas — salvage source when the closing assistant message gets swallowed by a parse failure
       let moodCut = false;   // once the hidden 心情标记 starts streaming, swallow the tail so it never flashes
       let parseFail = false; // did we see the "tool call could not be parsed" signal?
+      let refusal = null;    // 安全系统整条拦下（stop_details.type='refusal'）——重试只会再撞一次墙
       let sawToolUse = false; // 这轮是否真跑完过工具来回（tool_result 回来过）——合法「纯工具轮」不是被吞
       let resultMsg = null;
       const q = query({ prompt: qPrompt, options: qOptions });
@@ -3467,7 +3473,12 @@ async function runTurn(turn, msg) {
             if (m.message?.usage) lastUsage = m.message.usage; // last call's usage ≈ current context
             // a "<synthetic>" message = the CLI giving up after a malformed tool_use
             // ("...could not be parsed (retry also failed)."). Swallow it; we retry the whole turn.
-            if (m.message?.model === '<synthetic>') { parseFail = true; break; }
+            if (m.message?.model === '<synthetic>') {
+              const sd = m.message.stop_details;
+              if (sd && sd.type === 'refusal') refusal = sd;
+              else parseFail = true;
+              break;
+            }
             const content = m.message?.content || [];
             for (const block of content) {
               if (block.type === 'text') {
@@ -3539,10 +3550,19 @@ async function runTurn(turn, msg) {
       }
       // errTxt==='' 不足以判「被吞」：合法纯工具轮（唤醒时只调 set_wakeup/write_diary 不说话）result 也是空。
       // parse 失败无条件优先重试；连 result 都没有（流断在半路）也照旧重试；「有 result 但空、且没跑过工具」才算吞。
-      const eaten = !gotText && !aborted && !billing && !isSlashCmd && (isParseFail || !resultMsg || (errTxt === '' && !sawToolUse));
+      const eaten = !gotText && !aborted && !billing && !isSlashCmd && !refusal && (isParseFail || !resultMsg || (errTxt === '' && !sawToolUse));
       if (eaten && attempt < MAX_ATTEMPTS) {
         log(`reply eaten (parseFail=${parseFail}) — silent retry ${attempt + 1}/${MAX_ATTEMPTS}`);
         continue;
+      }
+      // 被安全系统拦下：明说，别静默重试（每试一次都是再撞一次墙、白烧额度）
+      if (refusal) {
+        log(`turn refused by safety filter (${refusal.category || '?'}) — no retry`);
+        out(turn, {
+          type: 'turn_error', sessionId: curSession,
+          message: '这条被安全系统拦下了' + (refusal.category ? '（' + refusal.category + '）' : '') +
+            '。换个说法再试；反复被拦可以长按对话「复制为新窗口」换个干净窗口接着聊。'
+        });
       }
       if (resultMsg) { finalizeResult(resultMsg); ended = true; }
       outerGotText = gotText; outerReplyText = replyText;

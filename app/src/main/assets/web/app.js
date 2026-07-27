@@ -76,10 +76,12 @@ const EFFORTS = [
 /* ============ navigation ============ */
 const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'stickies', 'diaryWrite', 'favorites', 'cinema', 'cinemaLog', 'memMgr', 'memEdit', 'bookPage', 'fpick', 'bookToc', 'apiPage'];
 function show(name) {
+  const leavingChat = state.screen === 'chat' && name !== 'chat';
   SCREENS.forEach((s) => $(s).classList.toggle('active', s === name));
   state.screen = name;
   if (name !== 'chat' && typeof hideSelBar === 'function') hideSelBar();   // 离开对话屏收起选词浮条
   if (name !== 'chat' && typeof cancelEdit === 'function') cancelEdit();   // 离开对话＝取消「编辑中」
+  if (leavingChat && typeof saveDraft === 'function') saveDraft();         // 输入框草稿各归各家
   syncAtRoot();
   if (typeof updateCinemaBar === 'function') updateCinemaBar();
   sendPresence(); // tell bridge which conversation I'm on (for wake-push 不打扰)
@@ -242,10 +244,12 @@ function initLinkHandler() {
 const state = {
   screen: 'setup', ws: null, connected: false, authed: false, defaultCwd: '',
   sessions: [], currentSession: null, cwd: '', sessionModel: 'Claude', lastModel: '',
-  model: '', effort: '', modelMine: false, mode: 'code', live: null, busy: false,
+  model: '', effort: '', modelMine: false, mode: 'code', live: null,
   pendingPerm: null, reconnectTimer: null, dirPath: '', promptCb: null,
   turnTools: [], toolRow: null, folders: [], sessTarget: null, folderTarget: null, activeFolder: null,
-  pendingFiles: [], origin: '', dirMode: 'cwd', activeTurn: null,
+  pendingFiles: [], origin: '', dirMode: 'cwd',
+  turns: new Map(), viewTurnId: null, // 并发对话：turn 状态每对话各记各的（turnId → tr），viewTurnId=当前对话屏正在直播的 turn
+  drafts: {}, draftKey: null,         // 输入框草稿也各记各的（sessionId / '~new' → {text,files,texts}）
   searchActive: false, plusOpen: false, plusH: 0,
   prefs: {}, pendingTexts: [], setCat: null,
   discActive: false, discCollapsed: false, discRaf: null, discT0: 0, discShowTimer: null,
@@ -255,6 +259,52 @@ const state = {
   lastRx: 0, pendingHistory: null, pendingSticky: null, liveTimer: null,
   aName: localStorage.getItem('cc_aname') || 'TA' // 助手显示名：服务器 config 下发，公开仓只有中性默认
 };
+
+/* ---- 并发对话：per-turn 状态 ---- */
+function newLocalTurn(fields) {
+  const now = Date.now(); // 收尾超过 10 分钟的旧 turn 顺手清掉（留着是为了给迟到事件路由）
+  for (const [id, t] of state.turns) if (t.done && t.doneAt && now - t.doneAt > 600000) state.turns.delete(id);
+  const tr = { id: genId(), sessionId: state.currentSession || null, lastI: 0, done: false, spoke: false, userMsgEl: null, draft: '', ...(fields || {}) };
+  state.turns.set(tr.id, tr);
+  state.viewTurnId = tr.id;
+  return tr;
+}
+function markDone(tr) { if (tr && !tr.done) { tr.done = true; tr.doneAt = Date.now(); } }
+function liveTurnFor(sid) { for (const t of state.turns.values()) if (!t.done && (sid ? t.sessionId === sid : !t.sessionId)) return t; return null; }
+function viewTurn() { return state.viewTurnId ? (state.turns.get(state.viewTurnId) || null) : null; }
+function viewBusy() { const t = viewTurn(); return !!(t && !t.done); }
+function sessTitle(sid) { const s = state.sessions.find((x) => x.id === sid); return (s && s.title) || '对话'; }
+
+/* ---- 每对话独立输入框：草稿（文字+附件）切换对话各记各的，文字落 localStorage ---- */
+const DRAFTS_LS = 'cc_drafts';
+function loadDraftStore() { try { state.drafts = JSON.parse(localStorage.getItem(DRAFTS_LS) || '{}') || {}; } catch (e) { state.drafts = {}; } }
+function persistDrafts() {
+  try {
+    const keys = Object.keys(state.drafts);
+    if (keys.length > 30) { keys.sort((a, b) => (state.drafts[a].ts || 0) - (state.drafts[b].ts || 0)); while (keys.length > 30) delete state.drafts[keys.shift()]; }
+    localStorage.setItem(DRAFTS_LS, JSON.stringify(state.drafts));
+  } catch (e) {}
+}
+function saveDraft() {
+  const k = state.draftKey; if (!k) return;
+  if (state.editTarget) return; // 编辑中的文本是编辑缓冲，不算草稿（进入编辑那刻草稿已存好）
+  const text = $('composer').value;
+  const files = state.pendingFiles.filter((f) => f.status === 'ready');
+  const texts = state.pendingTexts;
+  if (!text.trim() && !files.length && !texts.length) { if (state.drafts[k]) { delete state.drafts[k]; persistDrafts(); } return; }
+  state.drafts[k] = { text, files, texts, ts: Date.now() };
+  persistDrafts();
+}
+function loadDraft(k) {
+  state.draftKey = k || '~new';
+  const d = state.drafts[state.draftKey] || {};
+  $('composer').value = d.text || '';
+  state.pendingFiles = (d.files || []).slice();
+  state.pendingTexts = (d.texts || []).slice();
+  renderAttachStrip(); resizeComposer(); updateSend();
+}
+function draftDirty() { clearTimeout(state._draftT); state._draftT = setTimeout(saveDraft, 500); }
+loadDraftStore();
 
 /* ============ websocket ============ */
 function connbar(text, isErr) { const b = $('connbar'); if (!text) { b.classList.remove('show'); return; } b.textContent = text; b.classList.toggle('err', !!isErr); b.classList.add('show'); }
@@ -376,10 +426,13 @@ function hideSplash() {
 
 /* ============ message handling ============ */
 function handle(m) {
-  // track buffered-event sequence for the active turn (for resume-on-reconnect)
-  if (m._i != null && state.activeTurn && !state.activeTurn.done) state.activeTurn.lastI = Math.max(state.activeTurn.lastI || 0, m._i);
+  // 并发对话：事件先按 turnId 找到自己的 turn；trVis = 这个 turn 正在当前对话屏直播（才许上屏）。
+  // 没带 turnId 的（旧桥/广播类）退回按 sessionId 判断，行为同旧版。
+  const tr = m.turnId ? state.turns.get(m.turnId) : null;
+  const trVis = tr ? tr.id === state.viewTurnId : (m.sessionId == null || m.sessionId === state.currentSession);
+  if (tr && m._i != null && !tr.done) tr.lastI = Math.max(tr.lastI || 0, m._i);
   // 一旦 cc 产出可见内容（正文/工具/媒体），就标记「已开口」——之后的打断不再回退消息
-  if (state.activeTurn && (m.type === 'assistant_delta' || m.type === 'assistant_text' || m.type === 'tool_use' || m.type === 'tool_result' || m.type === 'media')) state.activeTurn.spoke = true;
+  if (tr && (m.type === 'assistant_delta' || m.type === 'assistant_text' || m.type === 'tool_use' || m.type === 'tool_result' || m.type === 'media')) tr.spoke = true;
   switch (m.type) {
     case 'auth_ok':
       state.authed = true; state.everAuthed = true; state.defaultCwd = m.defaultCwd || ''; connbar(''); hideDisc();
@@ -393,13 +446,14 @@ function handle(m) {
       // re-fetch history/sticky that got dropped because we tapped into the chat before auth landed
       if (state.pendingHistory) { wsend({ type: 'history_window', sessionId: state.pendingHistory, limit: 60 }); state.pendingHistory = null; }
       if (state.pendingSticky) { wsend({ type: 'sticky_get', sessionId: state.pendingSticky }); state.pendingSticky = null; }
-      // resume an in-flight turn after a reconnect
-      if (state.activeTurn && !state.activeTurn.done) { startStatus(); wsend({ type: 'attach', turnId: state.activeTurn.id, after: state.activeTurn.lastI || 0 }); }
+      // resume in-flight turns after a reconnect（并发：每个没跑完的都接回）
+      for (const t of state.turns.values()) if (!t.done) wsend({ type: 'attach', turnId: t.id, after: t.lastI || 0 });
+      if (viewBusy()) startStatus();
       if ($('usageFull').classList.contains('show')) reqUsage(); // 用量页开着断线重连 → 自动刷新
       break;
     case 'pong': break; // liveness reply — lastRx already bumped in onmessage
     case 'attach_done':
-      if (!m.found) { if (state.activeTurn) state.activeTurn.done = true; state.busy = false; stopStatus(); updateSend(); }
+      if (!m.found) { markDone(tr); if (trVis) { stopStatus(); updateSend(); } }
       break;
     case 'auth_fail':
       // if we authed successfully before, a fail is almost always a transient reconnect race —
@@ -415,9 +469,9 @@ function handle(m) {
       if (state.activeFolder && !state.folders.includes(state.activeFolder)) state.activeFolder = null;
       renderSessions(); break;
     case 'assigned': wsend({ type: 'list_sessions' }); break;
-    case 'history': if (m.prefetch) onPrefetchHistory(m); else renderHistory(m); break;
-    case 'history_window': onHistoryWindow(m); break;
-    case 'history_full': onHistoryFull(m); break;
+    case 'history': if (m.prefetch) onPrefetchHistory(m); else renderHistory(m); if (viewBusy()) startStatus(); break;
+    case 'history_window': onHistoryWindow(m); if (!m.prefetch && viewBusy()) startStatus(); break; // 历史渲染的 clearThread 会捎带灭掉转圈——还在跑就重新点上
+    case 'history_full': onHistoryFull(m); if (viewBusy()) startStatus(); break;
     case 'paths_done': {
       const verb = { delete: '已删除', move: '已移动', copy: '已复制' }[m.op] || '完成';
       toast(verb + ' ' + m.done + ' 项' + (m.fail ? '，' + m.fail + ' 项失败' : ''));
@@ -430,8 +484,8 @@ function handle(m) {
     }
     case 'user_uuid': {
       // 现场发的气泡补上消息 id → 不用退出重进就能点「编辑重发」
-      const t = state.activeTurn;
-      if (m.sessionId === state.currentSession && t && t.userMsgEl) {
+      const t = tr || viewTurn();
+      if (m.sessionId === state.currentSession && t && t.userMsgEl && t.userMsgEl.isConnected) {
         const b = t.userMsgEl.querySelector('.bubble');
         if (b && !b._uuid) bindUserBubble(b, m.uuid, t.draft || '');
       }
@@ -440,19 +494,31 @@ function handle(m) {
     case 'dirs':
       if (state.fpickWait && m.path === state.fpickWait) { state.fpickWait = null; state.fpickDir = m.path; renderFilePick(m); break; }
       renderDirs(m); break;
-    case 'turn_start': state.busy = true; state.turnTools = []; state.toolRow = null; startStatus(); updateSend(); break;
-    case 'session_init':
-      if (state.expectFork || !state.currentSession) state.currentSession = m.sessionId;
+    case 'turn_start':
+      if (trVis) { state.turnTools = []; state.toolRow = null; startStatus(); updateSend(); }
+      else if (state.screen === 'list') renderSessions(); // 列表行「正在回复」标记
+      break;
+    case 'session_init': {
+      const wasNew = tr && !tr.sessionId;
+      if (tr) tr.sessionId = m.sessionId;   // 新对话 / fork：turn 拿到真正的 sessionId
+      if (!trVis) { if (state.screen === 'list') renderSessions(); break; }
+      if ((tr && (tr.expectFork || wasNew)) || !state.currentSession) {
+        state.currentSession = m.sessionId;
+        // 对话换了身份（新对话 ~new 拿到 sid / 编辑重发 fork 成新 id）：草稿跟着搬家
+        const ok = state.draftKey;
+        if (ok && ok !== m.sessionId) { state.draftKey = m.sessionId; if (state.drafts[ok]) { state.drafts[m.sessionId] = state.drafts[ok]; delete state.drafts[ok]; persistDrafts(); } }
+      }
       state.lastModel = m.model || state.lastModel; syncModelSub(); // SDK 报的才是这回合真正跑的模型
       if (m.cwd) state.cwd = m.cwd;
       sendPresence(); // 新会话/fork 刚拿到 sid：顺手把本对话的模型记到服务端（唤醒按它选模型）
       updateHeader(); break;
-    case 'assistant_delta': appendDelta(m.text); break;
-    case 'assistant_text': finalizeText(m.text); break;
-    case 'thinking': addThinking(m.text); break;
-    case 'tool_use': addTool(m); break;
-    case 'tool_result': updateTool(m); break;
-    case 'media': addMedia(m.kind, m.url); break;
+    }
+    case 'assistant_delta': if (trVis) appendDelta(m.text); break;
+    case 'assistant_text': if (trVis) finalizeText(m.text); break;
+    case 'thinking': if (trVis) addThinking(m.text); break;
+    case 'tool_use': if (trVis) addTool(m); break;
+    case 'tool_result': if (trVis) updateTool(m); break;
+    case 'media': if (trVis) addMedia(m.kind, m.url); break;
     case 'file':
       if (state.bookWait && m.path === state.bookWait) { renderBook(m); break; }
       if (state.editingClaude && m.path === state.claudePath) { $('claudeText').value = m.content || ''; openScrim('claudeScrim'); }
@@ -472,13 +538,19 @@ function handle(m) {
     case 'mcp_config': $('mcpCfgText').value = m.content || '{}'; openScrim('mcpCfgScrim'); break;
     case 'mcp_config_saved': toast('MCP 配置已保存'); closeScrim('mcpCfgScrim'); break;
     case 'permission_request': openPerm(m); break;
-    case 'turn_end': endTurn(m); break;
+    case 'turn_end': endTurn(m, tr, trVis); break;
     case 'turn_error': {
-      stopStatus(); finalizeLive(); state.busy = false; updateSend(); state.expectFork = false;
-      if (state.activeTurn) state.activeTurn.done = true;
-      const orig = m.origSession || state.forkFrom;
+      if (tr) { tr.errored = true; markDone(tr); }
+      if (!trVis) { // 后台对话出错/被拦：轻提示，正文不动当前屏
+        toast('「' + sessTitle((tr && tr.sessionId) || m.sessionId) + '」' + (m.message || '出错了'));
+        wsend({ type: 'list_sessions' });
+        break;
+      }
+      stopStatus(); finalizeLive(); updateSend();
+      const orig = m.origSession || (tr && tr.forkFrom);
+      if (tr) { tr.expectFork = false; tr.forkFrom = null; }
       if (orig) {                       // a regenerate / edit-resend died: drop the dead branch, restore the original
-        state.forkFrom = null; toast('重新生成失败，已保留原对话');
+        toast('重新生成失败，已保留原对话');
         state.currentSession = orig; wsend({ type: 'history_window', sessionId: orig, limit: 60 });
       } else addError(m.message);
       wsend({ type: 'list_sessions' });
@@ -599,6 +671,9 @@ function renderSessions() {
     const rl = el('span'); rl.textContent = shortCwd(s.cwd) + (s.gitBranch ? ' · ' + s.gitBranch : ''); repo.appendChild(rl);
     meta.appendChild(t); meta.appendChild(repo);
     if (s.wakeAt) { const wk = el('div', 'scard-wake'); wk.textContent = wakeLabel(s.wakeAt) + ' 醒来'; meta.appendChild(wk); }
+    if (liveTurnFor(s.id)) { // 这个对话的 turn 还在跑（并发对话）
+      const bz = el('div', 'scard-busy'); bz.innerHTML = '<span class="sb-dot"></span><span>正在回复…</span>'; meta.appendChild(bz);
+    }
     if (s.id === state.cinemaOnSid) { // 守夜中：时间流动指示挪到列表行（冷场久了转冷色）
       const ci = el('div', 'scard-cinema'); const info = (state.cinemaInfo && state.cinemaInfo.sid === s.id) ? state.cinemaInfo : null;
       const coldMin = info ? Math.round((Date.now() - (info.lastSpokeAt || info.startedAt || Date.now())) / 60000) : 0;
@@ -735,6 +810,7 @@ function openMsgActions(b) {
 // 发送=从那条消息 fork 重跑；✕ 或离开对话取消。
 function editMessage(uuid, current) {
   if (!state.currentSession || !uuid) return;
+  saveDraft(); // 输入框里已有的草稿先存好，编辑缓冲不覆盖它
   state.editTarget = uuid;
   $('editStrip').classList.add('show');
   const c = $('composer'); c.value = current || '';
@@ -744,13 +820,14 @@ function editMessage(uuid, current) {
 function cancelEdit() {
   if (!state.editTarget) return;
   state.editTarget = null; $('editStrip').classList.remove('show');
-  const c = $('composer'); c.value = ''; resizeComposer(); updateSend();
+  const d = state.drafts[state.draftKey]; // 退出编辑：把之前的草稿放回输入框
+  const c = $('composer'); c.value = (d && d.text) || ''; resizeComposer(); updateSend();
 }
 function regenerate() {
   if (!state.currentSession) { toast('新会话无需重新生成'); return; }
-  state.forkFrom = state.currentSession; state.expectFork = true; clearThread();
-  state.activeTurn = { id: genId(), lastI: 0, done: false };
-  wsend({ type: 'regenerate', sessionId: state.currentSession, mode: state.mode, turnId: state.activeTurn.id });
+  clearThread();
+  const t = newLocalTurn({ expectFork: true, forkFrom: state.currentSession });
+  wsend({ type: 'regenerate', sessionId: state.currentSession, mode: state.mode, turnId: t.id });
   toast('重新生成中…');
 }
 function ensureLive() { if (state.live) return state.live; const m = el('div', 'msg assistant'); const t = el('div', 'text cursor'); m.appendChild(t); $('thread').appendChild(m); state.live = t; return t; }
@@ -767,21 +844,23 @@ const SL_WORDS = ['Thinking', 'Pondering', 'Cogitating', 'Musing', 'Ruminating',
   'Computing', 'Synthesizing', 'Mulling', 'Marinating', 'Working', 'Forging', 'Hatching',
   'Reticulating', 'Vibing', 'Honking', 'Schlepping', 'Spinning', 'Manifesting', 'Cooking'];
 function slWord() { return SL_WORDS[(Math.random() * SL_WORDS.length) | 0]; }
+function mkStatusline() {
+  const sl = el('div', 'statusline'); sl.id = 'statusline';
+  sl.innerHTML = '<span class="sl-glyph">✻</span><span class="sl-word"></span><span class="sl-meta"></span>';
+  $('thread').appendChild(sl);
+  return sl;
+}
 function startStatus() {
   if (state.statusTimer) return;
   state.statusStart = Date.now();
   state.statusWord = slWord();
   state.statusFrame = 0;
   state.statusNextWord = 2500 + Math.random() * 2500;
-  let sl = document.getElementById('statusline');
-  if (!sl) {
-    sl = el('div', 'statusline'); sl.id = 'statusline';
-    sl.innerHTML = '<span class="sl-glyph">✻</span><span class="sl-word"></span><span class="sl-meta"></span>';
-    $('thread').appendChild(sl);
-  }
+  if (!document.getElementById('statusline')) mkStatusline();
   scrollThread();
   state.statusTimer = setInterval(() => {
-    const s = document.getElementById('statusline'); if (!s) return;
+    // 历史渲染会整个重画 thread（进入还在跑的对话时）——转圈被抹掉就重建
+    const s = document.getElementById('statusline') || mkStatusline();
     if (s !== $('thread').lastChild) $('thread').appendChild(s);
     state.statusFrame = (state.statusFrame + 1) % SL_FRAMES.length;
     const elapsed = Date.now() - state.statusStart;
@@ -831,16 +910,25 @@ function ensureToolRow() {
 function updateToolRow() {
   if (!state.toolRow) return;
   const n = state.turnTools.length, cmds = state.turnTools.filter((t) => t.name === 'Bash').length;
-  state.toolRow.querySelector('.tr-text').textContent = state.busy && !state._turnDone ? `正在使用工具…（${n}）` : `Used ${n} tools, ran ${cmds} commands`;
+  state.toolRow.querySelector('.tr-text').textContent = viewBusy() ? `正在使用工具…（${n}）` : `Used ${n} tools, ran ${cmds} commands`;
 }
 function addTool(m) { ensureToolRow(); state.turnTools.push({ id: m.id, name: m.name, input: m.input, isError: null }); updateToolRow(); scrollThreadAuto(); }
 function updateTool(m) { const t = state.turnTools.find((x) => x.id === m.id); if (t) { t.isError = m.isError; t.content = m.content; } }
 function addError(msg) { const d = el('div', 'msg assistant'); const t = el('div', 'md'); t.style.color = 'var(--err)'; t.textContent = '⚠ ' + msg; d.appendChild(t); $('thread').appendChild(d); scrollThread(); }
 function fmtTok(n) { n = n || 0; if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M'; return n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n); }
-function endTurn(m) {
+function endTurn(m, tr, trVis) {
+  markDone(tr);
+  if (!trVis) { // 后台对话跑完：轻提示 + 刷列表（正文已落历史，进对话即见）
+    if (tr && tr.spoke && !tr.rolledBack && !tr.interrupted && !tr.errored && !m.isError) {
+      toast('「' + sessTitle(tr.sessionId) + '」回复好了'); if (P('genHaptic')) buzz(14);
+    }
+    if (state.screen === 'list') renderSessions();
+    updateSend(); wsend({ type: 'list_sessions' });
+    return;
+  }
   // 这条 turn 已被「思考阶段打断」回退过：吞掉它迟到的收尾，别再震动/出统计
-  if (state.activeTurn && state.activeTurn.rolledBack) { stopStatus(); state.busy = false; updateSend(); return; }
-  stopStatus(); finalizeLive(); state.busy = false; state._turnDone = true; state.forkFrom = null; if (state.activeTurn) state.activeTurn.done = true; updateToolRow(); updateSend();
+  if (tr && tr.rolledBack) { stopStatus(); updateSend(); return; }
+  stopStatus(); finalizeLive(); if (tr) tr.forkFrom = null; updateToolRow(); updateSend();
   if (P('genHaptic')) buzz(18);
   if (m.isError) addError(typeof m.result === 'string' && m.result.trim() ? m.result : '本轮出错了（可重试或换个说法）');
   // stats line under the last message: ↑ context fill/window (%) · ↓ output · tok/s · time
@@ -860,8 +948,8 @@ function endTurn(m) {
   }
   scrollThreadAuto();
   wsend({ type: 'list_sessions' });
-  if (state.expectFork) {
-    state.expectFork = false;
+  if (tr && tr.expectFork) {
+    tr.expectFork = false;
     const sid = state.currentSession;
     // fork 刚收尾时 jsonl 可能还没写全（真踩过：history 只回用户消息 total=1，把现场已渲染的回复整个刷没）
     // → 缓 1 秒再拉，且期间没切走才渲染
@@ -1035,21 +1123,32 @@ function onPrefetchHistory(m) {
 }
 function openSession(s) {
   LS.lastSid = s.id; // 客户端缓存「上一个打开的对话」，供「进入应用自动进入上个对话」用（服务端按最新回复会乱，故存本地）
-  // re-entering the session whose turn is still running → keep the live view (message +
+  const lt = liveTurnFor(s.id);
+  // re-entering the session whose turn is still running & still on screen → keep the live view (message +
   // spinner + partial reply); don't clobber it with stale history that lacks the in-flight turn
-  if (state.currentSession === s.id && state.activeTurn && !state.activeTurn.done) { show('chat'); return; }
+  if (state.currentSession === s.id && lt && state.viewTurnId === lt.id) { show('chat'); return; }
+  saveDraft(); // 上一个对话的输入框内容各归各家
   state.currentSession = s.id; state.cwd = s.cwd || ''; state.curTitle = s.title; state.sessionModel = 'Claude'; state.lastModel = ''; state.mood = null;
+  // 这个对话有 turn 还在跑（从别的对话切回来）：接上直播——历史打底、转圈接续，
+  // 中间漏掉的流靠收尾的全文替换补齐；现场气泡已不在，回退/编辑锚点作废
+  state.viewTurnId = lt ? lt.id : null;
+  if (lt) lt.userMsgEl = null;
   // 模型/effort 是每对话一份的（服务端 sessmodel.json）：先拿全局默认占位，等 history 带回这个对话
   // 记住的 pref 再切过去；占位期间 modelMine=false → presence 不带 model，不会盖掉服务端那份。
   // [1m] 这类运行时变体也存在 pref 里，重开对话不会掉回 200K 底座被自动 compact。
   state.model = LS.model; state.effort = LS.effort; state.modelMine = false; state.mode = LS.mode; applyMode();
-  clearThread(); updateHeader(); show('chat'); removeSuggestions();
+  clearThread(); loadDraft(s.id); updateHeader(); show('chat'); removeSuggestions();
+  if (lt) startStatus(); // 还在跑：转圈接上（statusline 自己会待在最底部）
   // 历史走「全量存档·分段窗口」：先秒显缓存的末尾窗，再带 ver 同步（没变→unchanged 秒回）。上滑到顶自动补旧段（含压缩前）。
   state.hist = null;
   const findReq = (state.pendingFind && state.pendingFind.sid === s.id) ? state.pendingFind : null;
   state.pendingFind = null;
   if (findReq) { // 搜索定位：直接拉命中那段窗（不读末尾缓存，免先闪到底再跳）
     state.pendingHistory = wsend({ type: 'history_find', sessionId: s.id, needle: findReq.needle, limit: 80 }) ? null : s.id;
+  } else if (lt) {
+    // 对话还在直播：跳过「缓存秒显+增量 append」——append 会把补出来的历史压到直播气泡下面（真踩过），
+    // 直接拉一次全量末尾窗打底，后续增量流接着往下画
+    state.pendingHistory = wsend({ type: 'history_window', sessionId: s.id, limit: 60 }) ? null : s.id;
   } else {
     idbGet('win2:' + s.id).then((cached) => {
       if (state.currentSession !== s.id) return;
@@ -1069,14 +1168,17 @@ function openSession(s) {
   state.pendingSticky = wsend({ type: 'sticky_get', sessionId: s.id }) ? null : s.id; // show 小纸条 popup if any unread
 }
 function newSession() {
+  saveDraft();
   state.currentSession = null; state.cwd = LS.cwd || state.defaultCwd; state.curTitle = ''; state.sessionModel = 'Claude'; state.lastModel = '';
   state.model = LS.model; state.effort = LS.effort; state.modelMine = true; state.mode = LS.mode; applyMode(); // 新对话从全局默认起步，这份就算它自己的选择
-  clearThread(); updateHeader(); show('chat'); showSuggestions();
+  state.viewTurnId = null;
+  clearThread(); loadDraft('~new'); updateHeader(); show('chat'); showSuggestions();
   setTimeout(() => $('composer').focus(), 80);
 }
-function goList() { if (P('interruptOnLeave') && state.busy) wsend({ type: 'interrupt' }); show('list'); wsend({ type: 'list_sessions' }); }
+function goList() { if (P('interruptOnLeave') && viewBusy()) wsend({ type: 'interrupt', turnId: state.viewTurnId }); show('list'); wsend({ type: 'list_sessions' }); }
 function renderHistory(m) {
   if (m.unchanged) { if (m.sessionId === state.currentSession) { scrollThread(); tryPendingJump(); } return; }   // 文件没变：缓存即最新、已渲染，不重渲
+  if (m.sessionId && m.sessionId !== state.currentSession) return; // 迟到的历史别画进别的对话
   clearThread(); removeSuggestions();
   if (m.cwd) { state.cwd = m.cwd; } if (m.title) state.curTitle = m.title; updateHeader();
   // 切到这个对话记住的模型/effort（没记过就是 ''=默认）；用户手快已经先选了的话（modelMine）不抢
@@ -1137,7 +1239,13 @@ function prependWindow(items) {
   RT = frag; try { renderItems(items); } finally { RT = null; }
   const prevH = t.scrollHeight; t.insertBefore(frag, t.firstChild); t.scrollTop += t.scrollHeight - prevH; // 锚住位置，不跳
 }
-function appendWindow(items) { renderItems(items); } // 落点默认 thread
+function appendWindow(items) { renderItems(items); bumpLiveToBottom(); } // 落点默认 thread
+// 直播气泡/转圈永远保持在最底：历史增量 append 会落到它们后面（并发对话重进时真踩过）
+function bumpLiveToBottom() {
+  const th = $('thread');
+  if (state.live) { const m = state.live.closest('.msg'); if (m && m.parentElement === th) th.appendChild(m); }
+  const sl = document.getElementById('statusline'); if (sl && sl.parentElement === th) th.appendChild(sl);
+}
 function renderInitWindow(m, isFind, tentative) {
   clearThread(); removeSuggestions();
   applyHistMeta(m, tentative);
@@ -1586,8 +1694,8 @@ function doCompact(extra) {
   if (!state.currentSession) return;
   const ins = (extra && extra.trim()) ? extra.trim() : (P('compactPrompt') || '').trim(); // 留空时用设置里的默认压缩提示词
   const text = '/compact' + (ins ? ' ' + ins : '');
-  state.activeTurn = { id: genId(), lastI: 0, done: false };
-  wsend({ type: 'send', sessionId: state.currentSession, text, mode: state.mode, turnId: state.activeTurn.id });
+  const t = newLocalTurn({});
+  wsend({ type: 'send', sessionId: state.currentSession, text, mode: state.mode, turnId: t.id });
   toast('压缩中…');
 }
 
@@ -3204,7 +3312,7 @@ function goListAnimated() {
   const chat = $('chat'), list = $('list');
   if (state.screen !== 'chat') { goList(); return; }
   closeMenu(); closePlus();
-  if (P('interruptOnLeave') && state.busy) wsend({ type: 'interrupt' });
+  if (P('interruptOnLeave') && viewBusy()) wsend({ type: 'interrupt', turnId: state.viewTurnId });
   list.classList.add('active'); list.style.zIndex = '1';
   chat.style.zIndex = '2'; chat.style.boxShadow = '-12px 0 40px rgba(40,38,31,.18)';
   chat.style.transition = 'transform .3s cubic-bezier(.32,.72,0,1)';
@@ -3462,7 +3570,7 @@ function initChatSwipe() {
     if (!active) return; active = false;
     const dx = e.changedTouches[0].clientX - sx;
     if (dir === 'back') {
-      if (dx > BACK_TRIG()) { buzz(14); if (P('interruptOnLeave') && state.busy) wsend({ type: 'interrupt' }); chat.style.transition = 'transform .26s cubic-bezier(.32,.72,0,1)'; chat.style.transform = 'translateX(100%)'; setTimeout(() => { show('list'); resetChatSlide(); wsend({ type: 'list_sessions' }); }, 270); }
+      if (dx > BACK_TRIG()) { buzz(14); if (P('interruptOnLeave') && viewBusy()) wsend({ type: 'interrupt', turnId: state.viewTurnId }); chat.style.transition = 'transform .26s cubic-bezier(.32,.72,0,1)'; chat.style.transform = 'translateX(100%)'; setTimeout(() => { show('list'); resetChatSlide(); wsend({ type: 'list_sessions' }); }, 270); }
       else { chat.style.transition = 'transform .24s cubic-bezier(.32,.72,0,1)'; chat.style.transform = 'translateX(0)'; setTimeout(() => { resetChatSlide(); $('list').classList.remove('active'); }, 250); }
     } else if (dir === 'search') {
       if (-dx > SEARCH_TRIG()) { buzz(14); state.searchScope = 'chat'; state.searchMode = 'kw'; openSearch(); }
@@ -3682,24 +3790,25 @@ function syncDockPad() {
 function resizeComposer() { const c = $('composer'); c.style.height = 'auto'; c.style.height = Math.min(c.scrollHeight, 140) + 'px'; syncDockPad(); }
 function updateSend() {
   const btn = $('sendBtn');
-  if (state.busy) { btn.disabled = false; btn.classList.add('stop'); btn.textContent = '■'; return; }
+  if (viewBusy()) { btn.disabled = false; btn.classList.add('stop'); btn.textContent = '■'; return; }
   btn.classList.remove('stop'); btn.textContent = '↑';
   const has = $('composer').value.trim().length > 0 || state.pendingFiles.length > 0 || state.pendingTexts.length > 0;
   btn.disabled = !(has && state.authed);
 }
 function sendMessage() {
-  if (state.busy) {
-    wsend({ type: 'interrupt' }); stopStatus();
-    const at = state.activeTurn;
+  if (viewBusy()) {
+    const at = viewTurn();           // ■ 只打断当前对话的 turn，别的对话照跑
+    wsend({ type: 'interrupt', turnId: at.id }); stopStatus();
+    at.interrupted = true;
     // cc 还没开口（只是在想）就打断 → 撤回这条消息、把文字退回输入框，省一次重生成
-    if (at && !at.spoke && at.userMsgEl) {
+    if (!at.spoke && at.userMsgEl && at.userMsgEl.isConnected) {
       let n = at.userMsgEl.nextSibling; while (n) { const nx = n.nextSibling; n.remove(); n = nx; }
       at.userMsgEl.remove();
       const c = $('composer'); if (at.draft) { c.value = at.draft; resizeComposer(); c.focus(); }
       if (at.pendTexts && at.pendTexts.length) { state.pendingTexts = at.pendTexts; renderAttachStrip(); }
-      at.rolledBack = true; at.done = true; buzz(12);
+      at.rolledBack = true; buzz(12);
     }
-    state.busy = false; updateSend();
+    markDone(at); updateSend();
     return;
   }
   if (state.pendingFiles.some((f) => f.status === 'uploading')) { toast('还有文件在上传…'); return; }
@@ -3710,13 +3819,15 @@ function sendMessage() {
     const uuid = state.editTarget;
     state.editTarget = null; $('editStrip').classList.remove('show');
     closePlus(); removeSuggestions();
-    state.forkFrom = state.currentSession; state.expectFork = true; clearThread();
+    clearThread();
     const eb = addUser(text);
-    state.activeTurn = { id: genId(), lastI: 0, done: false, spoke: false, userMsgEl: eb ? eb.parentElement : null, draft: text };
-    const emsg = { type: 'edit_resend', sessionId: state.currentSession, targetUuid: uuid, text, mode: state.mode, turnId: state.activeTurn.id };
+    const et = newLocalTurn({ userMsgEl: eb ? eb.parentElement : null, draft: text, expectFork: true, forkFrom: state.currentSession });
+    const emsg = { type: 'edit_resend', sessionId: state.currentSession, targetUuid: uuid, text, mode: state.mode, turnId: et.id };
     if (state.model) emsg.model = state.model; if (state.effort) emsg.effort = state.effort;
     wsend(emsg);
-    c.value = ''; resizeComposer(); updateSend();
+    // 编辑缓冲用完即弃：进入编辑前的草稿放回输入框
+    const d0 = state.drafts[state.draftKey]; c.value = (d0 && d0.text) || '';
+    resizeComposer(); updateSend();
     return;
   }
   const origText = text;
@@ -3734,15 +3845,15 @@ function sendMessage() {
     .concat(texts.filter((t) => !t.ph).map((t) => '📄 ' + t.name));
   const userShown = origText + (fileNotes.length ? (origText ? '\n\n' : '') + fileNotes.join('\n') : '');
   const ub = addUser(userShown, null, thumbs);
-  state.activeTurn = { id: genId(), lastI: 0, done: false, spoke: false, userMsgEl: ub ? ub.parentElement : null, draft: origText, pendTexts: state.pendingTexts.slice() };
-  const msg = { type: 'send', text, mode: state.mode, turnId: state.activeTurn.id };
+  const st = newLocalTurn({ userMsgEl: ub ? ub.parentElement : null, draft: origText, pendTexts: state.pendingTexts.slice() });
+  const msg = { type: 'send', text, mode: state.mode, turnId: st.id };
   if (files.length) msg.refPaths = files.map((f) => f.path);
   if (texts.length) msg.texts = texts.map((t) => ({ name: t.name, content: t.content, ph: t.ph || '' }));
   if (state.currentSession) msg.sessionId = state.currentSession; else if (state.cwd) msg.cwd = state.cwd;
   if (state.model) msg.model = state.model;
   if (state.effort) msg.effort = state.effort;
   wsend(msg);
-  c.value = ''; state.pendingFiles = []; state.pendingTexts = []; renderAttachStrip(); resizeComposer(); updateSend();
+  c.value = ''; state.pendingFiles = []; state.pendingTexts = []; renderAttachStrip(); resizeComposer(); updateSend(); saveDraft();
 }
 function renderAttachStrip() {
   const strip = $('attachStrip'); strip.innerHTML = '';
@@ -3951,7 +4062,7 @@ function boot() {
   $('composeSave').addEventListener('click', () => closeCompose(true));
 
   const c = $('composer');
-  c.addEventListener('input', () => { resizeComposer(); updateSend(); updateExpandBtn(); });
+  c.addEventListener('input', () => { resizeComposer(); updateSend(); updateExpandBtn(); draftDirty(); });
   // 长文粘贴 → 光标处留一个占位符，正文发送时由 bridge 存成文件、原位替换成文件引用（指令留在外面）
   const handleLongPaste = (e, ta) => {
     if (!P('pasteAsFile')) return;
