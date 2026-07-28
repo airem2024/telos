@@ -2098,6 +2098,8 @@ wss.on('connection', (ws) => {
           // push the currently-published app version + changelog; client decides if it's newer
           send(ws, { type: 'app_update', version: apkVersion(), url: '/app.apk', notes: apkNotes() });
           flushWakes(ws); // missed wake notifications (phone was unreachable when they fired)
+          // 客户端 auth 时会把「输入中…」清零（断线可能错过 off）——还在跑的唤醒 turn 这里补发 on
+          for (const sid of wakeTurnBySession.keys()) send(ws, { type: 'wake_typing', sessionId: sid, on: true });
         }
         else { send(ws, { type: 'auth_fail' }); ws.close(); }
       }

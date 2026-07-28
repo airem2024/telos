@@ -82,6 +82,7 @@ function show(name) {
   if (name !== 'chat' && typeof hideSelBar === 'function') hideSelBar();   // 离开对话屏收起选词浮条
   if (name !== 'chat' && typeof cancelEdit === 'function') cancelEdit();   // 离开对话＝取消「编辑中」
   if (leavingChat && typeof saveDraft === 'function') saveDraft();         // 输入框草稿各归各家
+  if (name === 'chat' && typeof resizeComposer === 'function') resizeComposer(); // 草稿是在屏还藏着时装填的，那会儿量不到高度——进屏补量
   syncAtRoot();
   if (typeof updateCinemaBar === 'function') updateCinemaBar();
   sendPresence(); // tell bridge which conversation I'm on (for wake-push 不打扰)
@@ -446,6 +447,9 @@ function handle(m) {
       // re-fetch history/sticky that got dropped because we tapped into the chat before auth landed
       if (state.pendingHistory) { wsend({ type: 'history_window', sessionId: state.pendingHistory, limit: 60 }); state.pendingHistory = null; }
       if (state.pendingSticky) { wsend({ type: 'sticky_get', sessionId: state.pendingSticky }); state.pendingSticky = null; }
+      // 断线时错过 wake_typing off 会让标题旁的「…」永远跳（now 唤醒踩过）——重连先清零，
+      // 真还在打字的话服务端 auth 后会立刻补发 on
+      state.cinemaTyping = ''; updateCinemaBar();
       // resume in-flight turns after a reconnect（并发：每个没跑完的都接回）
       for (const t of state.turns.values()) if (!t.done) wsend({ type: 'attach', turnId: t.id, after: t.lastI || 0 });
       if (viewBusy()) startStatus();
@@ -3787,7 +3791,11 @@ function syncDockPad() {
   thread.style.paddingBottom = Math.max(0, dock.offsetHeight - panelH + 22) + 'px';
   if (atBottom) thread.scrollTop = thread.scrollHeight;
 }
-function resizeComposer() { const c = $('composer'); c.style.height = 'auto'; c.style.height = Math.min(c.scrollHeight, 140) + 'px'; syncDockPad(); }
+function resizeComposer() {
+  const c = $('composer');
+  if (!c.offsetParent) { c.style.height = ''; return; } // 聊天屏还藏着时 scrollHeight=0，写进去输入框会塌扁（草稿装填踩过）；show('chat') 进屏后会再量一次
+  c.style.height = 'auto'; c.style.height = Math.min(c.scrollHeight, 140) + 'px'; syncDockPad();
+}
 function updateSend() {
   const btn = $('sendBtn');
   if (viewBusy()) { btn.disabled = false; btn.classList.add('stop'); btn.textContent = '■'; return; }
@@ -3924,6 +3932,9 @@ function boot() {
     };
     vv.addEventListener('resize', fitVV); vv.addEventListener('scroll', fitVV); fitVV();
   }
+  // 真实顶部 inset 以原生为准：WebView 的 env(safe-area-inset-top) 部分 ROM 上虚高/藏状态栏后残留，
+  // 顶栏贴不到安全线全因它。原生侧 inset 变化会实时推；这里启动再拉一次，防 WebView 重载丢掉。
+  try { if (window.Android && Android.insetTop) { const t = Android.insetTop(); if (t >= 0) document.documentElement.style.setProperty('--safe-top', t + 'px'); } } catch (e) {}
   $('thread').addEventListener('scroll', () => {
     const t = $('thread'); state.threadStick = t.scrollTop + t.clientHeight >= t.scrollHeight - 40;
     if (state.screen === 'chat' && state.hist && state.hist.sid === state.currentSession) {

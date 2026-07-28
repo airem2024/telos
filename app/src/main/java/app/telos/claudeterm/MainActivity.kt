@@ -35,6 +35,7 @@ import android.provider.Settings
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -47,6 +48,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 class MainActivity : AppCompatActivity() {
 
     private lateinit var web: WebView
+    @Volatile private var safeTopPx = -1   // 系统真实顶部 inset（px），喂给页面当 --safe-top
     @Volatile private var rootFlag = true
     private var usedFallback = false
     @Volatile private var pageLoaded = false
@@ -131,6 +133,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // 页面启动时拉真实顶部 inset（dp）；还没量到（首帧前）返回 -1，页面沿用 env() 兜底
+        @JavascriptInterface
+        fun insetTop(): Float = if (safeTopPx < 0) -1f else safeTopPx / resources.displayMetrics.density
+
         @JavascriptInterface
         fun setStatusBar(visible: Boolean) {
             runOnUiThread {
@@ -203,6 +209,22 @@ class MainActivity : AppCompatActivity() {
             window.attributes = window.attributes.apply {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
+        }
+
+        // WebView 的 env(safe-area-inset-top) 在部分 ROM 上只反映刘海、或藏了状态栏还残留旧值，
+        // 顶栏「贴零」贴不上去全因它虚高。这里把系统真实 inset（状态栏可见高度与刘海取大者）
+        // 实时喂给页面盖掉 env()；页面自己启动时也会经 Android.insetTop() 拉一次。
+        ViewCompat.setOnApplyWindowInsetsListener(web) { _, ins ->
+            val top = maxOf(
+                ins.getInsets(WindowInsetsCompat.Type.statusBars()).top,
+                ins.getInsets(WindowInsetsCompat.Type.displayCutout()).top
+            )
+            if (top != safeTopPx) {
+                safeTopPx = top
+                val dp = top / resources.displayMetrics.density
+                web.evaluateJavascript("document.documentElement.style.setProperty('--safe-top','${dp}px')", null)
+            }
+            ins
         }
 
         web.settings.apply {
