@@ -214,7 +214,7 @@ class MainActivity : AppCompatActivity() {
         // WebView 的 env(safe-area-inset-top) 在部分 ROM 上只反映刘海、或藏了状态栏还残留旧值，
         // 顶栏「贴零」贴不上去全因它虚高。这里把系统真实 inset（状态栏可见高度与刘海取大者）
         // 实时喂给页面盖掉 env()；页面自己启动时也会经 Android.insetTop() 拉一次。
-        ViewCompat.setOnApplyWindowInsetsListener(web) { _, ins ->
+        ViewCompat.setOnApplyWindowInsetsListener(web) { v, ins ->
             val top = maxOf(
                 ins.getInsets(WindowInsetsCompat.Type.statusBars()).top,
                 ins.getInsets(WindowInsetsCompat.Type.displayCutout()).top
@@ -224,7 +224,9 @@ class MainActivity : AppCompatActivity() {
                 val dp = top / resources.displayMetrics.density
                 web.evaluateJavascript("document.documentElement.style.setProperty('--safe-top','${dp}px')", null)
             }
-            ins
+            // 这个监听会取代 WebView 自己的 onApplyWindowInsets——必须把默认处理补走完，
+            // 否则 WebView 感知不到输入法高度、视口不收缩，输入框被键盘整个盖住（1.1.97 踩过）
+            ViewCompat.onApplyWindowInsets(v, ins)
         }
 
         web.settings.apply {
