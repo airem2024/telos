@@ -42,6 +42,11 @@ function md(t) {
     // bundled UI is a file:// page — marked emits relative `/media` img srcs that resolve to
     // file:///media (404). Prepend the bridge origin so inline images actually load.
     if (state.origin) html = html.replace(/(<img\b[^>]*\bsrc=["'])\/(?!\/)/gi, '$1' + state.origin + '/');
+    // 围栏代码块包一层、右上角吊复制按钮（点击在 boot 的全局委托里处理，对话/回忆录等 md 渲染处通用）
+    if (html.includes('<pre><code')) {
+      html = html.replace(/<pre><code/g, '<div class="codewrap"><button class="codecopy" type="button" aria-label="复制">' + ICON.copy + '</button><pre><code')
+        .replace(/<\/code><\/pre>/g, '</code></pre></div>');
+    }
     return html;
   } catch (e) { return esc(t); }
 }
@@ -56,7 +61,8 @@ const ICON = {
   up: _sv('<line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>'),
   term: _sv('<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>', 18),
   tool: _sv('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>', 18),
-  doc: _sv('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>')
+  doc: _sv('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'),
+  copy: _sv('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', 15)
 };
 function toolIconSvg(name) { return name === 'Bash' ? ICON.term : ICON.tool; }
 
@@ -776,7 +782,20 @@ function openFolderPicker(s) {
 let RT = null;
 function rt() { return RT || $('thread'); }
 function clearThread() { if (searchOpen()) closeSearch(); stopStatus(); $('thread').innerHTML = ''; state.live = null; state.turnTools = []; state.toolRow = null; }
-function scrollThread() { if (RT) return; const t = $('thread'); t.scrollTop = t.scrollHeight; } // prepend 期间(RT 非空)不滚
+// 正圈着字（选区落在消息流里）就不许自动滚——选区被拽飞根本没法复制
+function threadSelActive() {
+  const s = window.getSelection();
+  if (!s || s.isCollapsed || !s.rangeCount) return false;
+  const n = s.anchorNode, e0 = n && (n.nodeType === 1 ? n : n.parentElement);
+  return !!(e0 && e0.closest && e0.closest('#thread'));
+}
+// 贴底只在「本来就贴着底」时维持（threadStick 由滚动监听维护，翻上去=false）；
+// force=用户自己的动作（发送/进对话）才强制回底
+function scrollThread(force) {
+  if (RT) return; // prepend 期间(RT 非空)不滚
+  if (!force && (state.threadStick === false || threadSelActive())) return;
+  const t = $('thread'); t.scrollTop = t.scrollHeight; state.threadStick = true;
+}
 function scrollThreadAuto() { if (P('autoScroll')) scrollThread(); }
 function addUser(text, uuid, images) {
   const m = el('div', 'msg user'); const b = el('div', 'bubble');
@@ -792,7 +811,7 @@ function addUser(text, uuid, images) {
   if (text) { const tx = el('div'); tx.textContent = text; b.appendChild(tx); }
   m.appendChild(b);
   bindUserBubble(b, uuid || null, text);
-  rt().appendChild(m); scrollThread();
+  rt().appendChild(m); scrollThread(true);
   return b;
 }
 // 自己的气泡：轻点=编辑重发（有 uuid 才行——现场发的先没有，turn 结束后 user_uuid 事件补上）；
@@ -1181,7 +1200,7 @@ function newSession() {
 }
 function goList() { if (P('interruptOnLeave') && viewBusy()) wsend({ type: 'interrupt', turnId: state.viewTurnId }); show('list'); wsend({ type: 'list_sessions' }); }
 function renderHistory(m) {
-  if (m.unchanged) { if (m.sessionId === state.currentSession) { scrollThread(); tryPendingJump(); } return; }   // 文件没变：缓存即最新、已渲染，不重渲
+  if (m.unchanged) { if (m.sessionId === state.currentSession) { scrollThread(true); tryPendingJump(); } return; }   // 文件没变：缓存即最新、已渲染，不重渲
   if (m.sessionId && m.sessionId !== state.currentSession) return; // 迟到的历史别画进别的对话
   clearThread(); removeSuggestions();
   if (m.cwd) { state.cwd = m.cwd; } if (m.title) state.curTitle = m.title; updateHeader();
@@ -1192,7 +1211,7 @@ function renderHistory(m) {
   }
   if (m.sessionId === state.currentSession) { state.lastModel = m.lastModel || ''; syncModelSub(); state.mood = m.mood || null; updateHeader(); }
   renderItems(m.items);
-  scrollThread();
+  scrollThread(true);
   tryPendingJump();   // 搜索结果点进来的 → 滚到命中那条
   // bridge 全量历史 → 存本地缓存供下次秒开（缓存自身渲染时 _cache=true，跳过避免回写）
   if (!m._cache && m.sessionId && m.items) idbPut('h:' + m.sessionId, { ver: m.ver, items: m.items, cwd: m.cwd, title: m.title, pref: m.pref, lastModel: m.lastModel, mood: m.mood });
@@ -1254,7 +1273,7 @@ function renderInitWindow(m, isFind, tentative) {
   clearThread(); removeSuggestions();
   applyHistMeta(m, tentative);
   appendWindow(m.items || []);
-  if (!isFind) scrollThread();   // find：不滚到底，交给 tryPendingJump 滚到命中那条
+  if (!isFind) scrollThread(true);   // find：不滚到底，交给 tryPendingJump 滚到命中那条
 }
 const PRELOAD_ROUNDS = 60;      // 历史全文每段补这么多「轮」（一来一回）
 const RT_ITEM_CAP = 400;        // 长独白段（守夜/电影模式连说很多条）兜底：一段最多这么多条，免一次拉爆
@@ -1299,7 +1318,7 @@ function onHistoryWindow(m) {
   if (m.unchanged) { // 末尾窗没变：缓存即最新、已渲染；但仍套一遍服务端权威 meta（模型 pref 等），覆盖过期缓存值
     if (h) { h.total = m.total; }
     applyHistMeta(m, false);
-    scrollThread(); tryPendingJump(); return;
+    scrollThread(true); tryPendingJump(); return;
   }
   if (m.dir === 'append') { // 服务端只回了「缓存之后新增的那几条」(小 payload) → 直接追加到底部，不重渲整段
     if (h && h.sid === m.sessionId && h.items) {
@@ -1644,9 +1663,10 @@ function uploadOne(file, dir, onProg) {
     xhr.send(file);
   });
 }
-// quick upload from the + panel: to the session cwd, progress shown in the attach strip, auto-attach
+// quick upload from the + panel / paste: progress shown in the attach strip, auto-attach.
+// dir 留空 = 服务端统一归档进上传文件夹（telos-uploads），不再散落在各会话 cwd
 function quickUpload(fileList) {
-  const dir = state.cwd || state.defaultCwd;
+  const dir = '';
   Array.from(fileList || []).forEach((file) => {
     const item = { name: file.name, isImage: (file.type || '').startsWith('image/') || isImagePath(file.name), status: 'uploading', pct: 0, speed: 0 };
     state.pendingFiles.push(item); renderAttachStrip(); updateSend();
@@ -4090,14 +4110,42 @@ function boot() {
     if (ta === c) resizeComposer();
     renderAttachStrip(); updateSend(); buzz(12); toast('长文已收起（' + txt.length + ' 字），发送时存为文件');
   };
-  c.addEventListener('paste', (e) => handleLongPaste(e, c));
-  $('composeText').addEventListener('paste', (e) => handleLongPaste(e, $('composeText')));
+  // 粘贴图片/文件 → 直接挂到输入框（附件条），发送时随消息一起带上
+  const handleFilePaste = (e) => {
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    const fs = [];
+    for (const it of items) { if (it.kind === 'file') { const f = it.getAsFile(); if (f) fs.push(f); } }
+    if (!fs.length) return false;
+    e.preventDefault();
+    quickUpload(fs.map((f, i) => {
+      // 剪贴板图片默认叫 image.png——起个带时间的名，翻上传文件夹时认得出
+      if (f.name && !/^image\.\w+$/i.test(f.name)) return f;
+      const d = new Date(), p2 = (n) => String(n).padStart(2, '0');
+      const ext = ((f.type || '').split('/')[1] || 'png').replace('jpeg', 'jpg');
+      return new File([f], '贴图-' + p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds()) + (i ? '-' + i : '') + '.' + ext, { type: f.type });
+    }));
+    buzz(12);
+    return true;
+  };
+  c.addEventListener('paste', (e) => { if (handleFilePaste(e)) return; handleLongPaste(e, c); });
+  $('composeText').addEventListener('paste', (e) => { if (handleFilePaste(e)) return; handleLongPaste(e, $('composeText')); });
   c.addEventListener('focus', () => { state.composerFocused = true; closePlus(); updateExpandBtn(); });
   c.addEventListener('blur', () => { state.composerFocused = false; updateExpandBtn(); });
   $('sendBtn').addEventListener('click', sendMessage);
   // expand: use pointerdown so it fires before the composer blur hides the button
   $('expandBtn').addEventListener('pointerdown', (e) => { e.preventDefault(); openCompose(); });
   $('thread').addEventListener('click', (e) => { closePlus(); const t = e.target; if (t && t.tagName === 'IMG' && t.closest && t.closest('.md')) openLightbox(t.src); });
+  // 代码块复制按钮（md 渲染处通用：对话/回忆录/日记预览都吃这个委托）
+  document.addEventListener('click', (e) => {
+    const b = e.target && e.target.closest ? e.target.closest('.codecopy') : null;
+    if (!b) return;
+    const code = b.parentElement.querySelector('code');
+    copyText(code ? code.textContent : '', '已复制');
+    buzz(10);
+    if (!b._keep) b._keep = b.innerHTML;
+    b.innerHTML = '✓'; b.classList.add('did');
+    clearTimeout(b._t); b._t = setTimeout(() => { b.innerHTML = b._keep; b.classList.remove('did'); }, 1100);
+  });
   updateExpandBtn();
 
   // swipe up on the input area opens the + panel, swipe down closes it

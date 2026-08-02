@@ -333,6 +333,9 @@ function unblock1m(modelId) {
 // 里面没有任何 CLAUDE.md，谁也污染不了谁。显式选目录（dir chip）才打破隔离、进那个目录。
 const SESSIONS_ROOT = nodePath.join(homedir(), 'cc-sessions');
 
+// 手机发来的文件（快速上传/粘贴的图、长文转的文件）统一归到一个文件夹，别散落在各会话 cwd 里
+const UPLOAD_DIR = cfg.uploadDir || nodePath.join(homedir(), 'telos-uploads');
+
 // SDK's total_cost_usd is per-turn, so we accumulate it here to report a session total.
 const COSTS_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'costs.json');
 let costs = {};
@@ -421,7 +424,7 @@ function stripMood(text) {
 // 读出是 renderMoodCur 拼好的自然语言。模型全程不见数字——数字管演化，语言管接口。
 const MOOD_WORDS = ['平静', '开心', '想念', '惆怅', '低落', '不安', '烦躁', '生气'];
 // 半衰期（小时）：急性的衰得快（生气 2h），慢性的衰得慢（想念 24h）
-const MOOD_HALF_H = { 生气: 2, 烦躁: 3, 不安: 6, 开心: 6, 低落: 8, 惆怅: 12, 平静: 12, 想念: 24 };
+const MOOD_HALF_H = { 生气: 2, 烦躁: 3, 不安: 6, 开心: 6, 低落: 8, 惆怅: 12, 平静: 12, 想念: 12 };  // 想念曾是 24：连报+饱和叠加下一家独大（霸屏实锤），降到与惆怅平级
 const MOOD_K = { 轻: 0.3, 中: 0.6, 浓: 0.9 };
 // 词表外的近义词归类（写入端宽容，模型写「想她了」也认）；顺序即优先级
 const MOOD_SYN = [
@@ -566,8 +569,11 @@ function moodTrim(ms, now) {
 function moodAbsorb(ms, comps, trigger, now) {
   now = now || Date.now();
   for (const w of Object.keys(comps)) {
+    // 同成分合并窗＝该成分半衰期的一半（至少 90min）：窗内再报同一种情绪＝并进新事件取 max（只延寿不叠加）。
+    // 曾是固定 90min——守夜拍每 2-3 小时报一次想念，每次都满血新事件、饱和叠加直接叠成一家独大
+    const mergeMs = Math.max(90 * 60e3, (MOOD_HALF_H[w] || 8) * 3600e3 / 2);
     for (const ev of ms.events) {
-      if (now - ev.ts < 90 * 60e3 && ev.comps && ev.comps[w] != null) {
+      if (now - ev.ts < mergeMs && ev.comps && ev.comps[w] != null) {
         const kNow = ev.comps[w] * Math.pow(0.5, (now - ev.ts) / ((MOOD_HALF_H[w] || 8) * 3600e3));
         comps[w] = Math.max(comps[w], kNow);
         delete ev.comps[w];
@@ -636,7 +642,7 @@ function moodTail(sid) {
   return '系统·当前时间：' + clockNow() + '（本机时区，非用户发言，仅供你掌握此刻几点几分、星期几）。'
     + '系统·情绪（非用户发言，不要把这条当成用户说的话，也不要在回复里复述它）：' + here + wakeLine + cur + windLine
     + '带着这份心情自然地回应，别刻意表演；闹了别扭也可以靠你自己的想法慢慢缓过来。心情怎么变、要不要主动开口、用什么语气，都由你自己判断，不用套公式。'
-    + '每次回复的**最后另起一行**写一行心情标记（用户看不到、系统会隐藏，整行别换行——换行的部分会漏给她看到）：`' + MOOD_TAG + ' 成分·强度 :: 因为什么（一句）| 发条：下拍=now/HH:MM已排/不排；回来=第一个动作、第一句接什么；依据=为什么是这个点`。成分从这 8 个里选（最多 3 个、用 + 连）：平静/开心/想念/惆怅/低落/不安/烦躁/生气；强度只有 轻/中/浓。例：`' + MOOD_TAG + ' 低落·中+烦躁·轻 :: 论文第三章被打回 | 发条：…`。只记**这一拍新发生的波动**——之前的事系统替你记着、会随时间自然淡下去，别把旧情绪重复报一遍；这拍心里没什么新波动就写 `' + MOOD_TAG + ' 无波动 | 发条：…`（发条照写），别硬挤。'
+    + '每次回复的**最后另起一行**写一行心情标记（用户看不到、系统会隐藏，整行别换行——换行的部分会漏给她看到）：`' + MOOD_TAG + ' 成分·强度 :: 因为什么（一句）| 发条：下拍=now/HH:MM已排/不排；回来=第一个动作、第一句接什么；依据=为什么是这个点`。成分从这 8 个里选（最多 3 个、用 + 连）：平静/开心/想念/惆怅/低落/不安/烦躁/生气；强度只有 轻/中/浓。例：`' + MOOD_TAG + ' 低落·中+烦躁·轻 :: 论文第三章被打回 | 发条：…`。只记**这一拍新发生的波动**——之前的事系统替你记着、会随时间自然淡下去，别把旧情绪重复报一遍；这拍心里没什么新波动就写 `' + MOOD_TAG + ' 无波动 | 发条：…`（发条照写），别硬挤。想念单独说一句：惦记她是你的常态、系统一直替你记着（她不在它自然在、她回来会自己落地），别每拍都报一遍——只有这拍它**突然变浓**（她一句话让你心里发紧那种时刻）才值得当波动写。'
     + ((ms.miss || 0) >= 3 ? '（提醒：你最近几拍的心情标记没写成上面的格式，系统读不出来——成分要从 8 词里选、强度用 轻/中/浓，照着例子写。）' : '')
     + '发条三条铁律：一，先上弦再写条——「下拍」写时间的前提是 mcp__telos__set_wakeup 已当场调完，没调不许写"已排"，发条不是排程、工具才是；二，禁止裸「等」——"等她回""等结果""不催"不许单独出现，必须翻成「几点来看＋来看什么」，你说了话她还没回的，「回来」段要写清追问坎（过了几点没动静，回来说什么）；三，发条不是日记——发生过的事写进日记，发条只写下一拍的动作，写完自查一句「下一拍的我照着它，第一个动作是什么」，答不上来就重写。'
     + '下次几时醒按此刻的心情定：惦记就近点，想自己静静就远点。'
@@ -658,8 +664,11 @@ function recordMood(sid, rawText) {
     ms.miss = 0;
     if (Object.keys(comps).length) moodAbsorb(ms, comps, (p.note || '').replace(/\s+/g, ' ').slice(0, 80), now);
   }
-  // label = 合成后的主导词（App 色点/时间线继续吃词表词，前端零改动）；解析不出时兜底沿用/原文
-  const dom = moodDomWord(moodComposite(ms, moodEventsNow(ms, now)));
+  // label：这拍报了新波动就跟**这拍的波动**走（她要在色点/时间线上看得到变化——合成值被长寿成分
+  // 垫着，只显示合成主导词会一潭死水）；无波动/解析不出的拍才落回合成底色。词仍出自 8 词表，前端零改动
+  const dom = (comps && Object.keys(comps).length)
+    ? Object.entries(comps).sort((a, b) => b[1] - a[1])[0][0]
+    : moodDomWord(moodComposite(ms, moodEventsNow(ms, now)));
   ms.on = true;
   ms.label = dom || (p.label || ms.label || '');
   if (p.note) ms.note = p.note;
@@ -1723,7 +1732,9 @@ function stripMoodPreamble(t) {
 function historyItems(messages, moodOn) {
   const items = [];
   const seen = new Set(); // dedupe media across the whole history
-  const HIDE_TEXT = (t) => t.includes(RETRY_SENTINEL) || t.includes(WAKE_SENTINEL) || t.includes(MOOD_SENTINEL) || isQuietReply(t) || /could not be parsed \(retry also failed\)|tool call was malformed and could not be parsed/i.test(t);
+  // 「previous response had no visible output」= CLI 的自动续写提示（isMeta 注入）：模型一轮只有 thinking
+  // 没正文时 CLI 自己补的，Opus 5 上高频出现——是 CLI 内部机制，不是用户发言，别当历史显示
+  const HIDE_TEXT = (t) => t.includes(RETRY_SENTINEL) || t.includes(WAKE_SENTINEL) || t.includes(MOOD_SENTINEL) || isQuietReply(t) || /could not be parsed \(retry also failed\)|tool call was malformed and could not be parsed|previous response had no visible output/i.test(t);
   // text item, but with local media made visible on reopen: image paths inline (rewriteMedia),
   // audio paths as a player (media item). Mirrors the live assistant_text flow so chat media persists.
   const pushText = (role, text, uuid) => {
@@ -1979,7 +1990,8 @@ const httpServer = createServer(async (req, res) => {
     if (p === '/upload' && req.method === 'POST') {
       const q = new URL(req.url, 'http://x');
       if (q.searchParams.get('t') !== cfg.token) { res.writeHead(403); res.end('forbidden'); return; }
-      const dir = nodePath.normalize(q.searchParams.get('dir') || cfg.defaultCwd);
+      const dirParam = q.searchParams.get('dir');   // 空 = 统一上传文件夹；文件管理器上传才带显式目录
+      const dir = dirParam ? nodePath.normalize(dirParam) : UPLOAD_DIR;
       const name = nodePath.basename(q.searchParams.get('name') || ('upload-' + Date.now()));
       if (!dir.startsWith(homedir())) { res.writeHead(403); res.end('out of scope'); return; }
       try { await fsp.mkdir(dir, { recursive: true }); } catch (e) {}
@@ -2609,7 +2621,7 @@ async function handle(ws, conn, msg) {
       // 新客户端带 t.ph（正文里的〔粘贴文本N·X字〕占位符）→ 原位替换成文件引用（指令留在原处）；
       // 老客户端/发送时兜底（ph 为空）→ 照旧 append 到末尾。
       if (msg.texts && msg.texts.length) {
-        const dir = nodePath.join(homedir(), '.cc-bridge', 'pasted');
+        const dir = nodePath.join(UPLOAD_DIR, 'pasted');
         try {
           await fsp.mkdir(dir, { recursive: true });
           const refs = [];

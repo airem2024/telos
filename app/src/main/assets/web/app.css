@@ -483,6 +483,17 @@ button.model:active { opacity: .6; }
   overflow-x: auto; margin: 10px 0; -webkit-overflow-scrolling: touch;
 }
 .md pre code { background: transparent; padding: 0; font-size: 13px; color: inherit; }
+/* 代码块复制按钮：吊在 wrapper 上（不吊 pre——pre 横向滚动会把按钮一起滚走） */
+.codewrap { position: relative; }
+.codewrap .codecopy {
+  position: absolute; top: 8px; right: 8px; z-index: 1;
+  width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 8px; padding: 0; font-size: 15px;
+  background: rgba(255, 255, 255, .09); color: #b9b3a6;
+  -webkit-user-select: none; user-select: none;
+}
+.codewrap .codecopy:active { background: rgba(255, 255, 255, .18); }
+.codewrap .codecopy.did { color: #9ed6ab; }
 .md blockquote { border-left: 3px solid var(--border); margin: 8px 0; padding: 2px 0 2px 12px; color: var(--muted); }
 .md a { color: var(--accent); }
 .md table { border-collapse: collapse; font-size: 14px; margin: 8px 0; display: block; overflow-x: auto; }

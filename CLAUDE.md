@@ -302,6 +302,13 @@ Android WebView 壳  ──加载──▶  bundled assets（默认） 或 你�
   `WindowCompat.setDecorFitsSystemWindows(window,false)` + 状态/导航栏 `Color.TRANSPARENT` +（API28+）
   `layoutInDisplayCutoutMode = SHORT_EDGES`。配合 `viewport-fit=cover` 和 CSS 的 `--safe-top/--safe-bottom`
   （内容靠 safe-area 让位、奶油色窗口背景铺到顶）。**改了原生 → 要重打包 APK 才生效。**
+  另：`--safe-top` **以原生喂的真实 inset 为准**（v1.1.97 起）——WebView 的 `env(safe-area-inset-top)` 部分 ROM
+  上虚高/藏状态栏后残留，顶栏怎么贴都贴不到安全线。MainActivity 的 insets 监听把
+  `statusBars∨displayCutout` 取大者实时 `evaluateJavascript` 进页面；JS 启动时也经 `Android.insetTop()` 拉一次。
+- **给 WebView 挂 `setOnApplyWindowInsetsListener` 必须委托默认处理**：监听会**取代** view 自己的
+  `onApplyWindowInsets`，lambda 里返回原始 insets ≠ 走了默认链——WebView 从此收不到 IME inset、
+  visualViewport 不收缩，**输入框被键盘整个盖住**（1.1.97 踩过，1.1.98 修）。必须
+  `return ViewCompat.onApplyWindowInsets(v, ins)`。
 - **沙箱 exit 144 = OOM**（重命令在沙箱里跑会被内存上限杀）。跑 systemctl/gh/curl/node 用
   `dangerouslyDisableSandbox:true` 并保持命令轻量。（bridge 本身是 systemd 服务、不在沙箱、8G 内存。）
 - **extended thinking 退出重进就没了 / 只显示三行**：两个独立 bug。① `runTurn` 实时会 `out` thinking，
