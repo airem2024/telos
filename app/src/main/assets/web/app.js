@@ -1044,6 +1044,7 @@ const MOOD_CATS = [
   { key: '平静', hue: 160, re: /平静|安宁|安稳|淡然|平和|宁静|踏实|安心|放松/, k: 0.35 },
   { key: '开心', hue: 48, re: /开心|快乐|愉快|轻松|明朗|满足|甜|幸福|欢喜|喜/, k: 0.55 },
   { key: '想念', hue: 330, re: /想念|惦记|温暖|期待|柔软|依恋|温柔|心动/, k: 0.5 },
+  { key: '害羞', hue: 305, re: /害羞|羞涩|脸红|不好意思|难为情|害臊/, k: 0.5 },
   { key: '惆怅', hue: 280, re: /惆怅|怅然|淡淡|微凉|怀念|感伤|怔忡|空落/, k: 0.45 },
   { key: '低落', hue: 215, re: /低落|难过|失落|沮丧|委屈|孤独|寂寞|疲惫|累|困倦|乏|哭/, k: 0.55 },
   { key: '不安', hue: 35, re: /不安|忐忑|担心|焦虑|紧张|害怕|慌|忧/, k: 0.6 },
@@ -2441,6 +2442,7 @@ function renderCinemaLog(m) {
     else if (it.kind === 'here') { cls = 'cl-dim'; txt = '回到对话'; }
     else if (it.kind === 'away') { cls = 'cl-dim'; txt = '离开'; }
     else if (it.kind === 'watch') { cls = 'cl-watch'; txt = '醒了一下，没出声'; }   // 守夜/到点醒来但选择沉默 → 留一笔暗痕
+    else if (it.kind === 'dream') { cls = 'cl-watch'; txt = '做了个梦'; }          // 凌晨的梦：露痕迹不露内容，色点=她给明天定的底色
     let meta = '';
     if (it.trigger === 'self') meta = '你定的时间';        // 她自己定的下次时间到了
     else if (it.trigger === 'mark') meta = '守夜';         // 守夜的坎兜底叫起
@@ -2569,8 +2571,8 @@ function fillWakeForm(st) {
   const w = state.wk = {
     enabled: !!st.enabled, chase: !!st.chase, wakeOnEnter: !!st.wakeOnEnter, dawn: !!st.dawn,
     dawnH: (+dp[0] || 0), dawnM: (+dp[1] || 0),
-    list: (st.schedules || []).filter((s) => s.by !== 'cc' && (s.nextAt || s.repeat)).map((s) => ({ nextAt: s.nextAt || 0, repeat: s.repeat || null })),
-    cc: (st.schedules || []).filter((s) => s.by === 'cc').map((s) => ({ id: s.id, nextAt: s.nextAt || 0, repeat: s.repeat || null })),
+    list: (st.schedules || []).filter((s) => s.by !== 'cc' && (s.nextAt || s.repeat)).map((s) => ({ nextAt: s.nextAt || 0, repeat: s.repeat || null, note: s.note || '' })),
+    cc: (st.schedules || []).filter((s) => s.by === 'cc').map((s) => ({ id: s.id, nextAt: s.nextAt || 0, repeat: s.repeat || null, note: s.note || '' })),
     eMode: 'daily', eDate: todayLocalStr(), eHour: (now.getHours() + 1) % 24, eMin: 0, eEvery: 180,
   };
   closeWakeEditor();
@@ -2601,6 +2603,7 @@ function renderWakeList() {
     const it = el('div', 'wkitem');
     const main = el('div', 'wki-main');
     const wh = el('div', 'wki-when'); wh.textContent = scheduleLabel(sch); main.appendChild(wh);
+    if (sch.note) { const nb = el('div', 'wki-sub'); nb.textContent = sch.note; main.appendChild(nb); }
     if (sch.repeat && sch.repeat.kind === 'every' && sch.nextAt) { const sub = el('div', 'wki-sub'); sub.textContent = '下次 ' + wakeLabel(sch.nextAt); main.appendChild(sub); }
     it.appendChild(main);
     const del = el('button', 'wki-del'); del.textContent = '×'; del.addEventListener('click', () => { w.list.splice(i, 1); renderWakeForm(); }); it.appendChild(del);
@@ -2610,6 +2613,7 @@ function renderWakeList() {
     const it = el('div', 'wkitem');
     const main = el('div', 'wki-main');
     const wh = el('div', 'wki-when'); wh.textContent = scheduleLabel(sch); main.appendChild(wh);
+    if (sch.note) { const nb = el('div', 'wki-sub'); nb.textContent = sch.note; main.appendChild(nb); }
     if (sch.repeat && sch.repeat.kind === 'every' && sch.nextAt) { const sub = el('div', 'wki-sub'); sub.textContent = '下次 ' + wakeLabel(sch.nextAt); main.appendChild(sub); }
     it.appendChild(main);
     const tag = el('div', 'wki-cc'); tag.textContent = 'cc'; it.appendChild(tag);
@@ -2634,11 +2638,12 @@ function renderWakeList() {
 }
 function renderDawnArea() {
   const w = state.wk; const box = $('wkDawnArea'); box.innerHTML = '';
-  box.appendChild(wkInline('写日记时间', wkClock(() => w.dawnH, (v) => { w.dawnH = v; }, () => w.dawnM, (v) => { w.dawnM = v; })));
+  box.appendChild(wkInline('入睡时间', wkClock(() => w.dawnH, (v) => { w.dawnH = v; }, () => w.dawnM, (v) => { w.dawnM = v; })));
 }
 function openWakeEditor() {
   const w = state.wk; if (!w) return; const now = new Date();
   w.eMode = 'daily'; w.eDate = todayLocalStr(); w.eHour = (now.getHours() + 1) % 24; w.eMin = 0; w.eEvery = 180;
+  $('wkNote').value = '';
   $('wkEditor').style.display = ''; $('wkAdd').style.display = 'none';
   document.querySelectorAll('#wkMode button').forEach((b) => b.classList.toggle('on', b.dataset.m === w.eMode));
   renderWakeModeArea();
@@ -2649,6 +2654,7 @@ function addFromEditor() {
   if (w.eMode === 'once') { const t = wkEpochDate(w.eDate, w.eHour, w.eMin); if (t <= Date.now()) { toast('这个时间已经过了，换个更晚的'); return; } item = { nextAt: t, repeat: null }; }
   else if (w.eMode === 'daily') { const at = pad2(w.eHour) + ':' + pad2(w.eMin); if (w.list.some((s) => s.repeat && s.repeat.kind === 'daily' && s.repeat.at === at)) { toast('已经有这个每天时间了'); closeWakeEditor(); renderWakeForm(); return; } item = { nextAt: wkNextDaily(w.eHour, w.eMin), repeat: { kind: 'daily', at } }; }
   else { if (w.list.some((s) => s.repeat && s.repeat.kind === 'every' && s.repeat.minutes === w.eEvery)) { toast('已经有这个间隔了'); closeWakeEditor(); renderWakeForm(); return; } item = { nextAt: Date.now() + w.eEvery * 60000, repeat: { kind: 'every', minutes: w.eEvery } }; }
+  item.note = ($('wkNote').value || '').trim().slice(0, 40);
   w.list.push(item); closeWakeEditor(); renderWakeForm();
 }
 function wkChip(label, on, cb) { const b = el('button', 'wkt' + (on ? ' on' : '')); b.textContent = label; b.addEventListener('click', cb); return b; }
@@ -2726,10 +2732,10 @@ function saveWake() {
   const s = state.wakeTarget; if (!s) return; const w = state.wk;
   const dawnTime = pad2(w.dawnH) + ':' + pad2(w.dawnM);
   if (w.enabled && !w.list.length) { toast('还没添加唤醒时间，或关掉「开启定时唤醒」'); return; }
-  const schedules = w.list.map((sch) => ({ nextAt: sch.nextAt || 0, repeat: sch.repeat || null }));
+  const schedules = w.list.map((sch) => ({ nextAt: sch.nextAt || 0, repeat: sch.repeat || null, note: sch.note || '' }));
   wsend({ type: 'wakeup_set', sessionId: s.id, enabled: w.enabled, schedules, chase: w.chase, wakeOnEnter: w.wakeOnEnter, dawn: w.dawn, dawnTime });
   closeScrim('wakeScrim');
-  if (!w.enabled) { toast(w.dawn ? '已关闭唤醒 · 仅定时写日记 ' + dawnTime : '已关闭定时唤醒'); return; }
+  if (!w.enabled) { toast(w.dawn ? '已关闭唤醒 · 仅定时入睡 ' + dawnTime : '已关闭定时唤醒'); return; }
   const next = schedules.map((x) => x.nextAt).filter(Boolean).sort((a, b) => a - b)[0];
   toast('已设置 · ' + w.list.length + ' 个唤醒时间' + (next ? ' · 下次 ' + wakeLabel(next) : ''));
 }
@@ -3024,7 +3030,7 @@ function toggleDwPicker(kind) {
     const render = () => {
       p.innerHTML = '';
       const row = el('div', 'moodsw-row');
-      ['平静', '开心', '想念', '惆怅', '低落', '不安', '烦躁', '生气'].forEach((w) => {
+      ['平静', '开心', '想念', '害羞', '惆怅', '低落', '不安', '烦躁', '生气'].forEach((w) => {
         const b = el('button', 'moodsw' + (state.dwMood === w ? ' on' : ''));
         b.style.background = moodTint(w, state.dwMoodK);
         const lb = el('span', 'moodsw-lb'); lb.textContent = w; b.appendChild(lb);
@@ -3032,7 +3038,7 @@ function toggleDwPicker(kind) {
         row.appendChild(b);
       });
       const seg = el('div', 'seg dwseg');
-      [['轻', 0.3], ['中', 0.6], ['浓', 0.85]].forEach(([lb, v]) => {
+      [['轻', 0.3], ['中', 0.6], ['浓', 0.9]].forEach(([lb, v]) => {
         const b = el('button', state.dwMoodK != null && Math.abs(state.dwMoodK - v) < 0.05 ? 'on' : '');
         b.textContent = lb;
         b.addEventListener('click', () => { state.dwMoodK = v; updateDwMoodWeather(); render(); });

@@ -1197,6 +1197,8 @@ body.sysfont {
 .wkchip:active { background: var(--surface-2); }
 .wkselect { width: 100%; padding: 11px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 15px; font-family: inherit; }
 input[type=datetime-local] { width: 100%; padding: 11px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 15px; font-family: inherit; }
+#wkNote { width: 100%; margin-top: 10px; padding: 11px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 15px; font-family: inherit; }
+#wkNote::placeholder { color: var(--muted); }
 
 /* wake indicator on a session card */
 .scard-wake { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--accent); margin-top: 4px; font-family: var(--mono); }
@@ -1295,7 +1297,7 @@ input[type=datetime-local] { width: 100%; padding: 11px 12px; border-radius: 12p
 .cm-d { background: var(--accent); } .cm-e { background: #3b82c4; } .cm-t { background: #6aa84f; }
 
 /* 心情色块（写日记里选当天心情，#d1efe3→#feb2b2） */
-.moodsw-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.moodsw-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .moodsw { height: 40px; border: 1px solid color-mix(in srgb, var(--border) 60%, transparent); border-radius: 10px; }
 .moodsw.on { box-shadow: 0 0 0 2px var(--text); }
 .moodsw-lb { font-size: 13px; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.22); }

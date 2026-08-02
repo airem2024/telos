@@ -29,6 +29,7 @@ server/hidden.json
 server/folders.json
 server/mcpoff.json
 server/modelwin.json
+server/modelcache.json
 server/onemblock.json
 server/costs.json
 server/wakeups.json
@@ -42,12 +43,15 @@ server/sessmodel.json
 server/activedays.json
 server/apk_version.txt
 server/apk_notes.txt
-
-# signing key — never in the public repo; CI restores from secret SIGNING_KEYSTORE_B64
-*.keystore
-server/modelcache.json
 server/mood.json
 server/cachettl.json
 server/mediamap.json
+server/memosmap.json
+server/memosync.json
+
+# mnemosyne (DLC) — 运行期产物；数据在仓库外 ~/mnemosyne-data
+mnemosyne/__pycache__/
+mnemosyne/.venv/
+mnemosyne/*.pyc
 server/recover.json
 server/folders.json
