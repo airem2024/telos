@@ -568,6 +568,12 @@ function handle(m) {
     }
     case 'renamed': case 'deleted': case 'pinned': wsend({ type: 'list_sessions' }); break;
     case 'cloned': if (m.error) { toast('复制失败：' + m.error); } else { toast('已复制为新窗口'); wsend({ type: 'list_sessions' }); } break;
+    case 'exported': {
+      if (m.error) { toast('转出失败：' + m.error); break; }
+      const cmd = 'claude --resume ' + m.sessionId;   // 克隆已藏出列表，不用刷新
+      openConfirm('已转到终端', cmd, () => copyText(cmd, '已复制'), '复制命令', true);
+      break;
+    }
     case 'cleanup_done': if (m.removed) toast('已清理 ' + m.removed + ' 个废弃对话'); wsend({ type: 'list_sessions' }); break;
     // ---- 醒来 / 日记 / 便签 ----
     case 'wakeup_state': onWakeState(m); break;
@@ -1690,10 +1696,11 @@ function managerUpload(fileList) {
 }
 
 /* ============ 居中确认弹窗：一次点击代替「输入删除确认」（各处删除共用） ============ */
-function openConfirm(title, sub, cb, okText) {
+function openConfirm(title, sub, cb, okText, plain) {
   $('confirmTitle').textContent = title;
   const s = $('confirmSub'); s.textContent = sub || ''; s.style.display = sub ? '' : 'none';
   $('confirmYes').textContent = okText || '删除';
+  $('confirmYes').classList.toggle('danger', !plain);   // plain = 非破坏性动作，不用红
   state.confirmCb = cb;
   openScrim('confirmScrim');
 }
@@ -4184,6 +4191,7 @@ function boot() {
   $('sessFolder').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openFolderPicker(s); });
   $('sessRename').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openPrompt('重命名会话', '', (name) => { if (name) wsend({ type: 'rename', sessionId: s.id, title: name }); }, s.title || ''); });
   $('sessClone').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) { toast('复制中…'); wsend({ type: 'clone_session', sessionId: s.id, title: s.title || '' }); } });
+  $('sessExport').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) { toast('转出中…'); wsend({ type: 'export_terminal', sessionId: s.id }); } });
   $('sessDelete').addEventListener('click', () => { const s = state.sessTarget; closeScrim('sessScrim'); if (s) openConfirm('删除「' + (s.title || '会话') + '」？', '不可恢复', () => wsend({ type: 'delete', sessionId: s.id })); });
   function savePrompt() {
     const inp = $('promptInput'); const raw = inp.value.trim();

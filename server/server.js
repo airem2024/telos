@@ -144,6 +144,51 @@ async function cloneSession(srcSid, title) {
   return newSid;
 }
 
+// 「转到终端」：把会话克隆成终端 Claude Code /resume 可见、可接着聊的样子（流程与坑见 export-to-terminal-plan.md）。
+// 三道关卡：entrypoint sdk-*→cli（/resume 硬过滤 SDK 入口）、cwd→目标目录、补 ~/.claude/history.jsonl 索引。
+// 必须克隆为新 UUID（重复 ID 跨目录 resume 直接 not-found）；原件不动，转出后两边独立、互不写回。
+const EXPORT_CWD = '/root';
+async function exportToTerminal(srcSid) {
+  const srcPath = await _sessionJsonl(srcSid);
+  if (!srcPath) return null;
+  const newSid = randomUUID();
+  const out = [];
+  let display = '';
+  for (const ln of (await fsp.readFile(srcPath, 'utf8')).split('\n')) {
+    if (!ln.trim()) continue;
+    const swapped = ln.replaceAll(srcSid, newSid);        // sessionId 全文替换（ai-title 等行也带它）
+    let o; try { o = JSON.parse(swapped); } catch (e) { out.push(swapped); continue; }   // 非 JSON 行原样
+    if (typeof o.cwd === 'string') o.cwd = EXPORT_CWD;    // 只动字段，不碰对话内容里的路径
+    if (typeof o.entrypoint === 'string' && o.entrypoint.startsWith('sdk')) o.entrypoint = 'cli';
+    if (!display && o.message && o.message.role === 'user') {
+      let t = typeof o.message.content === 'string' ? o.message.content
+        : Array.isArray(o.message.content) ? o.message.content.filter((b) => b && b.type === 'text').map((b) => b.text).join(' ') : '';
+      t = (t || '').replace(/^⁣\[telos-[^\]]*\]\s*/, '').replace(/⁣\[mood\][\s\S]*$/, '').replace(/\s+/g, ' ').trim();
+      if (t && !t.startsWith('<') && !t.startsWith('/') && !t.startsWith('系统·')) display = t.slice(0, 80);
+    }
+    out.push(JSON.stringify(o));
+  }
+  const dstDir = nodePath.join(homedir(), '.claude', 'projects', EXPORT_CWD.replace(/[^a-zA-Z0-9]/g, '-'));
+  await fsp.mkdir(dstDir, { recursive: true });
+  await fsp.writeFile(nodePath.join(dstDir, newSid + '.jsonl'), out.join('\n') + '\n');
+  const subSrc = nodePath.join(nodePath.dirname(srcPath), srcSid);   // 子 agent 目录一起克隆（同样换 ID）
+  try { if ((await fsp.stat(subSrc)).isDirectory()) await copyTreeReplace(subSrc, nodePath.join(dstDir, newSid), srcSid, newSid); } catch (e) {}
+  // SDK 会话从不写 history.jsonl，补一行终端才认；单次原子 append，别读改写全文件
+  await fsp.appendFile(nodePath.join(homedir(), '.claude', 'history.jsonl'),
+    JSON.stringify({ display: display || '（转自 App）', pastedContents: {}, timestamp: Date.now(), project: EXPORT_CWD, sessionId: newSid }) + '\n');
+  hidden.add(newSid); saveHidden();       // 克隆是给终端用的，别在 App 列表里冒出个双胞胎
+  exported.add(newSid); saveExported();   // 且免于 autoCleanup——终端会话不归 App 清理管
+  return newSid;
+}
+async function copyTreeReplace(src, dst, from, to) {
+  await fsp.mkdir(dst, { recursive: true });
+  for (const ent of await fsp.readdir(src, { withFileTypes: true })) {
+    const s = nodePath.join(src, ent.name), d = nodePath.join(dst, ent.name.replaceAll(from, to));
+    if (ent.isDirectory()) await copyTreeReplace(s, d, from, to);
+    else await fsp.writeFile(d, (await fsp.readFile(s, 'utf8')).replaceAll(from, to));
+  }
+}
+
 // 从 jsonl 尾部取最近 n 轮真实 user/assistant 文本（压缩不删原始轮，所以读得到）。
 async function recentTurns(sid, n) {
   const p = await _sessionJsonl(sid);
@@ -285,6 +330,12 @@ const HIDDEN_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url
 let hidden = new Set();
 try { hidden = new Set(JSON.parse(readFileSync(HIDDEN_PATH, 'utf8'))); } catch (e) {}
 function saveHidden() { try { writeFileSync(HIDDEN_PATH, JSON.stringify([...hidden])); } catch (e) {} }
+
+// ---- exported-to-terminal clones（转到终端的克隆：藏在列表外活着，autoCleanup 不许碰）----
+const EXPORTED_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'exported.json');
+let exported = new Set();
+try { exported = new Set(JSON.parse(readFileSync(EXPORTED_PATH, 'utf8'))); } catch (e) {}
+function saveExported() { try { writeFileSync(EXPORTED_PATH, JSON.stringify([...exported])); } catch (e) {} }
 
 // ---- disabled MCP servers (per-session tool blocking) ----
 const MCPOFF_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'mcpoff.json');
@@ -1816,6 +1867,7 @@ async function cleanupStale({ days = 1, maxRounds = 1 } = {}) {
   for (const s of sessions) {
     if ((s.lastModified || 0) >= cutoff) continue;   // touched within the window → keep
     if (pinned.has(s.sessionId)) continue;            // user pinned it → keep
+    if (exported.has(s.sessionId)) continue;          // 转到终端的克隆 → 归终端管，App 别清
     if (wakeups[s.sessionId] && wakeups[s.sessionId].enabled) continue; // wake-enabled → keep (it lives on its own)
     let rounds = 0;
     try {
@@ -2391,6 +2443,14 @@ async function handle(ws, conn, msg) {
         const newSid = await cloneSession(msg.sessionId, msg.title);
         send(ws, newSid ? { type: 'cloned', sessionId: newSid } : { type: 'cloned', error: '找不到源对话文件' });
       } catch (e) { send(ws, { type: 'cloned', error: String((e && e.message) || e) }); }
+      break;
+    }
+
+    case 'export_terminal': {
+      try {
+        const newSid = await exportToTerminal(msg.sessionId);
+        send(ws, newSid ? { type: 'exported', sessionId: newSid } : { type: 'exported', error: '找不到源对话文件' });
+      } catch (e) { send(ws, { type: 'exported', error: String((e && e.message) || e) }); }
       break;
     }
 
