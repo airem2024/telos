@@ -825,6 +825,8 @@ button.model:active { opacity: .6; }
 .draweritem { display: flex; align-items: center; gap: 14px; width: 100%; border: none; background: transparent; color: var(--text); padding: 14px 16px; font-size: 16px; border-radius: 12px; text-align: left; }
 .draweritem svg { color: var(--muted); flex: none; }
 .draweritem:active { background: var(--surface-2); }
+/* 「我的状态」右侧的当前状态一瞥：单行截断，别把条目撑高 */
+.dr-sub { margin-left: auto; max-width: 40%; font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .drawer-foot { padding: 6px 24px 0; font-size: 11px; color: var(--muted); letter-spacing: .06em; opacity: .7; }
 
 /* ---- in-conversation search: everything floats over the live conversation ----

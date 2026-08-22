@@ -33,6 +33,7 @@ server/modelcache.json
 server/onemblock.json
 server/costs.json
 server/wakeups.json
+server/userstatus.json
 server/diary.json
 server/stickies.json
 server/favorites.json
@@ -49,6 +50,19 @@ server/mediamap.json
 server/memosmap.json
 server/memosync.json
 server/exported.json
+
+# 语音终端网关(terminal/) — 运行期状态与机密
+terminal/config.json
+terminal/state.json
+terminal/*.log
+terminal/*.wav
+terminal/cache/
+# 刷机工具的真实网关地址 + boardToken(token 能刷固件,绝不提交;示例见 gateway.env.example)
+terminal/tools/gateway.env
+terminal/tools/fw_cache/
+terminal/tools/__pycache__/
+# 固件二进制 + assets 镜像:近 100MB 的编译产物,且 nvs-*.bin 里烤着服务器域名和 wifi 键
+terminal/board/firmware/
 
 # mnemosyne (DLC) — 运行期产物；数据在仓库外 ~/mnemosyne-data
 mnemosyne/__pycache__/

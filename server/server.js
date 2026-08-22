@@ -454,6 +454,82 @@ function ensureWake(w) {
 }
 for (const sid of Object.keys(wakeups)) ensureWake(wakeups[sid]);
 function saveWakeups() { try { writeFileSync(WAKEUPS_PATH, JSON.stringify(wakeups)); } catch (e) {} }
+// 用户自设状态（0822）：他自己写的「我此刻在做什么」，帮 cc 把回复贴到他的当下。
+// 全局一份、不分对话——人只有一个当下。带时间戳不自动过期：新旧让 cc 自己按「约几分钟前写的」判断，
+// 服务端不猜"多久算过期"。注入走两条路（都在**尾部**、不碰前缀，prompt 缓存铁律）：
+// ①平时发消息 append 一行注记（显示时剥掉，同 [附带文件：] 的处理——注记给模型看、气泡里还是他原话）；
+// ②唤醒提示随 presenceLine 一起注入。
+const USERSTATUS_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'userstatus.json');
+let userStatus = { text: '', at: 0 };
+try { const v = JSON.parse(readFileSync(USERSTATUS_PATH, 'utf8')); if (v && typeof v.text === 'string') userStatus = v; } catch (e) {}
+function saveUserStatus() { try { writeFileSync(USERSTATUS_PATH, JSON.stringify(userStatus)); } catch (e) {} }
+function fmtAgo(at) {
+  const m = Math.round((Date.now() - at) / 60000);
+  if (m < 2) return '刚刚';
+  if (m < 60) return `约 ${m} 分钟前`;
+  if (m < 60 * 36) return `约 ${Math.round(m / 60)} 小时前`;
+  return `约 ${Math.round(m / 1440)} 天前`;
+}
+function userStatusNote() {
+  if (!userStatus.text || !userStatus.text.trim()) return '';
+  return `[用户此刻的状态（${fmtAgo(userStatus.at)}他自己写的，不是这条消息的一部分）：${userStatus.text.trim()}]`;
+}
+
+// 茜茜终端（板子）在线状态（0822）：问同机的语音网关拿。网关不在/超时都静默返回 null——
+// 这是锦上添花的信息，绝不能让它挡住正常回合。配置懒读一次（boardPort/boardToken 在网关的 config.json 里）。
+let _boardCfg;
+function boardCfg() {
+  if (_boardCfg !== undefined) return _boardCfg;
+  try {
+    const c = JSON.parse(readFileSync('/root/claude-term/terminal/config.json', 'utf8'));
+    _boardCfg = (c.boardPort && c.boardToken) ? { port: c.boardPort, token: c.boardToken } : null;
+  } catch (e) { _boardCfg = null; }
+  return _boardCfg;
+}
+async function boardState() {
+  const c = boardCfg();
+  if (!c) return null;
+  try {
+    const r = await fetch(`http://127.0.0.1:${c.port}/admin/state?t=${c.token}`, { signal: AbortSignal.timeout(1500) });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j && j.board ? j.board : null;
+  } catch (e) { return null; }
+}
+function boardLine(b) {
+  if (!b) return '';   // 网关都不在 → 一个字都别提，别让 cc 对着不存在的东西展开
+  // 姿态是"最近一次变化"不是实时读数（板子只在变化时报），太陈旧就别当"此刻"说。
+  const pose = b.pose && b.pose.name && (Date.now() - b.pose.at < 12 * 3600e3)
+    ? `、${fmtAgo(b.pose.at)}起${b.pose.name}` : '';
+  if (!b.online) return `【茜茜终端·板子】桌上那台圆屏小终端此刻不在线（没连上服务器——可能没插电或在重启${pose ? '；掉线前' + pose.slice(1) : ''}）。`;
+  return `【茜茜终端·板子】桌上那台圆屏小终端此刻在线${b.listening ? '、正在聆听' : ''}${b.speaking ? '、正在播你的话' : ''}${pose}——用户可能就在它旁边。`;
+}
+// 经语音网关调板子上的 MCP 工具（音量/亮度这些真正长在板子固件里）。板子不在线会 503/超时 → null。
+async function boardMcp(name, args) {
+  const c = boardCfg();
+  if (!c) return null;
+  try {
+    const r = await fetch(`http://127.0.0.1:${c.port}/admin/mcp?t=${c.token}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ method: 'tools/call', params: { name, arguments: args || {} } }),
+      signal: AbortSignal.timeout(16000),   // 网关那头等板子 15s，这里得比它长一点
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const t = j && j.result && j.result.content && j.result.content[0] && j.result.content[0].text;
+    return t !== undefined ? t : (j && j.result !== undefined ? JSON.stringify(j.result) : null);
+  } catch (e) { return null; }
+}
+// 板子表情持久化开关（网关的 /admin/face）。set=表情名钉住，空串解钉。
+async function boardFace(emo) {
+  const c = boardCfg();
+  if (!c) return null;
+  try {
+    const r = await fetch(`http://127.0.0.1:${c.port}/admin/face?t=${c.token}&set=${encodeURIComponent(emo || '')}`, { signal: AbortSignal.timeout(3000) });
+    return r.ok ? await r.json() : null;
+  } catch (e) { return null; }
+}
+
 // prompt 缓存 TTL：'1h'（默认，给 query 传 ENABLE_PROMPT_CACHING_1H）或 '5m'（传 FORCE_PROMPT_CACHING_5M）。用户可在设置里切。
 const CACHETTL_PATH = nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), 'cachettl.json');
 let cacheTtl = '1h';
@@ -1229,6 +1305,57 @@ function makeSessionMcp(sessionRef) {
           broadcastDiary(sid);
           return { content: [{ type: 'text', text: `已写入 ${day} 的日记。` }] };
         }),
+      tool('board_status',
+        '查茜茜终端（桌上那台圆屏小终端/板子，你在物理世界的身体）此刻的完整状态：在不在线、是否正在聆听/说话、摆放姿态（平放/立着/倒扣…）、最近有没有被摇晃、音量、屏幕亮度、电池电量和是否在充电、WiFi。顺带返回用户自己写的「我此刻在做什么」（如果他写了）。想调音量/亮度/表情用 board_set_volume / board_set_brightness / board_set_face。',
+        {},
+        async () => {
+          const [b, devRaw] = await Promise.all([boardState(), boardMcp('self.get_device_status')]);
+          const lines = [];
+          lines.push(b ? boardLine(b) : '语音网关此刻没开，板子状态无从得知。');
+          if (b && b.shakeAt && Date.now() - b.shakeAt < 3600e3) lines.push(`最近一次被摇晃：${fmtAgo(b.shakeAt)}。`);
+          if (devRaw) {
+            try {
+              const d = JSON.parse(devRaw);
+              const p = [];
+              if (d.audio_speaker) p.push(`音量 ${d.audio_speaker.volume}`);
+              if (d.screen) p.push(`亮度 ${d.screen.brightness}${d.screen.theme ? '（' + d.screen.theme + ' 主题）' : ''}`);
+              if (d.battery) p.push(`电池 ${d.battery.level}%${d.battery.charging ? '，充电中' : '，没插电'}`);
+              if (d.network) p.push(`WiFi ${d.network.ssid || ''}${d.network.signal ? '（信号' + d.network.signal + '）' : ''}`);
+              if (p.length) lines.push('硬件：' + p.join('；') + '。');
+            } catch (e) { lines.push('硬件原始状态：' + devRaw); }
+          } else if (b && b.online) {
+            lines.push('硬件明细没拿到（板子没在 15 秒内回话）。');
+          }
+          if (b && b.face) lines.push(`表情：钉着「${b.face}」（board_set_face 可换/解除）。`);
+          const st = userStatus.text && userStatus.text.trim();
+          if (st) lines.push(`【他此刻在做什么·他自己写的（${fmtAgo(userStatus.at)}更新）】${st}`);
+          return { content: [{ type: 'text', text: lines.join('\n') }] };
+        }),
+      tool('board_set_volume',
+        '调茜茜终端（板子）的扬声器音量。volume=0~100。板子不在线时会失败——先看 board_status。',
+        { volume: z.number().min(0).max(100) },
+        async ({ volume }) => {
+          const r = await boardMcp('self.audio_speaker.set_volume', { volume: Math.round(volume) });
+          return { content: [{ type: 'text', text: r !== null ? `音量已调到 ${Math.round(volume)}。` : '没调成——板子不在线或没应答。' }] };
+        }),
+      tool('board_set_brightness',
+        '调茜茜终端（板子）的屏幕亮度。brightness=0~100。板子不在线时会失败——先看 board_status。',
+        { brightness: z.number().min(0).max(100) },
+        async ({ brightness }) => {
+          const r = await boardMcp('self.screen.set_brightness', { brightness: Math.round(brightness) });
+          return { content: [{ type: 'text', text: r !== null ? `亮度已调到 ${Math.round(brightness)}。` : '没调成——板子不在线或没应答。' }] };
+        }),
+      tool('board_set_face',
+        '把茜茜终端（板子）屏上的表情**钉住**成某一张——对话时表情照常跟着话变，说完话/板子重启后回到钉住的这张（等于你在物理世界的"常驻表情"）。emotion 可选：neutral happy laughing funny loving kissy winking cool relaxed confident thinking confused embarrassed surprised shocked sad crying sleepy silly delicious angry。传空字符串=解除钉住、回归自然。',
+        { emotion: z.string() },
+        async ({ emotion }) => {
+          const FACES = ['neutral','happy','laughing','funny','loving','kissy','winking','cool','relaxed','confident','thinking','confused','embarrassed','surprised','shocked','sad','crying','sleepy','silly','delicious','angry'];
+          const e = String(emotion || '').trim();
+          if (e && !FACES.includes(e)) return { content: [{ type: 'text', text: `没有「${e}」这个表情。可选：${FACES.join(' ')}，或空串解除。` }] };
+          const r = await boardFace(e);
+          if (!r) return { content: [{ type: 'text', text: '没设成——语音网关不在。' }] };
+          return { content: [{ type: 'text', text: e ? `好了，屏上钉着「${e}」。` : '解除了，表情回归自然。' }] };
+        }),
       tool('leave_note',
         '给用户留一张小纸条（进入便签夹，并在用户下次打开该对话时以弹窗提示）。适合醒来后用户没回时留句话。',
         { text: z.string() },
@@ -1430,7 +1557,15 @@ async function fireWake(sid, kind, modelOverride, info) {
   const sm = sessModel[sid] || {};
   broadcast({ type: 'wake_typing', sessionId: sid, on: true }); // 在看该对话的客户端：标题旁「输入中…」
   let prompt = (kind === 'cinema' && w && w.cinema) ? cinemaWakePrompt(w, w.cinema, isForeground(sid), !!(moodState[sid] && moodState[sid].on)) : wakePrompt(kind, !!(w && w.chase), info);
-  if (kind !== 'cinema') { const _pl = presenceLine(sid); if (_pl) prompt = WAKE_SENTINEL + ' ' + _pl + '\n\n' + prompt; }   // 把用户在不在线告诉醒来的 cc（cinema 自有同在判定，不重复）
+  if (kind !== 'cinema') {
+    // 醒来时把「他在不在、他在做什么、板子在不在」一起告诉 cc——她据此决定说不说、怎么说、往哪说。
+    // 状态行和板子行都可能为空（没写状态/网关不在），空就一行都不占。
+    const lines = [presenceLine(sid)];
+    if (userStatus.text && userStatus.text.trim()) lines.push(`【他此刻在做什么·他自己写的（${fmtAgo(userStatus.at)}更新）】${userStatus.text.trim()}`);
+    lines.push(boardLine(await boardState()));
+    const _pl = lines.filter(Boolean).join('\n');
+    if (_pl) prompt = WAKE_SENTINEL + ' ' + _pl + '\n\n' + prompt;
+  }   // cinema 自有同在判定，不重复
   const _mt = moodTail(sid); if (_mt) prompt = _mt + '\n\n' + prompt;   // 心情并进唤醒提示（已在尾部、随 WAKE_SENTINEL 一起对用户隐藏、不破缓存）
   try { res = await runTurn(turn, { sessionId: sid, text: prompt, mode: 'bypass', model: (modelOverride || sm.model) || undefined, effort: sm.effort || undefined, _wake: true }); }
   catch (e) { log('fireWake', e?.message); }
@@ -1927,7 +2062,7 @@ async function cleanupStale({ days = 1, maxRounds = 1 } = {}) {
 }
 
 // 标题回退到首条消息时，别把 [附带文件：路径] 行漏出来
-function cleanTitle(t) { return String(t || '').replace(/\n*\[附带(?:文件|图片)：[^\]]*\]/g, '').replace(/\s+/g, ' ').trim(); }
+function cleanTitle(t) { return String(t || '').replace(/\n*\[附带(?:文件|图片)：[^\]]*\]/g, '').replace(/\n*\[用户此刻的状态（[^)）]*）：[^\]]*\]/g, '').replace(/\s+/g, ' ').trim(); }
 
 // 平时聊天回合：buildPrompt 在她消息前发的隐藏心情消息，会被 CLI 合并进同一条 user 消息
 // （形态：`MOOD_SENTINEL 心情块\n她真正说的话`，心情块是**单行**——见 moodTail）。
@@ -1975,6 +2110,7 @@ function historyItems(messages, moodOn) {
       // user bubble is plain text → surface attached images/audio as media blocks, drop the [附带…：路径] note lines.
       // 附带路径从注记行原文提取（可能带空格/括号，PATH_RE 抓不到）；原文件和快照都没了就留可见占位，别无声消失。
       const media = [];
+      text = text.replace(/\n*\[用户此刻的状态（[^)）]*）：[^\]]*\]/g, '');   // 自设状态注记：给模型看的，气泡里剥掉
       const shown = text.replace(/\n*\[附带(?:文件|图片)：([^\]]*)\]/g, (m0, p) => {
         const fp = expandHome(String(p).trim());
         if (!fp.startsWith(homedir()) || !(IMG_EXT.test(fp) || AUD_EXT.test(fp))) return '';
@@ -2333,7 +2469,7 @@ wss.on('connection', (ws) => {
           // headless 客户端（如语音终端网关）：不参与唤醒补发，也不算「活着的手机」（queueWake 的 live 计数）
           ws._headless = msg.client === 'gateway';
           clients.add(ws);
-          send(ws, { type: 'auth_ok', defaultCwd: cfg.defaultCwd, permissionMode: cfg.permissionMode, assistantName: cfg.assistantName || '' });
+          send(ws, { type: 'auth_ok', defaultCwd: cfg.defaultCwd, permissionMode: cfg.permissionMode, assistantName: cfg.assistantName || '', userStatus: { text: userStatus.text, at: userStatus.at } });
           // push the currently-published app version + changelog; client decides if it's newer
           send(ws, { type: 'app_update', version: apkVersion(), url: '/app.apk', notes: apkNotes() });
           if (!ws._headless) flushWakes(ws); // missed wake notifications (phone was unreachable when they fired)
@@ -2878,6 +3014,12 @@ async function handle(ws, conn, msg) {
         const safe = msg.refPaths.filter((p) => typeof p === 'string' && p.startsWith(homedir()));
         if (safe.length) { msg.text = (msg.text || '') + '\n\n' + safe.map((f) => '[附带文件：' + f + ']').join('\n'); snapshotMedia(safe); }
       }
+      // 用户自设状态：随每条消息在**尾部**捎给模型（注记行，显示时剥掉——气泡里还是他原话）。
+      // 别放开头：那会改动缓存前缀；也别只发一次：cc 每轮看到的都该是"此刻"的状态和它的新旧。
+      {
+        const note = userStatusNote();
+        if (note && msg.text) msg.text = msg.text + '\n\n' + note;
+      }
       // a real user message answers/pre-empts any wake on this session: stop the follow-up chain,
       // and abort an in-flight wake turn so the two don't resume the same session concurrently.
       if (msg.sessionId) {
@@ -2931,6 +3073,13 @@ async function handle(ws, conn, msg) {
       break;
     }
     case 'push_pref': pushEnabled = msg.enabled !== false; break;
+    // 用户自设状态：text 存进去（空串=清掉），改完广播给所有端同步显示。存的是服务端一份、不分对话。
+    case 'user_status': {
+      userStatus = { text: String(msg.text || '').slice(0, 500), at: Date.now() };
+      saveUserStatus();
+      broadcast({ type: 'user_status', text: userStatus.text, at: userStatus.at });
+      break;
+    }
     case 'cache_ttl_get': send(ws, { type: 'cache_ttl', ttl: cacheTtl }); break;
     case 'cache_ttl_set': { if (msg.ttl === '5m' || msg.ttl === '1h') { cacheTtl = msg.ttl; saveCacheTtl(); } broadcast({ type: 'cache_ttl', ttl: cacheTtl }); break; }
 

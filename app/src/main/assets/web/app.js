@@ -449,6 +449,7 @@ function handle(m) {
       if (state.screen === 'setup') show('list');
       wsend({ type: 'list_sessions' });
       sendPushPref(); sendPresence(); applyNativeNotify();
+      if (m.userStatus) { state.userStatus = m.userStatus; renderUserStatus(); }
       if (P('autoCleanup') && !state._cleaned) { state._cleaned = true; wsend({ type: 'cleanup_stale' }); }  // once per launch
       // re-fetch history/sticky that got dropped because we tapped into the chat before auth landed
       if (state.pendingHistory) { wsend({ type: 'history_window', sessionId: state.pendingHistory, limit: 60 }); state.pendingHistory = null; }
@@ -609,6 +610,7 @@ function handle(m) {
     case 'diary_saved':
       toast('已保存到日记');
       break;
+    case 'user_status': state.userStatus = { text: m.text || '', at: m.at || 0 }; renderUserStatus(); break;   // 自设状态改了（本端或别端），抽屉里那眼跟着更新
     case 'diary_page': case 'diary_index': case 'diary_overview': case 'diary_changed': break; // 旧的逐对话日记协议，已并入总日历
     case 'stickies': onStickies(m); break;
     case 'stickies_all': onStickiesAll(m); break;
@@ -3090,6 +3092,11 @@ function saveDiaryEntry() {
 }
 
 /* ============ left settings/app drawer ============ */
+// 抽屉「我的状态」条目右侧的一瞥：有状态显示原文，没有就空着（不写"未设置"之类的废话）
+function renderUserStatus() {
+  const el = $('drStatusNow'); if (!el) return;
+  el.textContent = (state.userStatus && state.userStatus.text) || '';
+}
 function openDrawer() {
   const db = $('drawerBack'), dr = $('drawer');
   $('drawerStatus').textContent = state.connected ? (state.authed ? '已连接 · ' + (LS.url || '') : '连接中…') : '未连接';
@@ -4061,6 +4068,15 @@ function boot() {
   $('fileUpMgr').addEventListener('change', (e) => { managerUpload(e.target.files); e.target.value = ''; });
   $('drFiles').addEventListener('click', () => { closeDrawer(); openFileManager('browse'); });
   $('drUsage').addEventListener('click', () => { closeDrawer(); openUsageFull(); });
+  // 我的状态：写一句「我此刻在做什么」，存服务端、随每条消息/唤醒捎给 cc。留空提交=清掉。
+  $('drStatus').addEventListener('click', () => {
+    closeDrawer();
+    const cur = (state.userStatus && state.userStatus.text) || '';
+    openPrompt('我的状态', cur, (t) => {
+      wsend({ type: 'user_status', text: t || '' });
+      toast(t ? '状态已更新' : '状态已清除');
+    }, '此刻在做什么…', { allowEmpty: true });
+  });
   $('drDiary').addEventListener('click', () => { closeDrawer(); openCalendar('list'); });
   $('drFavorites').addEventListener('click', () => { closeDrawer(); openFavoritesOverview(); });
   $('favBack').addEventListener('click', () => show('list'));
