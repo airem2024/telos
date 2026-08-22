@@ -151,10 +151,15 @@ const EXPORT_CWD = '/root';
 async function exportToTerminal(srcSid) {
   const srcPath = await _sessionJsonl(srcSid);
   if (!srcPath) return null;
+  const full = await fsp.readFile(srcPath, 'utf8');
+  // 已经是终端出身（首个 entrypoint=cli）→ 拒绝再克隆。否则手机/终端每往返一次就多一个副本
+  // （2026-08-22 真踩过：同一对话攒出三份）。顺手把混入的 sdk 印洗掉，保证它就在 /resume 里。
+  const first = full.match(/"entrypoint":"([^"]+)"/);
+  if (first && first[1] === 'cli') { await detoxEntrypoints(srcSid); return { already: true }; }
   const newSid = randomUUID();
   const out = [];
   let display = '';
-  for (const ln of (await fsp.readFile(srcPath, 'utf8')).split('\n')) {
+  for (const ln of full.split('\n')) {
     if (!ln.trim()) continue;
     const swapped = ln.replaceAll(srcSid, newSid);        // sessionId 全文替换（ai-title 等行也带它）
     let o; try { o = JSON.parse(swapped); } catch (e) { out.push(swapped); continue; }   // 非 JSON 行原样
@@ -176,9 +181,39 @@ async function exportToTerminal(srcSid) {
   // SDK 会话从不写 history.jsonl，补一行终端才认；单次原子 append，别读改写全文件
   await fsp.appendFile(nodePath.join(homedir(), '.claude', 'history.jsonl'),
     JSON.stringify({ display: display || '（转自 App）', pastedContents: {}, timestamp: Date.now(), project: EXPORT_CWD, sessionId: newSid }) + '\n');
-  hidden.add(newSid); saveHidden();       // 克隆是给终端用的，别在 App 列表里冒出个双胞胎
-  exported.add(newSid); saveExported();   // 且免于 autoCleanup——终端会话不归 App 清理管
+  // 移交语义（2026-08-22 改，v1.1.106 最初是反的）：藏「过时的原版」而不是克隆——克隆配合
+  // detoxEntrypoints 是手机/终端都能接着聊的那一份，必须留在列表里；原版数据不删、只是不再碍眼。
+  hidden.add(srcSid); saveHidden();
+  exported.add(newSid); saveExported();   // 克隆免于 autoCleanup——终端会话不归 App 清理管
+  // 附属跟着走：模型偏好（不带会落回默认 200K 模型、大会话直接超窗）、文件夹、置顶。
+  // 唤醒不搬：原版的排程就地停掉，免得它藏在列表外还对着旧分支开火。
+  if (sessModel[srcSid]) { sessModel[newSid] = { ...sessModel[srcSid] }; saveSessModel(); }
+  if (folders.assign[srcSid]) { folders.assign[newSid] = folders.assign[srcSid]; saveFolders(); }
+  if (pinned.has(srcSid)) { pinned.add(newSid); savePins(); }
+  const srcWake = wakeups[srcSid];
+  if (srcWake && (srcWake.enabled || srcWake.dawn)) { srcWake.enabled = false; srcWake.dawn = false; saveWakeups(); }
   return newSid;
+}
+// Telos 续写终端会话时，SDK 给新行盖 entrypoint:"sdk-ts" 印——/resume 选择器据此把整条会话过滤掉，
+// 对话就从终端「消失」，逼着用户一遍遍「转到终端」攒副本。修法：每轮结束后，终端出身的会话
+// （首个 entrypoint=cli）把混入的 sdk 印洗回 cli——同一条会话手机/终端轮流聊，永远留在 /resume。
+// Telos 原生会话（首印 sdk-ts）分毫不动，照旧不进 /resume。只动 JSON 键的裸串（正文里同样字样
+// 必带转义引号、匹配不上），原子写（tmp+rename）。
+async function detoxEntrypoints(sid) {
+  try {
+    const p = await _sessionJsonl(sid); if (!p) return;
+    let head = '';
+    const fh = await fsp.open(p, 'r');
+    try { const buf = Buffer.alloc(262144); const { bytesRead } = await fh.read(buf, 0, buf.length, 0); head = buf.toString('utf8', 0, bytesRead); }
+    finally { await fh.close(); }
+    const first = head.match(/"entrypoint":"([^"]+)"/);
+    if (!first || first[1] !== 'cli') return;         // 头部窗口找不到印/非终端出身 → 不碰
+    const full = await fsp.readFile(p, 'utf8');
+    if (!/"entrypoint":"sdk-[a-z]+"/.test(full)) return;
+    await fsp.writeFile(p + '.detox', full.replace(/"entrypoint":"sdk-[a-z]+"/g, '"entrypoint":"cli"'));
+    await fsp.rename(p + '.detox', p);
+    log('detox', sid, '洗回 cli entrypoint（保持 /resume 可见）');
+  } catch (e) { log('detox failed', String(e?.message || e)); }
 }
 async function copyTreeReplace(src, dst, from, to) {
   await fsp.mkdir(dst, { recursive: true });
@@ -468,6 +503,12 @@ function parseMood(text) {
   return { label, note, wind, base };
 }
 // 把心情标记从文本里剥掉（无标记时是 no-op，所以情绪关掉的对话完全不受影响）
+// 板子表情标记（只认回复最开头的那一个；见 stream_event 里的 faceDone 那段）
+const FACE_RE = /^\s*\[face:[a-z_]{2,16}\]\s*/i;
+// 流式判定用：还可能长成 face 标记的前缀（`[`、`[fa`、`[face:ha`…）
+const FACE_PREFIX_RE = /^\s*(\[(f(a(c(e(:[a-z_]*)?)?)?)?)?)?$/i;
+const stripFace = (t) => String(t || '').replace(FACE_RE, '');
+
 function stripMood(text) {
   if (!text || text.indexOf('[mood]') < 0) return text;
   return text.replace(MOOD_RE(), '').replace(/[ \t]*⁣[ \t]*$/gm, '').replace(/\n{3,}/g, '\n\n').replace(/[ \t\n⁣]+$/, '');
@@ -1354,7 +1395,7 @@ const WAKE_REPLAY_MS = 24 * 3600 * 1000;
 function queueWake(m) {
   // a socket counts as live only if it answered the last heartbeat — an OPEN half-open zombie
   // would otherwise swallow the wake and mark it delivered
-  let live = 0; for (const c of clients) if (c.readyState === c.OPEN && c.isAlive !== false) live++;
+  let live = 0; for (const c of clients) if (c.readyState === c.OPEN && c.isAlive !== false && !c._headless) live++;
   pendingWakes.push({ ...m, ts: Date.now(), delivered: live > 0 });
   while (pendingWakes.length > 50) pendingWakes.shift();
 }
@@ -1897,6 +1938,19 @@ function stripMoodPreamble(t) {
   return nl < 0 ? '' : t.slice(nl + 1);
 }
 
+// 语音终端(板子)发来的消息带一行给模型看的标识,形如
+//   系统·板子｜2026-08-16 03:09 星期日 Asia/Shanghai（非用户发言）
+//   你好。
+// 首行是**给模型的元信息**(告诉她这不是用户打字、附带此刻时间和板子事件),
+// 用户在 App 里不该看见它 —— 用户原话:「把 telos 里面看到的那些非用户发言剥掉」。
+// 只剥首行、保留正文;若剥完什么都不剩(纯板子事件,如「用户叫了你一声」),
+// 那本就不是用户说的话,返回空字符串让 pushText 整条丢掉。
+const BOARD_HEAD_RE = /^系统·板子｜[^\n]*?（非用户发言[^）]*）(?:\n|$)/;
+function stripBoardPreamble(t) {
+  if (!t || t.indexOf('系统·板子｜') !== 0) return t;   // 不是板子消息 → 原样
+  return t.replace(BOARD_HEAD_RE, '');
+}
+
 /** Turn a stored SessionMessage[] into chat items the app can render. */
 function historyItems(messages, moodOn) {
   const items = [];
@@ -1908,7 +1962,9 @@ function historyItems(messages, moodOn) {
   // audio paths as a player (media item). Mirrors the live assistant_text flow so chat media persists.
   const pushText = (role, text, uuid) => {
     if (role === 'user') text = stripMoodPreamble(text);          // 把合并进来的隐藏心情前缀剥掉，保留她真正说的话（修"重进吞回复"）
+    if (role === 'user') text = stripBoardPreamble(text);         // 板子消息的「系统·板子｜…（非用户发言）」标识行只给模型看，App 里剥掉
     if (moodOn && role === 'assistant') text = stripMood(text);   // 仅开了情绪的对话才剥心情标记，其它对话原样不动
+    if (role === 'assistant') text = stripFace(text);             // 表情标记是给板子的控制字，历史里一律不显示
     if (!text || !text.trim() || HIDE_TEXT(text)) return;
     if (role === 'assistant') {
       // assistant bubble is markdown-rendered → inline images via rewriteMedia, audio as a player
@@ -2274,11 +2330,13 @@ wss.on('connection', (ws) => {
       if (msg.type === 'auth') {
         if (msg.token === cfg.token) {
           conn.authed = true;
+          // headless 客户端（如语音终端网关）：不参与唤醒补发，也不算「活着的手机」（queueWake 的 live 计数）
+          ws._headless = msg.client === 'gateway';
           clients.add(ws);
           send(ws, { type: 'auth_ok', defaultCwd: cfg.defaultCwd, permissionMode: cfg.permissionMode, assistantName: cfg.assistantName || '' });
           // push the currently-published app version + changelog; client decides if it's newer
           send(ws, { type: 'app_update', version: apkVersion(), url: '/app.apk', notes: apkNotes() });
-          flushWakes(ws); // missed wake notifications (phone was unreachable when they fired)
+          if (!ws._headless) flushWakes(ws); // missed wake notifications (phone was unreachable when they fired)
           // 客户端 auth 时会把「输入中…」清零（断线可能错过 off）——还在跑的唤醒 turn 这里补发 on
           for (const sid of wakeTurnBySession.keys()) send(ws, { type: 'wake_typing', sessionId: sid, on: true });
         }
@@ -2448,8 +2506,10 @@ async function handle(ws, conn, msg) {
 
     case 'export_terminal': {
       try {
-        const newSid = await exportToTerminal(msg.sessionId);
-        send(ws, newSid ? { type: 'exported', sessionId: newSid } : { type: 'exported', error: '找不到源对话文件' });
+        const r = await exportToTerminal(msg.sessionId);
+        if (r && r.already) send(ws, { type: 'exported', error: '这条本来就在终端，/resume 里就有，不用转' });
+        else if (r) { send(ws, { type: 'exported', sessionId: r }); send(ws, { type: 'deleted' }); }  // deleted=让老客户端也刷新列表（原版已藏）
+        else send(ws, { type: 'exported', error: '找不到源对话文件' });
       } catch (e) { send(ws, { type: 'exported', error: String((e && e.message) || e) }); }
       break;
     }
@@ -2829,6 +2889,7 @@ async function handle(ws, conn, msg) {
         rememberModel(msg.sessionId, msg.model, msg.effort); // wake will resume with this model (esp. [1m])
       }
       const turn = newTurn(msg.turnId, ws); conn.turn = turn;
+      msg._resident = ws._headless === true;  // 只有语音终端网关走常驻进程(见 getResident)
       await runTurn(turn, msg);
       break;
     }
@@ -3384,6 +3445,73 @@ function buildPrompt(msg) {
   })();
 }
 
+// ---- 语音终端常驻进程（0814）------------------------------------------------
+// 板子每轮对话都新 spawn 一个 claude 进程，光冷启动就吃 2~4 秒（裸跑 `claude -p "说一个字"` 实测
+// 7.1s），这是「用户说完话到听见回答 8 秒」里最大的一块。SDK 的 streaming input（prompt 传
+// AsyncIterable）让进程常驻、多轮往里喂消息 → 第二轮起零冷启动。
+//
+// ⚠️ 这正是 buildPrompt 上方警告过的「异步生成器 + resume」组合（8447 从 06-16 起烧 $700+ 的根因），
+// 所以上线前先做了对照实验（同一个 33K 历史的真会话，连跑三轮）：
+//     第1轮 cache_read=0      cache_write=33174   首字 3803ms   ← 冷启动 + 建缓存
+//     第2轮 cache_read=33174  cache_write=9       首字 1821ms
+//     第3轮 cache_read=33183  cache_write=139     首字 1734ms
+// 第2/3轮的 cache_write 只有个位数到百来 token = 纯增量，没有重写整段历史 —— 与那次烧钱的病症不同。
+// 差别在于：那次是**每轮新建** query + streaming input + resume；这里只在起进程时 resume 一次，
+// 之后就是同一个进程里的连续对话（和 TUI 一样）。**改这段前先重跑那个实验**，别信推断。
+// 出事就把 config.json 的 residentVoice 设成 false，立刻回到每轮新建。
+const residents = new Map();   // sessionId → {q, push, key, dead}
+
+function makeResident(sessionId, options) {
+  const queue = [], waiters = [];
+  const input = {
+    async *[Symbol.asyncIterator]() {
+      for (;;) {
+        while (queue.length) yield queue.shift();
+        await new Promise((r) => waiters.push(r));   // 队列空就挂起，进程随之常驻等着
+      }
+    },
+  };
+  const opts = { ...options };
+  delete opts.abortController;   // 常驻进程不能被单轮的 abort 掐死
+  const q = query({ prompt: input, options: opts });
+  return {
+    q, key: sessionId, dead: false,
+    push(text) {
+      queue.push({ type: 'user', message: { role: 'user', content: String(text) }, parent_tool_use_id: null, session_id: sessionId });
+      waiters.splice(0).forEach((r) => r());
+    },
+  };
+}
+
+function getResident(sessionId, options) {
+  let res = residents.get(sessionId);
+  if (res && !res.dead) { res.usedAt = Date.now(); return res; }
+  res = makeResident(sessionId, options);
+  res.usedAt = Date.now();
+  residents.set(sessionId, res);
+  console.error('[resident] 语音终端常驻进程已起', sessionId);
+  return res;
+}
+
+// 闲置回收:一个常驻 claude 进程占几百 MB，板子不说话时没理由一直挂着。
+// 30 分钟没用就关掉，下次说话重新起（只有那一轮付冷启动的钱）。
+const RESIDENT_IDLE_MS = 30 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [sid, r] of residents) {
+    if (!r.busy && now - (r.usedAt || 0) > RESIDENT_IDLE_MS) killResident(sid, '闲置超时');
+  }
+}, 5 * 60 * 1000).unref?.();
+
+function killResident(sessionId, why) {
+  const res = residents.get(sessionId);
+  if (!res) return;
+  res.dead = true;
+  residents.delete(sessionId);
+  try { res.q.return?.(); } catch (e) {}
+  console.error('[resident] 常驻进程已关', sessionId, why || '');
+}
+
 async function runTurn(turn, msg) {
   const abort = turn.abort;
   let curSession = msg.sessionId || null;
@@ -3414,6 +3542,7 @@ async function runTurn(turn, msg) {
     }
   }
   if (curSession) activeSessions.add(curSession); // block wakes from clobbering an active turn
+  if (curSession) await detoxEntrypoints(curSession);  // 开轮前补洗上轮漏网的 sdk 印（尾行竞态/重启丢定时的兜底）
 
   // 'bypass' = 全部允许. Don't use the SDK's 'bypassPermissions' (= --dangerously-skip-permissions,
   // which cc REFUSES to run as root). Instead keep 'default' and auto-allow every tool via canUseTool.
@@ -3447,8 +3576,13 @@ async function runTurn(turn, msg) {
     options.resume = curSession;
   }
   if (cfg.claudePath) options.pathToClaudeCodeExecutable = cfg.claudePath;
+  // 不带 model/effort 的客户端(语音终端网关)回落到本对话记住的 pref——与 fireWake 同语义。
+  // 否则落到 CLI 默认模型:换模型击穿前缀缓存;resume 一个 >200K 的 [1m] 对话直接超窗报错。
+  const _pref = (msg.sessionId && sessModel[msg.sessionId]) || {};
   if (msg.model) options.model = msg.model;
+  else if (_pref.model) options.model = _pref.model;
   if (msg.effort) options.effort = msg.effort;
+  else if (_pref.effort) options.effort = _pref.effort;
   const off = disallowedFromOff();
   const dis = [...off, ...(Array.isArray(cfg.disallow) ? cfg.disallow : [])];
   if (dis.length) options.disallowedTools = dis;
@@ -3497,6 +3631,17 @@ async function runTurn(turn, msg) {
 
   // Emit turn_end + per-turn accounting for a final SDK `result` message.
   const finalizeResult = (m) => {
+    // 常驻进程(语音终端)里 result.total_cost_usd 是**这个进程的累计花费**、不是本轮的
+    // （实测连跑三轮:0.3318 → 0.3486 → 0.3666 递增）。照常累加会让费用统计翻几倍，
+    // 所以先换算回本轮增量。usage 各项经实测是单轮值（第2轮 in=2、cache_read=33174），不用动。
+    if (msg._resident && curSession) {
+      const _r = residents.get(curSession);
+      if (_r) {
+        const _total = m.total_cost_usd || 0;
+        m = { ...m, total_cost_usd: Math.max(0, _total - (_r.lastCost || 0)) };
+        _r.lastCost = _total;
+      }
+    }
     // a 1M turn that the plan can't afford comes back as an error result, not a throw
     if (m.is_error && /usage credits required for 1m/i.test(String(m.result || ''))) block1m(msg.model);
     // forked successfully -> hide the original (the fork depends on its data,
@@ -3619,12 +3764,39 @@ async function runTurn(turn, msg) {
       let replyText = '';    // accumulated reply text of this attempt (for wake → push / follow-up)
       let deltaText = '';    // raw streamed text deltas — salvage source when the closing assistant message gets swallowed by a parse failure
       let moodCut = false;   // once the hidden 心情标记 starts streaming, swallow the tail so it never flashes
+      // 板子表情标记：模型在回复**开头**写 `[face:xxx]` 给终端切脸（见 terminal/core/turn.js:_takeFace）。
+      // 那是给硬件看的控制字、不是说话内容，聊天里不该出现。流式下它会被切碎，所以开头先攒着不发，
+      // 攒到能判定为止：是标记就整段吞掉；不是就把攒的一次性补发，之后恢复逐片发。
+      // 与 mood 不同，这个**不看 moodOn 闸门**——板子的脸和情绪系统开没开是两回事。
+      let faceDone = false;
       let parseFail = false; // did we see the "tool call could not be parsed" signal?
       let refusal = null;    // 安全系统整条拦下（stop_details.type='refusal'）——重试只会再撞一次墙
       let sawToolUse = false; // 这轮是否真跑完过工具来回（tool_result 回来过）——合法「纯工具轮」不是被吞
       let resultMsg = null;
-      const q = query({ prompt: qPrompt, options: qOptions });
-      for await (const m of q) {
+      // 常驻只在:语音终端 + 首次尝试 + 已有会话 + 没被 config 关掉。重试(attempt≥2)一律走普通
+      // 新建 query——重试本身就是为了绕开出问题的那次，不该复用可能已经坏掉的进程。
+      // qPrompt 必须是字符串:有图片时 buildPrompt 返回的是别的形态,塞进队列会变 "[object Object]"
+      // （板子不发图，这里只是别让将来接图时静默出错）。
+      // 已在跑的常驻进程不能再塞第二轮进去(两轮的消息会混在同一条流上、result 被先到的循环拿走)。
+      // 板子那边编排器保证串行，这里只是防 wake/并发意外——撞上就老老实实新建一个 query。
+      const _busy = !!residents.get(curSession)?.busy;
+      const useResident = msg._resident && attempt === 1 && curSession && !_busy
+        && typeof qPrompt === 'string' && cfg.residentVoice !== false;
+      const res = useResident ? getResident(curSession, qOptions) : null;
+      const q = res ? res.q : query({ prompt: qPrompt, options: qOptions });
+      if (res) { res.busy = true; res.push(qPrompt); }
+      try {
+      // 手动 next():for-await 的 break 会调 iterator.return() 把进程关掉，那正是常驻要避免的。
+      for (;;) {
+        let _step;
+        try {
+          _step = await q.next();
+        } catch (e) {
+          if (res) killResident(curSession, '读取出错: ' + e.message);
+          throw e;
+        }
+        if (_step.done) { if (res) killResident(curSession, '进程结束'); break; }
+        const m = _step.value;
         switch (m.type) {
           case 'system':
             if (m.subtype === 'init') {
@@ -3649,6 +3821,19 @@ async function runTurn(turn, msg) {
               const piece = ev.delta.text, prevLen = deltaText.length;
               deltaText += piece;
               if (moodCut) break;                          // 已进入心情标记区，吞掉尾巴
+              if (!faceDone) {
+                const fm = FACE_RE.exec(deltaText);
+                if (fm) {                                  // 确认是表情标记：吞掉它，把它后面的部分发出去
+                  faceDone = true;
+                  const rest = deltaText.slice(fm[0].length);
+                  if (rest) out(turn, { type: 'assistant_delta', sessionId: curSession, text: rest });
+                  break;
+                }
+                if (deltaText.length < 24 && FACE_PREFIX_RE.test(deltaText)) break;  // 还可能是没收全的标记，继续攒
+                faceDone = true;                           // 判定不是标记：把攒着的一次性补发，此后不再拦
+                out(turn, { type: 'assistant_delta', sessionId: curSession, text: deltaText });
+                break;
+              }
               const moodOn = !!(moodState[curSession] && moodState[curSession].on);
               const idx = moodOn ? deltaText.indexOf('[mood]') : -1;   // 仅开了情绪的对话才拦标记
               if (idx < 0) { out(turn, { type: 'assistant_delta', sessionId: curSession, text: piece }); break; }
@@ -3676,7 +3861,7 @@ async function runTurn(turn, msg) {
                 if (/could not be parsed|tool call was malformed/i.test(block.text)) { parseFail = true; continue; }
                 recordMood(curSession, block.text);     // 抽出并存心情标记（recordMood 内部已按 moodOn 闸门）
                 const moodOn = !!(moodState[curSession] && moodState[curSession].on);
-                const clean = moodOn ? stripMood(block.text) : block.text;   // 仅开了情绪的对话才剥标记，其它原样不动
+                const clean = stripFace(moodOn ? stripMood(block.text) : block.text);   // 仅开了情绪的对话才剥心情标记；表情标记一律剥
                 if (clean.trim()) gotText = true;
                 replyText += clean;
                 if (clean.trim()) { snapshotMedia(clean); out(turn, { type: 'assistant_text', sessionId: curSession, text: rewriteMedia(clean) }); }
@@ -3724,6 +3909,10 @@ async function runTurn(turn, msg) {
             break;
         }
         if (resultMsg) break; // result is terminal; stop consuming so we can decide on retry
+      }
+      } finally {
+        // 无论正常收尾还是抛错，都得把常驻进程交还出去，否则它永远 busy、后面每轮都回落新建
+        if (res) { res.busy = false; res.usedAt = Date.now(); }
       }
 
       // was the reply eaten (no text out) by a parse failure? if so, silently retry.
@@ -3775,6 +3964,10 @@ async function runTurn(turn, msg) {
   } finally {
     finishTurn(turn);
     if (curSession) {
+      // 终端出身的会话洗掉本轮盖的 sdk 印，别让它从 /resume 消失。SDK 的尾行在 result 之后
+      // 还会落盘（实测洗早了漏 1-2 行）→ 延迟几秒、不 await；期间若新轮已开就让那轮收尾。
+      const _sidDetox = curSession;
+      setTimeout(() => { if (!activeSessions.has(_sidDetox)) detoxEntrypoints(_sidDetox).catch(() => {}); }, 4000);
       activeSessions.delete(curSession);
       // "now" 唤醒：这一拍刚结束、activeSessions 已释放——若本会话有到期(含 now)的排程，
       // 立刻补一次扫描，别让它干等下一个 30s tick。模型不再设 now，链自然停。
