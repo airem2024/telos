@@ -19,7 +19,7 @@ const PREF_DEFAULTS = {
   fontSize: 1, fontFamily: 'client', showModel: true, showTokens: true,
   interruptOnLeave: false, autoScroll: true, pasteAsFile: true, pasteThreshold: 800, timezone: '',
   haptics: true, genHaptic: false, updateNotify: true, showStatusBar: true, discFx: true, discBlink: false,
-  autoCleanup: true, wakePush: true, compactPrompt: '',
+  autoCleanup: true, wakePush: true, compactPrompt: '', viewMode: 'strip',
   theme: 'gray', accent: 'slate', foldersCollapsed: false, autoOpenLast: false
 };
 function loadPrefs() {
@@ -106,8 +106,8 @@ function overlayUp() {
 // close path (animated, swiped, future additions) converges without per-call-site bookkeeping.
 function syncAtRoot() { try { window.Android && Android.setAtRoot((state.screen === 'list' || state.screen === 'setup') && !overlayUp()); } catch (e) {} }
 setInterval(syncAtRoot, 300);
-const SCRIMS = ['permScrim', 'modelScrim', 'promptScrim', 'toolsScrim', 'modeScrim', 'sessScrim', 'folderScrim', 'claudeScrim', 'folderActScrim', 'pathActScrim', 'mcpScrim', 'mcpCfgScrim', 'memScrim', 'connScrim', 'wakeScrim', 'stickyScrim', 'compactScrim', 'confirmScrim', 'msgActScrim'];
-const DRAG_SCRIMS = ['modelScrim', 'toolsScrim', 'modeScrim', 'claudeScrim', 'mcpCfgScrim', 'compactScrim'];
+const SCRIMS = ['permScrim', 'modelScrim', 'promptScrim', 'toolsScrim', 'modeScrim', 'sessScrim', 'folderScrim', 'claudeScrim', 'folderActScrim', 'pathActScrim', 'mcpScrim', 'mcpCfgScrim', 'memScrim', 'connScrim', 'wakeScrim', 'stickyScrim', 'compactScrim', 'confirmScrim', 'msgActScrim', 'tplScrim'];
+const DRAG_SCRIMS = ['modelScrim', 'toolsScrim', 'modeScrim', 'claudeScrim', 'mcpCfgScrim', 'compactScrim', 'tplScrim'];
 function anyOverlay() { return SCRIMS.some((s) => $(s).classList.contains('show')) || $('menuPop').classList.contains('show'); }
 function openScrim(id) {
   const s = $(id); s._openedAt = Date.now(); s.classList.add('show'); if (s._open) s._open();
@@ -513,6 +513,9 @@ function handle(m) {
       renderSessions(); break;
     case 'assigned': wsend({ type: 'list_sessions' }); break;
     case 'history': if (m.prefetch) onPrefetchHistory(m); else renderHistory(m); if (viewBusy()) startStatus(); break;
+    case 'template': onTemplate(m); break;
+    case 'template_error': toast(m.message || '模板没存上'); break;
+    case 'template_preview': renderTplPreview(m); break;
     case 'history_window': onHistoryWindow(m); if (!m.prefetch && viewBusy()) startStatus(); break; // 历史渲染的 clearThread 会捎带灭掉转圈——还在跑就重新点上
     case 'history_full': onHistoryFull(m); if (viewBusy()) startStatus(); break;
     case 'paths_done': {
@@ -558,6 +561,8 @@ function handle(m) {
     }
     case 'assistant_delta': if (trVis) appendDelta(m.text); break;
     case 'assistant_text': if (trVis) finalizeText(m.text); break;
+    case 'injected': if (tr) tr.inj = { pre: m.pre || '', post: m.post || '' }; if (trVis && tr && tr.userMsgEl) attachInj(tr.userMsgEl, m.pre, m.post); break;   // 透视：这条消息实际带了什么
+    case 'mood_line': if (trVis) attachMoodLine(m.text); break;                                                                                     // 透视：回复里被剥掉的 [mood] 行
     case 'thinking': if (trVis) addThinking(m.text); break;
     case 'tool_use': if (trVis) addTool(m); break;
     case 'tool_result': if (trVis) updateTool(m); break;
@@ -895,9 +900,66 @@ function regenerate() {
 }
 function ensureLive() { if (state.live) return state.live; const m = el('div', 'msg assistant'); const t = el('div', 'text cursor'); m.appendChild(t); $('thread').appendChild(m); state.live = t; return t; }
 function appendDelta(text) { const t = ensureLive(); t.textContent += text; scrollThreadAuto(); }
-function finalizeText(full) { const t = ensureLive(); t.classList.remove('cursor', 'text'); t.classList.add('md'); t.innerHTML = md(full); state.live = null; scrollThreadAuto(); }
+function finalizeText(full) { const t = ensureLive(); t.classList.remove('cursor', 'text'); t.classList.add('md'); t.innerHTML = md(full); state.lastAsst = t.parentElement; state.live = null; scrollThreadAuto(); }
 function finalizeLive() { if (state.live) { state.live.classList.remove('cursor'); state.live = null; } }
-function addAssistantText(full) { const m = el('div', 'msg assistant'); const t = el('div', 'md'); t.innerHTML = md(full); m.appendChild(t); rt().appendChild(m); }
+function addAssistantText(full) { const m = el('div', 'msg assistant'); const t = el('div', 'md'); t.innerHTML = md(full); m.appendChild(t); rt().appendChild(m); state.lastAsst = m; }
+// ---- 注入显示（设置→对话→注入显示：剥离/透视/全显）----
+// 透视：她的气泡下面挂一块灰字，列出这条消息实际带给模型的隐藏块（上）和注记（下）；回复下面挂被剥掉的 [mood] 行；
+// 整条都是系统注入的消息（唤醒提示、压缩恢复块、静默回复…）当灰字块显示。全显：直接把原文塞进气泡。
+function injBlock(title, text) {
+  const d = el('div', 'inj collapsed');
+  const h = el('div', 'inj-h'); h.textContent = title; d.appendChild(h);
+  const b = el('div', 'inj-b'); b.textContent = text; d.appendChild(b);
+  d.addEventListener('click', () => d.classList.toggle('collapsed'));
+  return d;
+}
+function attachInj(userMsgEl, pre, post) {
+  if (!userMsgEl || (!pre && !post)) return;
+  if (P('viewMode') === 'strip') return;
+  const old = userMsgEl.querySelector(':scope > .inj'); if (old) old.remove();
+  const parts = []; if (pre) parts.push('▲ 上面\n' + pre); if (post) parts.push('▼ 下面\n' + post);
+  userMsgEl.appendChild(injBlock('注入', parts.join('\n\n')));
+}
+function attachMoodLine(text) {
+  if (!text || P('viewMode') === 'strip') return;
+  const host = state.lastAsst || (state.live && state.live.parentElement); if (!host) return;
+  const old = host.querySelector(':scope > .inj'); if (old) old.remove();
+  host.appendChild(injBlock('剥掉的', text));
+}
+function addHidden(text, from) {
+  const d = injBlock(from === 'assistant' ? '她的（隐藏）' : '系统', text || '');
+  d.classList.add('inj-msg'); rt().appendChild(d);
+}
+function rerenderThread() {
+  if (state.screen !== 'chat' || !state.hist || !state.hist.items) return;
+  const t = $('thread'); const atBot = t.scrollTop + t.clientHeight >= t.scrollHeight - 60;
+  clearThread(); appendWindow(state.hist.items); if (atBot) scrollThread(true);
+}
+// ---- 消息模板编辑页（设置→对话→编辑消息模板）----
+function openMsgTemplate() { state.tplOpen = true; $('tplText').value = ''; $('tplPreview').textContent = '…'; wsend({ type: 'template_get' }); openScrim('tplScrim'); }
+function onTemplate(m) {
+  state.tplDef = m.def || ''; state.tplVars = m.vars || [];
+  if (m.saved) { toast('消息模板已保存'); if (state.tplOpen && !$('tplScrim').classList.contains('show')) return; }
+  if (!$('tplScrim').classList.contains('show')) return;
+  if (!m.saved || $('tplText').value.trim() === '') $('tplText').value = m.text || '';
+  const box = $('tplVars'); box.innerHTML = '';
+  (m.vars || []).forEach(([k, desc]) => {
+    const c = el('button', 'tplchip'); c.textContent = '{{' + k + '}}'; c.title = desc;
+    const sub = el('span', 'tplchip-d'); sub.textContent = desc; c.appendChild(sub);
+    c.addEventListener('click', () => { const ta = $('tplText'); const a = ta.selectionStart != null ? ta.selectionStart : ta.value.length, b = ta.selectionEnd != null ? ta.selectionEnd : a; ta.value = ta.value.slice(0, a) + '{{' + k + '}}' + ta.value.slice(b); ta.selectionStart = ta.selectionEnd = a + k.length + 4; ta.focus(); buzz(8); tplPreviewSoon(); });
+    box.appendChild(c);
+  });
+  tplPreviewSoon();
+}
+function tplPreviewSoon() { clearTimeout(state._tplT); state._tplT = setTimeout(() => wsend({ type: 'template_preview', text: $('tplText').value, sessionId: state.currentSession || LS.lastSid || '' }), 350); }
+function renderTplPreview(m) {
+  const box = $('tplPreview'); box.innerHTML = '';
+  const seg = (cls, label, text) => { const d = el('div', 'tplp ' + cls); const h = el('div', 'tplp-h'); h.textContent = label; d.appendChild(h); const b = el('div', 'tplp-b'); b.textContent = text; d.appendChild(b); box.appendChild(d); };
+  if (m.pre) seg('pre', '上面（隐藏块）', m.pre);
+  seg('msg', '你的话', '你好啊');
+  if (m.post) seg('post', '下面（注记）', m.post);
+  if (!m.pre && !m.post) seg('none', '', '（什么都不带，只有你的话）');
+}
 function addThinking(text) { finalizeLive(); const d = el('div', 'thinking collapsed'); const inner = el('div', 'md'); inner.innerHTML = md(text); d.appendChild(inner); d.addEventListener('click', () => d.classList.toggle('collapsed')); rt().appendChild(d); scrollThreadAuto(); }
 
 /* ---- animated "thinking" status line, Claude Code style ---- */
@@ -1262,7 +1324,18 @@ function renderItems(items) {
   let group = null, userB = null; // userB: 最近的用户气泡——它的附图回填成气泡内缩略图，而不是 cc 侧大图
   (items || []).forEach((it) => {
     if (it.kind === 'compact') { group = null; userB = null; const d = el('div', 'hist-compact'); d.innerHTML = '<span>压缩</span>'; rt().appendChild(d); return; }
-    if (it.kind === 'text') { group = null; if (it.role === 'user') userB = addUser(it.text, it.uuid); else { userB = null; addAssistantText(it.text); } }
+    if (it.kind === 'text') {
+      group = null;
+      const vm = P('viewMode');
+      if (it.role === 'user') {
+        userB = addUser(vm === 'full' && it.raw ? it.raw : it.text, it.uuid);
+        if (vm === 'xray' && it.inj) attachInj(userB.parentElement, it.inj.pre, it.inj.post);
+      } else {
+        userB = null; addAssistantText(vm === 'full' && it.raw ? it.raw : it.text);
+        if (vm === 'xray' && it.moodLine) attachMoodLine(it.moodLine);
+      }
+    }
+    else if (it.kind === 'hidden') { group = null; userB = null; if (P('viewMode') !== 'strip') addHidden(it.text, it.from); }
     else if (it.kind === 'media') {
       group = null;
       if (it.role === 'user' && it.mediaKind === 'image') {
@@ -3237,7 +3310,9 @@ const SET_CATS = {
     { type: 'toggle', key: 'wakePush', name: '后台唤醒通知', onChange: onWakePushToggle },
     { type: 'segment', server: 'cacheTtl', name: '上下文缓存时长', opts: [['1h', '1 小时'], ['5m', '5 分钟']], send: (v) => ({ type: 'cache_ttl_set', ttl: v }) },
     { type: 'tzoff', key: 'timezone', name: 'cc 读到的时区', onChange: sendPresence },
-    { type: 'button', name: '编辑压缩提示词', action: openCompactPrompt }
+    { type: 'button', name: '编辑压缩提示词', action: openCompactPrompt },
+    { type: 'segment', key: 'viewMode', name: '注入显示', opts: [['strip', '剥离'], ['xray', '透视'], ['full', '全显']], onChange: rerenderThread },
+    { type: 'button', name: '编辑消息模板', action: openMsgTemplate }
   ] },
   haptics: { name: '触感', items: [
     { type: 'toggle', key: 'haptics', name: '触感反馈（总开关）' },
@@ -4074,6 +4149,9 @@ function boot() {
   $('claudeSave').addEventListener('click', saveClaudeMd);
   $('claudePrev').addEventListener('click', () => setClaudePreview($('claudeView').style.display === 'none'));
   $('compactSave').addEventListener('click', () => { setPref('compactPrompt', $('compactText').value); closeScrim('compactScrim'); toast('压缩提示词已保存'); });
+  $('tplSave').addEventListener('click', () => { const t = $('tplText').value; if (!t.includes('{{message}}')) { toast('模板里必须有 {{message}}'); return; } wsend({ type: 'template_set', text: t }); closeScrim('tplScrim'); });
+  $('tplReset').addEventListener('click', () => { $('tplText').value = state.tplDef || ''; tplPreviewSoon(); buzz(12); });
+  $('tplText').addEventListener('input', tplPreviewSoon);
   $('mModel').addEventListener('click', () => { state.modelCtx = null; state.modelFam = ''; openModelSheet(); });
   $('mMood').addEventListener('click', toggleMood);
   $('mWake').addEventListener('click', () => { closeMenu(); if (state.currentSession) openWakeConfig(curSess()); });
