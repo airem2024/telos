@@ -309,17 +309,21 @@
     </div>
   </div>
 
-  <!-- 消息模板（设置→对话→编辑消息模板）：发给模型的每条消息按它拼；变量点一下插到光标处；预览拿当前对话此刻的真实值 -->
-  <div class="scrim" id="tplScrim">
-    <div class="sheet drag">
-      <div class="sheethdr"><div class="grip"></div><div class="ptitle">消息模板</div><div class="psub">{{message}} 上面的是隐藏块，下面的是注记；一行里的变量全空就整行不发</div><button class="sheet-tog" id="tplReset">恢复默认</button><button class="sheet-save" id="tplSave">保存</button></div>
-      <div class="sheetbody">
-        <textarea id="tplText" class="edita mono tpl" spellcheck="false" autocapitalize="off"></textarea>
-        <div class="tplsec">可用变量</div>
-        <div id="tplVars" class="tplvars"></div>
-        <div class="tplsec">预览</div>
-        <div id="tplPreview" class="tplpreview"></div>
-      </div>
+  <!-- settings › 对话 › 消息模板（整页）：发给模型的每条消息按它拼；变量点一下插到光标处；预览拿当前对话此刻的真实值 -->
+  <div id="tplPage" class="screen">
+    <div class="topbar">
+      <button class="iconbtn" id="tplBack">‹</button>
+      <div class="h2" style="font-family:var(--serif);font-size:22px;font-weight:700;">消息模板</div>
+      <div class="spacer"></div>
+      <button class="dwsave" id="tplSave">保存</button>
+    </div>
+    <div class="pad tplpad">
+      <textarea id="tplText" class="tpltext" spellcheck="false" autocapitalize="off"></textarea>
+      <div class="tplsec">变量</div>
+      <div id="tplVars" class="tplvars"></div>
+      <div class="tplsec">预览</div>
+      <div id="tplPreview" class="tplpreview"></div>
+      <button class="btn btn-ghost" id="tplReset" style="margin-top:22px;">恢复默认</button>
     </div>
   </div>
 

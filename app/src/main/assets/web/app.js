@@ -80,7 +80,7 @@ const EFFORTS = [
 ];
 
 /* ============ navigation ============ */
-const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'stickies', 'diaryWrite', 'favorites', 'cinema', 'cinemaLog', 'memMgr', 'memEdit', 'bookPage', 'fpick', 'bookToc', 'apiPage'];
+const SCREENS = ['setup', 'list', 'chat', 'settings', 'setSub', 'files', 'import', 'diary', 'stickies', 'diaryWrite', 'favorites', 'cinema', 'cinemaLog', 'memMgr', 'memEdit', 'bookPage', 'fpick', 'bookToc', 'apiPage', 'tplPage'];
 function show(name) {
   const leavingChat = state.screen === 'chat' && name !== 'chat';
   SCREENS.forEach((s) => $(s).classList.toggle('active', s === name));
@@ -106,8 +106,8 @@ function overlayUp() {
 // close path (animated, swiped, future additions) converges without per-call-site bookkeeping.
 function syncAtRoot() { try { window.Android && Android.setAtRoot((state.screen === 'list' || state.screen === 'setup') && !overlayUp()); } catch (e) {} }
 setInterval(syncAtRoot, 300);
-const SCRIMS = ['permScrim', 'modelScrim', 'promptScrim', 'toolsScrim', 'modeScrim', 'sessScrim', 'folderScrim', 'claudeScrim', 'folderActScrim', 'pathActScrim', 'mcpScrim', 'mcpCfgScrim', 'memScrim', 'connScrim', 'wakeScrim', 'stickyScrim', 'compactScrim', 'confirmScrim', 'msgActScrim', 'tplScrim'];
-const DRAG_SCRIMS = ['modelScrim', 'toolsScrim', 'modeScrim', 'claudeScrim', 'mcpCfgScrim', 'compactScrim', 'tplScrim'];
+const SCRIMS = ['permScrim', 'modelScrim', 'promptScrim', 'toolsScrim', 'modeScrim', 'sessScrim', 'folderScrim', 'claudeScrim', 'folderActScrim', 'pathActScrim', 'mcpScrim', 'mcpCfgScrim', 'memScrim', 'connScrim', 'wakeScrim', 'stickyScrim', 'compactScrim', 'confirmScrim', 'msgActScrim'];
+const DRAG_SCRIMS = ['modelScrim', 'toolsScrim', 'modeScrim', 'claudeScrim', 'mcpCfgScrim', 'compactScrim'];
 function anyOverlay() { return SCRIMS.some((s) => $(s).classList.contains('show')) || $('menuPop').classList.contains('show'); }
 function openScrim(id) {
   const s = $(id); s._openedAt = Date.now(); s.classList.add('show'); if (s._open) s._open();
@@ -196,6 +196,7 @@ window.onAndroidBack = () => {
   if (state.screen === 'bookToc') { show('bookPage'); return; }
   if (state.screen === 'memEdit') { if (document.querySelector('.mepicker')) { closeMemTypePicker(); return; } show('memMgr'); return; }
   if (state.screen === 'memMgr') { show(state.currentSession ? 'chat' : 'list'); return; }
+  if (state.screen === 'tplPage') { show('setSub'); return; }
   if (state.screen === 'stickies') { show('diary'); return; }
   if (state.screen === 'diary') { diaryBack(); return; }
   if (state.screen === 'import') show(state.importReturn || 'files');
@@ -935,30 +936,33 @@ function rerenderThread() {
   const t = $('thread'); const atBot = t.scrollTop + t.clientHeight >= t.scrollHeight - 60;
   clearThread(); appendWindow(state.hist.items); if (atBot) scrollThread(true);
 }
-// ---- 消息模板编辑页（设置→对话→编辑消息模板）----
-function openMsgTemplate() { state.tplOpen = true; $('tplText').value = ''; $('tplPreview').textContent = '…'; wsend({ type: 'template_get' }); openScrim('tplScrim'); }
+// ---- 消息模板（设置→对话→消息模板，整页）----
+function openMsgTemplate() { $('tplText').value = ''; $('tplVars').innerHTML = ''; $('tplPreview').innerHTML = ''; show('tplPage'); wsend({ type: 'template_get' }); }
+function tplGrow() { const ta = $('tplText'); ta.style.height = 'auto'; ta.style.height = Math.max(120, ta.scrollHeight) + 'px'; }
 function onTemplate(m) {
   state.tplDef = m.def || ''; state.tplVars = m.vars || [];
-  if (m.saved) { toast('消息模板已保存'); if (state.tplOpen && !$('tplScrim').classList.contains('show')) return; }
-  if (!$('tplScrim').classList.contains('show')) return;
-  if (!m.saved || $('tplText').value.trim() === '') $('tplText').value = m.text || '';
+  if (m.saved) toast('消息模板已保存');
+  if (state.screen !== 'tplPage') return;
+  if (!m.saved) { $('tplText').value = m.text || ''; tplGrow(); }
   const box = $('tplVars'); box.innerHTML = '';
   (m.vars || []).forEach(([k, desc]) => {
-    const c = el('button', 'tplchip'); c.textContent = '{{' + k + '}}'; c.title = desc;
-    const sub = el('span', 'tplchip-d'); sub.textContent = desc; c.appendChild(sub);
-    c.addEventListener('click', () => { const ta = $('tplText'); const a = ta.selectionStart != null ? ta.selectionStart : ta.value.length, b = ta.selectionEnd != null ? ta.selectionEnd : a; ta.value = ta.value.slice(0, a) + '{{' + k + '}}' + ta.value.slice(b); ta.selectionStart = ta.selectionEnd = a + k.length + 4; ta.focus(); buzz(8); tplPreviewSoon(); });
+    const c = el('button', 'tplchip');
+    const d = el('span'); d.textContent = desc.replace(/（.*?）/g, ''); c.appendChild(d);
+    const kk = el('span', 'tplchip-k'); kk.textContent = '{{' + k + '}}'; c.appendChild(kk);
+    c.addEventListener('click', () => { const ta = $('tplText'); const a = ta.selectionStart != null ? ta.selectionStart : ta.value.length, b = ta.selectionEnd != null ? ta.selectionEnd : a; ta.value = ta.value.slice(0, a) + '{{' + k + '}}' + ta.value.slice(b); ta.selectionStart = ta.selectionEnd = a + k.length + 4; tplGrow(); ta.focus(); buzz(8); tplPreviewSoon(); });
     box.appendChild(c);
   });
   tplPreviewSoon();
 }
 function tplPreviewSoon() { clearTimeout(state._tplT); state._tplT = setTimeout(() => wsend({ type: 'template_preview', text: $('tplText').value, sessionId: state.currentSession || LS.lastSid || '' }), 350); }
 function renderTplPreview(m) {
+  if (state.screen !== 'tplPage') return;
   const box = $('tplPreview'); box.innerHTML = '';
-  const seg = (cls, label, text) => { const d = el('div', 'tplp ' + cls); const h = el('div', 'tplp-h'); h.textContent = label; d.appendChild(h); const b = el('div', 'tplp-b'); b.textContent = text; d.appendChild(b); box.appendChild(d); };
-  if (m.pre) seg('pre', '上面（隐藏块）', m.pre);
-  seg('msg', '你的话', '你好啊');
-  if (m.post) seg('post', '下面（注记）', m.post);
-  if (!m.pre && !m.post) seg('none', '', '（什么都不带，只有你的话）');
+  const seg = (cls, label, text) => { const d = el('div', 'tplp ' + cls); if (label) { const h = el('div', 'tplp-h'); h.textContent = label; d.appendChild(h); } const b = el('div', 'tplp-b'); b.textContent = text; d.appendChild(b); box.appendChild(d); };
+  if (m.pre) seg('pre', '上面', m.pre);
+  seg('msg', '', '你好啊');
+  if (m.post) seg('post', '下面', m.post);
+  if (!m.pre && !m.post) seg('none', '', '只有你的话，什么都不带');
 }
 function addThinking(text) { finalizeLive(); const d = el('div', 'thinking collapsed'); const inner = el('div', 'md'); inner.innerHTML = md(text); d.appendChild(inner); d.addEventListener('click', () => d.classList.toggle('collapsed')); rt().appendChild(d); scrollThreadAuto(); }
 
@@ -3312,7 +3316,7 @@ const SET_CATS = {
     { type: 'tzoff', key: 'timezone', name: 'cc 读到的时区', onChange: sendPresence },
     { type: 'button', name: '编辑压缩提示词', action: openCompactPrompt },
     { type: 'segment', key: 'viewMode', name: '注入显示', opts: [['strip', '剥离'], ['xray', '透视'], ['full', '全显']], onChange: rerenderThread },
-    { type: 'button', name: '编辑消息模板', action: openMsgTemplate }
+    { type: 'button', name: '消息模板', action: openMsgTemplate }
   ] },
   haptics: { name: '触感', items: [
     { type: 'toggle', key: 'haptics', name: '触感反馈（总开关）' },
@@ -4149,9 +4153,10 @@ function boot() {
   $('claudeSave').addEventListener('click', saveClaudeMd);
   $('claudePrev').addEventListener('click', () => setClaudePreview($('claudeView').style.display === 'none'));
   $('compactSave').addEventListener('click', () => { setPref('compactPrompt', $('compactText').value); closeScrim('compactScrim'); toast('压缩提示词已保存'); });
-  $('tplSave').addEventListener('click', () => { const t = $('tplText').value; if (!t.includes('{{message}}')) { toast('模板里必须有 {{message}}'); return; } wsend({ type: 'template_set', text: t }); closeScrim('tplScrim'); });
-  $('tplReset').addEventListener('click', () => { $('tplText').value = state.tplDef || ''; tplPreviewSoon(); buzz(12); });
-  $('tplText').addEventListener('input', tplPreviewSoon);
+  $('tplSave').addEventListener('click', () => { const t = $('tplText').value; if (!t.includes('{{message}}')) { toast('模板里必须有 {{message}}'); return; } wsend({ type: 'template_set', text: t }); show('setSub'); });
+  $('tplBack').addEventListener('click', () => show('setSub'));
+  $('tplReset').addEventListener('click', () => { $('tplText').value = state.tplDef || ''; tplGrow(); tplPreviewSoon(); buzz(12); });
+  $('tplText').addEventListener('input', () => { tplGrow(); tplPreviewSoon(); });
   $('mModel').addEventListener('click', () => { state.modelCtx = null; state.modelFam = ''; openModelSheet(); });
   $('mMood').addEventListener('click', toggleMood);
   $('mWake').addEventListener('click', () => { closeMenu(); if (state.currentSession) openWakeConfig(curSess()); });

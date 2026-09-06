@@ -197,18 +197,20 @@ input, textarea {
 .inj { font-size: 12.5px; color: var(--muted); line-height: 1.5; border-left: 2px solid var(--border); padding: 2px 0 2px 10px; margin: 4px 0 8px; white-space: pre-wrap; word-break: break-word; cursor: pointer; font-family: var(--mono); }
 .inj-h { font-size: 11px; opacity: .7; margin-bottom: 2px; font-family: inherit; }
 .inj.collapsed .inj-b { max-height: 3.2em; overflow: hidden; -webkit-mask-image: linear-gradient(180deg, #000 50%, transparent); mask-image: linear-gradient(180deg, #000 50%, transparent); }
-.msg.user .inj { text-align: left; max-width: 86%; margin-left: auto; }
+.msg.user { flex-wrap: wrap; }   /* 注入块要换到气泡下一行，别和气泡挤同一行（0906 把用户的话挤成竖条那个 bug） */
+.msg.user .inj { flex: 0 0 100%; box-sizing: border-box; text-align: left; margin: 4px 0 8px; }
 .inj-msg { margin: 8px 0; }
-/* 消息模板页 */
-.edita.tpl { font-family: var(--mono); font-size: 13.5px; line-height: 1.55; min-height: 220px; max-height: 44vh; overflow: auto; resize: vertical; white-space: pre-wrap; }
-.tplsec { font-size: 12px; color: var(--muted); margin: 14px 2px 6px; }
-.tplvars { display: flex; flex-wrap: wrap; gap: 6px; }
-.tplchip { border: 1px solid var(--border); background: var(--surface-2); color: var(--text); border-radius: 8px; padding: 5px 9px; font-family: var(--mono); font-size: 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
-.tplchip-d { font-family: var(--font, inherit); font-size: 10.5px; color: var(--muted); }
-.tplpreview { display: flex; flex-direction: column; gap: 8px; }
-.tplp { border-radius: 10px; padding: 8px 10px; background: var(--surface-2); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--muted); }
-.tplp.msg { background: var(--accent); color: #fff; align-self: flex-end; max-width: 80%; }
-.tplp-h { font-size: 10.5px; opacity: .7; margin-bottom: 3px; }
+/* 消息模板页（整页）：模板当正文排，变量一行一个小标签，预览像对话 */
+.tplpad { padding-top: 6px; }
+.tpltext { width: 100%; border: none; background: none; outline: none; resize: none; overflow: hidden; padding: 6px 0 10px; font-family: inherit; font-size: 15.5px; line-height: 1.7; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.tplsec { font-size: 12px; color: var(--muted); margin: 18px 0 8px; letter-spacing: .02em; }
+.tplvars { display: flex; flex-wrap: wrap; gap: 8px; }
+.tplchip { border: none; background: var(--surface-2); color: var(--text); border-radius: 999px; padding: 7px 12px; font-size: 13px; line-height: 1; display: inline-flex; align-items: center; gap: 6px; }
+.tplchip .tplchip-k { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.tplpreview { display: flex; flex-direction: column; gap: 10px; }
+.tplp { font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: var(--muted); }
+.tplp.msg { align-self: flex-end; max-width: 78%; background: var(--bubble-user, var(--surface-2)); color: var(--text); border-radius: 18px; padding: 9px 14px; }
+.tplp-h { font-size: 11px; opacity: .65; margin-bottom: 3px; }
 .tplp.msg .tplp-h { display: none; }
 .thinking.collapsed { max-height: 4.4em; overflow: hidden; -webkit-mask-image: linear-gradient(180deg, #000 55%, transparent); mask-image: linear-gradient(180deg, #000 55%, transparent); }
 .thinking .md { font-size: 14px; line-height: 1.5; }
