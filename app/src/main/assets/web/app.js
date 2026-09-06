@@ -257,6 +257,7 @@ const state = {
   pendingFiles: [], origin: '', dirMode: 'cwd',
   turns: new Map(), viewTurnId: null, // 并发对话：turn 状态每对话各记各的（turnId → tr），viewTurnId=当前对话屏正在直播的 turn
   drafts: {}, draftKey: null,         // 输入框草稿也各记各的（sessionId / '~new' → {text,files,texts}）
+  localDrafts: {},                    // 还没上传的附件（File 对象）只能留在内存里，按同一把 key 各归各家
   searchActive: false, plusOpen: false, plusH: 0,
   prefs: {}, pendingTexts: [], setCat: null,
   discActive: false, discCollapsed: false, discRaf: null, discT0: 0, discShowTimer: null,
@@ -297,7 +298,9 @@ function saveDraft() {
   if (state.editTarget) return; // 编辑中的文本是编辑缓冲，不算草稿（进入编辑那刻草稿已存好）
   const text = $('composer').value;
   const files = state.pendingFiles.filter((f) => f.status === 'ready');
+  const local = state.pendingFiles.filter((f) => f.status !== 'ready');   // 没传的（含传到一半的）留内存
   const texts = state.pendingTexts;
+  if (local.length) state.localDrafts[k] = local; else delete state.localDrafts[k];
   if (!text.trim() && !files.length && !texts.length) { if (state.drafts[k]) { delete state.drafts[k]; persistDrafts(); } return; }
   state.drafts[k] = { text, files, texts, ts: Date.now() };
   persistDrafts();
@@ -306,7 +309,8 @@ function loadDraft(k) {
   state.draftKey = k || '~new';
   const d = state.drafts[state.draftKey] || {};
   $('composer').value = d.text || '';
-  state.pendingFiles = (d.files || []).slice();
+  const local = state.localDrafts[state.draftKey] || [];
+  state.pendingFiles = (d.files || []).filter((f) => !local.some((l) => l.path && l.path === f.path)).concat(local);
   state.pendingTexts = (d.texts || []).slice();
   renderAttachStrip(); resizeComposer(); updateSend();
 }
@@ -421,6 +425,34 @@ window.__openConv = function (sid) {
   const go = () => { const s = (state.sessions || []).find((x) => x.id === sid) || { id: sid, title: '', cwd: '' }; openSession(s); };
   if (state.authed) { go(); return; }
   let n = 0; const t = setInterval(() => { if (state.authed || n++ > 50) { clearInterval(t); if (state.authed) go(); } }, 150);
+};
+
+// 系统分享进来的文件/文字（原生壳 handleShareIntent → 这里）：落到当前对话、不在对话里就打开上一个对话，
+// 文件先挂附件条本地预览，发送时才上传。文件本体经原生壳的 share.telos.local 假域取回（见 MainActivity）
+window.__onShared = function (json) {
+  let p; try { p = typeof json === 'string' ? JSON.parse(json) : json; } catch (e) { return; }
+  if (!p || (!(p.files || []).length && !p.text)) return;
+  const go = () => {
+    if (state.screen !== 'chat') {
+      const sid = LS.lastSid;
+      const s = (state.sessions || []).find((x) => x.id === sid) || (state.sessions || [])[0];
+      if (!s) { toast('还没有对话，先建一个再分享'); return; }
+      openSession(s);
+    }
+    if (p.text) { const c = $('composer'); c.value = (c.value ? c.value + '\n' : '') + p.text; resizeComposer(); updateSend(); draftDirty(); }
+    (p.files || []).forEach((f) => {
+      fetch('https://share.telos.local/' + encodeURIComponent(f.id) + '?mime=' + encodeURIComponent(f.mime || ''))
+        .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+        .then((b) => {
+          attachLocal([new File([b], f.name || '分享文件', { type: f.mime || b.type || '' })]);
+          try { window.Android && Android.shareDone && Android.shareDone(f.id); } catch (e) {}
+        })
+        .catch((e) => toast('接收分享失败：' + e.message));
+    });
+    buzz(12);
+  };
+  if (state.authed && (state.sessions || []).length) { go(); return; }
+  let n = 0; const t = setInterval(() => { if ((state.authed && (state.sessions || []).length) || n++ > 60) { clearInterval(t); if (state.authed) go(); } }, 150);
 };
 
 /* splash: hide once the app is ready (list rendered / setup shown), with a min on-screen time */
@@ -1672,16 +1704,35 @@ function uploadOne(file, dir, onProg) {
     xhr.send(file);
   });
 }
-// quick upload from the + panel / paste: progress shown in the attach strip, auto-attach.
+// 选/贴/分享进来的文件先只挂在附件条上（本地预览），真正点发送时才上传（用户 0906 定）
 // dir 留空 = 服务端统一归档进上传文件夹（telos-uploads），不再散落在各会话 cwd
-function quickUpload(fileList) {
-  const dir = '';
+function attachLocal(fileList) {
   Array.from(fileList || []).forEach((file) => {
-    const item = { name: file.name, isImage: (file.type || '').startsWith('image/') || isImagePath(file.name), status: 'uploading', pct: 0, speed: 0 };
-    state.pendingFiles.push(item); renderAttachStrip(); updateSend();
-    uploadOne(file, dir, (pct, sp) => { item.pct = pct; item.speed = sp; renderAttachStrip(); })
-      .then((r) => { item.status = 'ready'; item.path = r.path; item.name = r.name || item.name; if (item.isImage && r.path) item.url = mediaUrlC(r.path); renderAttachStrip(); updateSend(); })
-      .catch((e) => { const i = state.pendingFiles.indexOf(item); if (i >= 0) state.pendingFiles.splice(i, 1); renderAttachStrip(); updateSend(); toast('上传失败：' + e.message); });
+    const isImage = (file.type || '').startsWith('image/') || isImagePath(file.name);
+    state.pendingFiles.push({ name: file.name, isImage, status: 'local', file, url: isImage ? URL.createObjectURL(file) : '' });
+  });
+  renderAttachStrip(); updateSend(); draftDirty();
+}
+// 发送那一刻把附件条里还没传的全传上去；全成功 → true。中途切走了对话就不代发：传好的挂回那个对话的草稿等她回来
+function uploadPending() {
+  const key = state.draftKey;
+  const locals = state.pendingFiles.filter((f) => f.status === 'local');
+  if (!locals.length) return Promise.resolve(true);
+  locals.forEach((it) => { it.status = 'uploading'; it.pct = 0; it.speed = 0; });
+  renderAttachStrip(); updateSend();
+  return Promise.all(locals.map((item) => uploadOne(item.file, '', (pct, sp) => { item.pct = pct; item.speed = sp; renderAttachStrip(); })
+    .then((r) => {
+      item.status = 'ready'; item.path = r.path; item.name = r.name || item.name; delete item.file; delete item.err;
+      if (item.url) { try { URL.revokeObjectURL(item.url); } catch (e) {} }
+      item.url = item.isImage && r.path ? mediaUrlC(r.path) : '';
+    })
+    .catch((e) => { item.status = 'local'; item.err = e.message; })
+  )).then(() => {
+    const failed = locals.filter((f) => f.status === 'local');
+    renderAttachStrip(); updateSend(); saveDraft();
+    if (state.draftKey !== key) { toast('文件传好了，回到那个对话再发'); return false; }
+    if (failed.length) { toast('上传失败：' + (failed[0].err || '') + '，再点一次发送重试'); return false; }
+    return true;
   });
 }
 // manager upload: into the folder you're viewing, progress in #fmProgress, refresh listing
@@ -3860,6 +3911,8 @@ function sendMessage() {
     return;
   }
   if (state.pendingFiles.some((f) => f.status === 'uploading')) { toast('还有文件在上传…'); return; }
+  // 附件条里还有没传的 → 现在传，传完自动接着发（编辑模式不带附件，照旧忽略）
+  if (!state.editTarget && state.pendingFiles.some((f) => f.status === 'local')) { uploadPending().then((ok) => { if (ok) sendMessage(); }); return; }
   const c = $('composer'); let text = c.value.trim();
   // 「编辑中」模式：发送 = 从那条消息 fork 重跑（同文重发=从那里重新生成）
   if (state.editTarget) {
@@ -3906,12 +3959,18 @@ function sendMessage() {
 function renderAttachStrip() {
   const strip = $('attachStrip'); strip.innerHTML = '';
   state.pendingFiles.forEach((p, i) => {
-    const rm = () => { state.pendingFiles.splice(i, 1); renderAttachStrip(); updateSend(); };
-    if (p.isImage && p.url && p.status === 'ready') {
+    const rm = () => { if (p.status === 'local' && p.url) { try { URL.revokeObjectURL(p.url); } catch (e) {} } state.pendingFiles.splice(i, 1); renderAttachStrip(); updateSend(); draftDirty(); };
+    if (p.isImage && p.url && p.status !== 'uploading') {
       const t = el('div', 'athumb');
       const img = el('img'); img.src = p.url; t.appendChild(img);
       const x = el('button', 'athumb-x'); x.textContent = '×'; x.addEventListener('click', rm);
       t.appendChild(x); strip.appendChild(t); return;
+    }
+    if (p.isImage && p.url && p.status === 'uploading') {
+      const t = el('div', 'athumb');
+      const img = el('img'); img.src = p.url; t.appendChild(img);
+      const pc = el('div', 'athumb-pct'); pc.textContent = ((p.pct * 100) | 0) + '%'; t.appendChild(pc);
+      strip.appendChild(t); return;
     }
     const t = el('div', 'atfile' + (p.status === 'uploading' ? ' up' : ''));
     t.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>';
@@ -4063,7 +4122,7 @@ function boot() {
 
   $('plusBtn').addEventListener('click', togglePlus);
   $('atUpload').addEventListener('click', () => { closePlus(); $('fileUp').click(); });
-  $('fileUp').addEventListener('change', (e) => { quickUpload(e.target.files); e.target.value = ''; });
+  $('fileUp').addEventListener('change', (e) => { attachLocal(e.target.files); e.target.value = ''; });
   $('atFileMgr').addEventListener('click', () => { closePlus(); openFileManager('attach'); });
   $('fileUpMgr').addEventListener('change', (e) => { managerUpload(e.target.files); e.target.value = ''; });
   $('drFiles').addEventListener('click', () => { closeDrawer(); openFileManager('browse'); });
@@ -4139,14 +4198,14 @@ function boot() {
     if (ta === c) resizeComposer();
     renderAttachStrip(); updateSend(); buzz(12); toast('长文已收起（' + txt.length + ' 字），发送时存为文件');
   };
-  // 粘贴图片/文件 → 直接挂到输入框（附件条），发送时随消息一起带上
+  // 粘贴图片/文件 → 直接挂到输入框（附件条）先预览，发送时才上传、随消息一起带上
   const handleFilePaste = (e) => {
     const items = (e.clipboardData && e.clipboardData.items) || [];
     const fs = [];
     for (const it of items) { if (it.kind === 'file') { const f = it.getAsFile(); if (f) fs.push(f); } }
     if (!fs.length) return false;
     e.preventDefault();
-    quickUpload(fs.map((f, i) => {
+    attachLocal(fs.map((f, i) => {
       // 剪贴板图片默认叫 image.png——起个带时间的名，翻上传文件夹时认得出
       if (f.name && !/^image\.\w+$/i.test(f.name)) return f;
       const d = new Date(), p2 = (n) => String(n).padStart(2, '0');

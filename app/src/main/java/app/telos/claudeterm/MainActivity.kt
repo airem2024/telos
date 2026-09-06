@@ -24,6 +24,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
+import android.webkit.WebResourceResponse
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -31,6 +32,7 @@ import android.webkit.WebViewClient
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.PowerManager
+import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -39,6 +41,12 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileInputStream
+import java.util.UUID
 
 /**
  * Thin native shell. Loads the chat UI from the cc-bridge server (bundled copy as
@@ -53,6 +61,9 @@ class MainActivity : AppCompatActivity() {
     private var usedFallback = false
     @Volatile private var pageLoaded = false
     private var pendingConv: String? = null
+    // 系统分享进来的东西（已拷进 cacheDir/share/），等页面就绪后交给 window.__onShared
+    private val pendingShare = ArrayList<String>()
+    private val shareDir: File get() = File(cacheDir, "share")
     private val notifPerm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
@@ -79,6 +90,8 @@ class MainActivity : AppCompatActivity() {
         // set REMOTE_URL via CI (repo variable TELOS_REMOTE_URL) or local.properties (telos.remoteUrl).
         private val REMOTE_URL = BuildConfig.REMOTE_URL
         private const val BUNDLED_URL = "file:///android_asset/web/index.html"
+        // 页面取分享文件用的假域（shouldInterceptRequest 截下来从 cacheDir/share/ 读），不走网络
+        private const val SHARE_HOST = "share.telos.local"
         // host that stays inside the WebView (so tapped chat links open in the browser, not in-app)
         private val REMOTE_HOST: String? = try {
             if (REMOTE_URL.isNotBlank()) Uri.parse(REMOTE_URL).host?.lowercase() else null
@@ -134,6 +147,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 页面启动时拉真实顶部 inset（dp）；还没量到（首帧前）返回 -1，页面沿用 env() 兜底
+        // 页面把分享文件读走后叫一声，缓存就删（没叫到的由启动时的过期清扫兜底）
+        @JavascriptInterface
+        fun shareDone(id: String) {
+            if (id.matches(Regex("[0-9a-f-]{36}"))) try { File(shareDir, id).delete() } catch (e: Exception) {}
+        }
+
         @JavascriptInterface
         fun insetTop(): Float = if (safeTopPx < 0) -1f else safeTopPx / resources.displayMetrics.density
 
@@ -261,7 +280,21 @@ class MainActivity : AppCompatActivity() {
             override fun onReceivedError(v: WebView, req: WebResourceRequest, err: WebResourceError) {
                 if (req.isForMainFrame && !usedFallback) { usedFallback = true; v.loadUrl(BUNDLED_URL) }
             }
-            override fun onPageFinished(v: WebView, url: String) { pageLoaded = true; flushConv() }
+            // https://share.telos.local/<id>?mime=… → 直接喂 cacheDir/share/<id>。带 CORS 头，
+            // 远程 UI（https 源）和 bundled UI（file:// 源）都能 fetch 到
+            override fun shouldInterceptRequest(v: WebView, req: WebResourceRequest): WebResourceResponse? {
+                val u = req.url
+                if (u.host?.lowercase() != SHARE_HOST) return null
+                val hdr = mapOf("Access-Control-Allow-Origin" to "*", "Cache-Control" to "no-store")
+                val id = u.lastPathSegment ?: ""
+                val f = File(shareDir, id)
+                if (!id.matches(Regex("[0-9a-f-]{36}")) || !f.isFile)
+                    return WebResourceResponse("text/plain", "utf-8", 404, "Not Found", hdr, ByteArrayInputStream(ByteArray(0)))
+                val mime = u.getQueryParameter("mime")?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+                return try { WebResourceResponse(mime, null, 200, "OK", hdr, FileInputStream(f)) }
+                catch (e: Exception) { WebResourceResponse("text/plain", "utf-8", 500, "Error", hdr, ByteArrayInputStream(ByteArray(0))) }
+            }
+            override fun onPageFinished(v: WebView, url: String) { pageLoaded = true; flushConv(); flushShare() }
         }
         web.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(
@@ -298,6 +331,8 @@ class MainActivity : AppCompatActivity() {
         web.loadUrl(if (REMOTE_URL.isNotBlank()) REMOTE_URL else BUNDLED_URL)
 
         handleConvIntent(intent)
+        handleShareIntent(intent)
+        Thread { try { shareDir.listFiles()?.forEach { if (System.currentTimeMillis() - it.lastModified() > 24L * 3600 * 1000) it.delete() } } catch (e: Exception) {} }.start()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -312,7 +347,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() { super.onResume(); AppState.foreground = true }
     override fun onPause() { super.onPause(); AppState.foreground = false }
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); handleConvIntent(intent) }
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); handleConvIntent(intent); handleShareIntent(intent) }
 
     // a tapped wake notification carries the conversation id → open it once the page is ready
     private fun handleConvIntent(intent: Intent?) {
@@ -324,6 +359,60 @@ class MainActivity : AppCompatActivity() {
         if (!pageLoaded) return
         pendingConv = null
         web.post { web.evaluateJavascript("window.__openConv && window.__openConv('" + sid.replace("'", "") + "')", null) }
+    }
+    // 系统分享（ACTION_SEND / SEND_MULTIPLE）：把 content:// 拷进 cacheDir/share/<uuid>（分享方给的读权限
+    // 是临时的，不拷就没了），连同文字一起打包成 JSON 交给页面。拷贝在后台线程做，大视频也不卡 UI
+    private fun handleShareIntent(intent: Intent?) {
+        val act = intent?.action ?: return
+        if (act != Intent.ACTION_SEND && act != Intent.ACTION_SEND_MULTIPLE) return
+        val uris = ArrayList<Uri>()
+        try {
+            if (act == Intent.ACTION_SEND) {
+                @Suppress("DEPRECATION")
+                val u: Uri? = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java) else intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                if (u != null) uris.add(u)
+            } else {
+                @Suppress("DEPRECATION")
+                val l: ArrayList<Uri>? = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java) else intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                if (l != null) uris.addAll(l.filterNotNull())
+            }
+        } catch (e: Exception) {}
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
+        // 用掉就作废，免得同一个 intent 再被处理一遍
+        intent.action = Intent.ACTION_MAIN; intent.removeExtra(Intent.EXTRA_STREAM); intent.removeExtra(Intent.EXTRA_TEXT)
+        if (uris.isEmpty() && text.isBlank()) return
+        Thread {
+            val files = JSONArray()
+            for (u in uris) copyShared(u)?.let { files.put(it) }
+            if (files.length() == 0 && text.isBlank()) {
+                runOnUiThread { Toast.makeText(this, "分享的文件读不到", Toast.LENGTH_SHORT).show() }
+                return@Thread
+            }
+            val payload = JSONObject().put("files", files).put("text", text).toString()
+            runOnUiThread { pendingShare.add(payload); flushShare() }
+        }.start()
+    }
+    private fun copyShared(u: Uri): JSONObject? {
+        return try {
+            var name = u.lastPathSegment?.substringAfterLast('/') ?: "share"
+            try {
+                contentResolver.query(u, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                    if (c.moveToFirst()) c.getString(0)?.takeIf { it.isNotBlank() }?.let { name = it }
+                }
+            } catch (e: Exception) {}
+            val mime = contentResolver.getType(u) ?: ""
+            val id = UUID.randomUUID().toString()
+            shareDir.mkdirs()
+            val out = File(shareDir, id)
+            var size = 0L
+            contentResolver.openInputStream(u)?.use { ins -> out.outputStream().use { size = ins.copyTo(it) } } ?: return null
+            JSONObject().put("id", id).put("name", name).put("mime", mime).put("size", size)
+        } catch (e: Exception) { null }
+    }
+    private fun flushShare() {
+        if (!pageLoaded || pendingShare.isEmpty()) return
+        val items = ArrayList(pendingShare); pendingShare.clear()
+        web.post { for (p in items) web.evaluateJavascript("window.__onShared && window.__onShared(" + JSONObject.quote(p) + ")", null) }
     }
     private fun startNotify() {
         try {
